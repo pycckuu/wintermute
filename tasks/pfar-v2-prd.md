@@ -5,23 +5,24 @@
 ## Progress
 
 - [x] Phase 0: Repository setup from template
+- [x] Phase 1: Kernel Core (73 tests passing — 66 unit + 7 integration)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
 Goal: Working kernel that receives events, matches templates, enforces policies.
 
-- [ ] 1.1 Core types: Principal, SecurityLabel, TaintSet, CapabilityToken, Task
-- [ ] 1.2 Event router (accepts test events via CLI adapter)
-- [ ] 1.3 Principal resolution
-- [ ] 1.4 Policy Engine: label assignment, propagation, No Read Up, No Write Down
-- [ ] 1.5 Policy Engine: taint checking (graduated rules)
-- [ ] 1.6 Policy Engine: capability token generation and validation
-- [ ] 1.7 Task template engine (load TOML, match triggers, validate plans)
-- [ ] 1.8 Vault abstraction (OS keychain for master key, SQLCipher for three DBs)
-- [ ] 1.9 Inference proxy (HTTP to Ollama on localhost)
-- [ ] 1.10 Audit logger (structured JSON)
-- [ ] 1.11 Unit tests for all Policy Engine functions
-- [ ] 1.12 Integration test: CLI event -> template match -> mock plan -> mock execute -> response
+- [x] 1.1 Core types: Principal, SecurityLabel, TaintSet, CapabilityToken, Task
+- [x] 1.2 Event router (accepts test events via CLI adapter)
+- [x] 1.3 Principal resolution
+- [x] 1.4 Policy Engine: label assignment, propagation, No Read Up, No Write Down
+- [x] 1.5 Policy Engine: taint checking (graduated rules)
+- [x] 1.6 Policy Engine: capability token generation and validation
+- [x] 1.7 Task template engine (load TOML, match triggers, validate plans)
+- [x] 1.8 Vault abstraction (OS keychain for master key, SQLCipher for three DBs)
+- [x] 1.9 Inference proxy (HTTP to Ollama on localhost)
+- [x] 1.10 Audit logger (structured JSON)
+- [x] 1.11 Unit tests for all Policy Engine functions
+- [x] 1.12 Integration test: CLI event -> template match -> mock plan -> mock execute -> response
 
 ## Phase 2: Telegram + Pipeline + First Tools (weeks 4-5)
 

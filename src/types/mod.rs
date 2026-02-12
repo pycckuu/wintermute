@@ -27,6 +27,7 @@ pub enum Principal {
 
 /// Principal trust class (spec 4.1 table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrincipalClass {
     /// System-level scheduled jobs.
     Cron,
@@ -42,6 +43,7 @@ pub enum PrincipalClass {
 
 /// Security levels ordered lowest to highest (spec 4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SecurityLabel {
     /// From the open internet.
     Public,
