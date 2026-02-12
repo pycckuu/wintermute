@@ -265,8 +265,7 @@ fn resolve_owner_inference_config() -> InferenceConfig {
             owner_acknowledged_cloud_risk: true,
         }
     } else if std::env::var("PFAR_OPENAI_API_KEY").is_ok() {
-        let model = std::env::var("PFAR_OPENAI_MODEL")
-            .unwrap_or_else(|_| "gpt-4o".to_string());
+        let model = std::env::var("PFAR_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
         info!(model = %model, "owner templates will use OpenAI provider");
         InferenceConfig {
             provider: "openai".to_string(),
@@ -274,8 +273,8 @@ fn resolve_owner_inference_config() -> InferenceConfig {
             owner_acknowledged_cloud_risk: true,
         }
     } else if std::env::var("PFAR_LMSTUDIO_URL").is_ok() {
-        let model = std::env::var("PFAR_LMSTUDIO_MODEL")
-            .unwrap_or_else(|_| "deepseek-r1".to_string());
+        let model =
+            std::env::var("PFAR_LMSTUDIO_MODEL").unwrap_or_else(|_| "deepseek-r1".to_string());
         info!(model = %model, "owner templates will use LM Studio provider");
         InferenceConfig {
             provider: "lmstudio".to_string(),
@@ -285,8 +284,7 @@ fn resolve_owner_inference_config() -> InferenceConfig {
     } else {
         InferenceConfig {
             provider: "local".to_string(),
-            model: std::env::var("PFAR_LOCAL_MODEL")
-                .unwrap_or_else(|_| "llama3".to_string()),
+            model: std::env::var("PFAR_LOCAL_MODEL").unwrap_or_else(|_| "llama3".to_string()),
             owner_acknowledged_cloud_risk: false,
         }
     }
