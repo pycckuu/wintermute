@@ -1,6 +1,6 @@
 ---
-name: implement-task
-description: Orchestrate the full development lifecycle for a PFAR task — from spec reading to PR creation.
+name: implement-pfar-task
+description: Orchestrate the PFAR development lifecycle for a task — from spec reading to PR creation.
 ---
 
 # Implement Task: $ARGUMENTS

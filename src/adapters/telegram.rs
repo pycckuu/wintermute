@@ -4,6 +4,7 @@
 //! [`InboundEvent`]s, and sends outbound messages via `sendMessage`.
 //! Inline keyboards support the approval queue (spec 6.6).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -13,6 +14,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::kernel::journal::TaskJournal;
 use crate::types::{EventKind, EventPayload, EventSource, InboundEvent, Principal};
 
 // ---------------------------------------------------------------------------
@@ -184,14 +186,17 @@ const POLL_TIMEOUT_MARGIN_SECS: u64 = 10;
 pub struct TelegramAdapter {
     config: TelegramConfig,
     client: reqwest::Client,
+    /// Optional task journal for persisting adapter state (spec 8.2).
+    journal: Option<Arc<TaskJournal>>,
 }
 
 impl TelegramAdapter {
     /// Create a new Telegram adapter (spec 6.9).
-    pub fn new(config: TelegramConfig) -> Self {
+    pub fn new(config: TelegramConfig, journal: Option<Arc<TaskJournal>>) -> Self {
         Self {
             config,
             client: reqwest::Client::new(),
+            journal,
         }
     }
 
@@ -243,7 +248,12 @@ impl TelegramAdapter {
         &self,
         to_kernel: &mpsc::Sender<AdapterToKernel>,
     ) -> Result<(), AdapterError> {
-        let mut offset: Option<i64> = None;
+        // Load persisted offset from journal if available (spec 8.2).
+        let mut offset: Option<i64> = self.load_persisted_offset();
+        if let Some(off) = offset {
+            info!(offset = off, "restored Telegram offset from journal");
+        }
+
         let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
 
         loop {
@@ -267,6 +277,9 @@ impl TelegramAdapter {
                             }
                         }
                     }
+
+                    // Persist offset after each successful batch (best-effort).
+                    self.persist_offset(offset);
                 }
                 Err(e) => {
                     warn!(
@@ -277,6 +290,38 @@ impl TelegramAdapter {
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     backoff_ms = backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS);
                 }
+            }
+        }
+    }
+
+    /// Load the last persisted Telegram offset from the journal.
+    fn load_persisted_offset(&self) -> Option<i64> {
+        let journal = self.journal.as_ref()?;
+        match journal.load_adapter_state("telegram") {
+            Ok(Some(json_str)) => {
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
+                match parsed {
+                    Ok(val) => val.get("last_offset").and_then(|v| v.as_i64()),
+                    Err(e) => {
+                        warn!(error = %e, "failed to parse persisted Telegram offset");
+                        None
+                    }
+                }
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(error = %e, "failed to load Telegram adapter state from journal");
+                None
+            }
+        }
+    }
+
+    /// Persist the current Telegram offset to the journal (best-effort).
+    fn persist_offset(&self, offset: Option<i64>) {
+        if let (Some(journal), Some(off)) = (self.journal.as_ref(), offset) {
+            let json = serde_json::json!({"last_offset": off}).to_string();
+            if let Err(e) = journal.save_adapter_state("telegram", &json) {
+                warn!(error = %e, "failed to persist Telegram offset (best-effort)");
             }
         }
     }
@@ -533,7 +578,7 @@ mod tests {
     }
 
     fn make_adapter() -> TelegramAdapter {
-        TelegramAdapter::new(test_config())
+        TelegramAdapter::new(test_config(), None)
     }
 
     // -- resolve_principal --
@@ -812,5 +857,62 @@ mod tests {
             approval_id: Uuid::new_v4(),
         };
         let _shutdown = KernelToAdapter::Shutdown;
+    }
+
+    // -- journal persistence (Task 5) --
+
+    use crate::kernel::journal::TaskJournal;
+
+    #[test]
+    fn persist_offset_roundtrip() {
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("in-memory journal"));
+        let adapter = TelegramAdapter::new(test_config(), Some(Arc::clone(&journal)));
+
+        // Initially no persisted offset.
+        assert!(adapter.load_persisted_offset().is_none());
+
+        // Persist an offset and read it back.
+        adapter.persist_offset(Some(42));
+        assert_eq!(adapter.load_persisted_offset(), Some(42));
+
+        // Update to a higher offset.
+        adapter.persist_offset(Some(100));
+        assert_eq!(adapter.load_persisted_offset(), Some(100));
+    }
+
+    #[test]
+    fn load_persisted_offset_on_new_adapter() {
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("in-memory journal"));
+
+        // First adapter persists an offset.
+        let adapter1 = TelegramAdapter::new(test_config(), Some(Arc::clone(&journal)));
+        adapter1.persist_offset(Some(55));
+
+        // Second adapter (simulating restart) loads the same offset.
+        let adapter2 = TelegramAdapter::new(test_config(), Some(Arc::clone(&journal)));
+        assert_eq!(adapter2.load_persisted_offset(), Some(55));
+    }
+
+    #[test]
+    fn none_journal_no_persistence() {
+        let adapter = TelegramAdapter::new(test_config(), None);
+
+        // No journal — persist is a no-op, load returns None.
+        adapter.persist_offset(Some(10));
+        assert!(adapter.load_persisted_offset().is_none());
+    }
+
+    #[test]
+    fn persist_none_offset_is_noop() {
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("in-memory journal"));
+        let adapter = TelegramAdapter::new(test_config(), Some(Arc::clone(&journal)));
+
+        // Persist a real offset first.
+        adapter.persist_offset(Some(77));
+        assert_eq!(adapter.load_persisted_offset(), Some(77));
+
+        // Persisting None offset should not overwrite the existing value.
+        adapter.persist_offset(None);
+        assert_eq!(adapter.load_persisted_offset(), Some(77));
     }
 }

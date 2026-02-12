@@ -7,6 +7,7 @@
 - [x] Phase 0: Repository setup from template
 - [x] Phase 1: Kernel Core (73 tests passing — 66 unit + 7 integration)
 - [x] Phase 2: Telegram + Pipeline + First Tools (274 tests — 248 unit + 7 integration + 19 regression)
+- [x] Feature: Persistence & Recovery (362 tests — 324 unit + 7 integration + 31 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -47,6 +48,21 @@ Goal: End-to-end flow: Telegram message -> extract -> plan -> execute -> synthes
 - [x] 2.11b-F4 kernel/mod.rs: cleanup module declarations
 - [ ] 2.11b Approval queue Telegram inline button integration
 - [x] 2.12 Regression tests: 1, 2, 4, 5, 7, 8, 9, 13, 16, 17 (19 tests)
+
+## Feature: Persistence & Recovery
+
+Goal: SQLite-backed task journaling, recovery logic, graceful shutdown, adapter state persistence.
+Spec: `docs/pfar-feature-persistence-recovery.md`
+
+- [x] P.1 TaskJournal module with SQLite schema (30 tests)
+- [x] P.2 Integrate journal writes into Pipeline (6 tests)
+- [x] P.3 Executor step-by-step journal writes (3 tests)
+- [x] P.4 Recovery logic module (12 tests)
+- [x] P.5 Telegram adapter state persistence (4 tests)
+- [x] P.6 Graceful shutdown — audit events + signal handling (2 tests)
+- [x] P.7 Startup integration and owner notification — journal wiring, recovery, cleanup
+- [x] P.8 Regression tests R1-R12 (12 tests)
+- [x] P.9 Session persistence — conversation history + working memory survive restarts (15 tests)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

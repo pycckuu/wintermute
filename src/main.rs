@@ -6,6 +6,7 @@
 //! mandatory access control via the Policy Engine, and orchestrates
 //! the Plan-Then-Execute pipeline.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,8 +20,10 @@ use pfar::kernel::audit::AuditLogger;
 use pfar::kernel::egress::EgressValidator;
 use pfar::kernel::executor::PlanExecutor;
 use pfar::kernel::inference::InferenceProxy;
+use pfar::kernel::journal::TaskJournal;
 use pfar::kernel::pipeline::Pipeline;
 use pfar::kernel::policy::PolicyEngine;
+use pfar::kernel::recovery;
 use pfar::kernel::router::EventRouter;
 use pfar::kernel::session::SessionStore;
 use pfar::kernel::template::{InferenceConfig, TaskTemplate, TemplateRegistry};
@@ -44,6 +47,21 @@ const DEFAULT_AUDIT_LOG_PATH: &str = "/tmp/pfar-audit.jsonl";
 
 /// Default approval timeout in seconds (spec 18.1).
 const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
+
+/// Default graceful shutdown timeout in seconds (spec 9).
+const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
+/// Default journal database path (feature-persistence-recovery).
+const DEFAULT_JOURNAL_PATH: &str = "/tmp/pfar-journal.db";
+
+/// Default max age for task recovery in seconds (feature-persistence-recovery).
+const DEFAULT_RECOVERY_MAX_AGE_SECS: u64 = 600;
+
+/// Completed task journal retention (24 hours).
+const JOURNAL_RETENTION_COMPLETED_SECS: u64 = 24 * 3600;
+
+/// Failed/abandoned task journal retention (7 days).
+const JOURNAL_RETENTION_FAILED_SECS: u64 = 7 * 24 * 3600;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -77,12 +95,71 @@ async fn main() -> Result<()> {
     let tools = Arc::new(create_tool_registry());
 
     // Initialize session store (spec 9.1).
-    let sessions = Arc::new(RwLock::new(SessionStore::new()));
+    // Sessions are populated from journal after it's opened (below).
 
     // Initialize audit logger (spec 6.7).
     let audit_path =
         std::env::var("PFAR_AUDIT_LOG").unwrap_or_else(|_| DEFAULT_AUDIT_LOG_PATH.to_string());
     let audit = Arc::new(AuditLogger::new(&audit_path).context("failed to create audit logger")?);
+
+    // Log system startup (feature-persistence-recovery).
+    if let Err(e) = audit.log_system_startup(env!("CARGO_PKG_VERSION")) {
+        warn!(error = %e, "failed to log startup audit event");
+    }
+
+    // Open task journal (feature-persistence-recovery).
+    let journal_path =
+        std::env::var("PFAR_JOURNAL_PATH").unwrap_or_else(|_| DEFAULT_JOURNAL_PATH.to_string());
+    let journal =
+        Arc::new(TaskJournal::open(&journal_path).context("failed to open task journal")?);
+    info!(path = %journal_path, "task journal opened");
+
+    // Run recovery on incomplete tasks (feature-persistence-recovery §7).
+    let recovery_max_age_secs: u64 = std::env::var("PFAR_RECOVERY_MAX_AGE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_RECOVERY_MAX_AGE_SECS);
+    let recovery_max_age_i64 = i64::try_from(recovery_max_age_secs).unwrap_or(i64::MAX);
+    let recovery_report =
+        recovery::recover_tasks(&journal, chrono::Duration::seconds(recovery_max_age_i64));
+    match &recovery_report {
+        Ok(report) => {
+            if report.is_clean() {
+                info!("clean startup -- no pending tasks to recover");
+            } else {
+                info!(
+                    retried = report.retried.len(),
+                    resumed = report.resumed.len(),
+                    reprompted = report.reprompted.len(),
+                    abandoned = report.abandoned.len(),
+                    "recovery completed"
+                );
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "recovery failed (non-fatal)");
+        }
+    }
+
+    // Cleanup old journal entries (feature-persistence-recovery §4.4).
+    let completed_retention = Duration::from_secs(JOURNAL_RETENTION_COMPLETED_SECS);
+    let failed_retention = Duration::from_secs(JOURNAL_RETENTION_FAILED_SECS);
+    match journal.cleanup_old_tasks(completed_retention, failed_retention) {
+        Ok(cleaned) if cleaned > 0 => info!(count = cleaned, "cleaned up old journal entries"),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "journal cleanup failed (non-fatal)"),
+    }
+
+    // Load persisted session data from journal (spec 9.1, 9.2).
+    let sessions = {
+        let mut store = SessionStore::new();
+        match store.load_from_journal(&journal) {
+            Ok(0) => info!("no persisted session data found"),
+            Ok(count) => info!(entries = count, "loaded persisted session data"),
+            Err(e) => warn!(error = %e, "failed to load session data (non-fatal)"),
+        }
+        Arc::new(RwLock::new(store))
+    };
 
     // Initialize approval queue (spec 6.6).
     let _approval_queue = Arc::new(tokio::sync::Mutex::new(ApprovalQueue::new(
@@ -109,6 +186,7 @@ async fn main() -> Result<()> {
         egress,
         Arc::clone(&tools),
         Arc::clone(&audit),
+        Some(Arc::clone(&journal)),
     );
 
     // Build event router (spec 6.1).
@@ -125,7 +203,18 @@ async fn main() -> Result<()> {
 
     if let Some(token) = bot_token {
         info!("starting Telegram adapter");
-        run_telegram_loop(token, owner_id, router, pipeline, templates).await
+        let recovery_msg = recovery_report.as_ref().map(|r| r.format_message()).ok();
+        run_telegram_loop(
+            token,
+            owner_id,
+            router,
+            pipeline,
+            templates,
+            audit,
+            Arc::clone(&journal),
+            recovery_msg,
+        )
+        .await
     } else {
         info!("no PFAR_TELEGRAM_BOT_TOKEN set -- running in CLI-only mode");
         info!("set PFAR_TELEGRAM_BOT_TOKEN to enable Telegram adapter");
@@ -139,13 +228,20 @@ async fn main() -> Result<()> {
 ///
 /// Spawns the adapter as an async task, then processes events from
 /// the adapter channel, routing each through the kernel pipeline.
+/// Handles graceful shutdown on SIGINT/SIGTERM (spec 9).
+#[allow(clippy::too_many_arguments)]
 async fn run_telegram_loop(
     token: String,
     owner_id: String,
     router: EventRouter,
     pipeline: Pipeline,
     templates: Arc<TemplateRegistry>,
+    audit: Arc<AuditLogger>,
+    journal: Arc<TaskJournal>,
+    recovery_msg: Option<String>,
 ) -> Result<()> {
+    let owner_chat_id = owner_id.clone();
+
     let config = TelegramConfig {
         bot_token: token,
         owner_id,
@@ -156,8 +252,12 @@ async fn run_telegram_loop(
     let (adapter_tx, mut adapter_rx) = mpsc::channel::<AdapterToKernel>(CHANNEL_BUFFER_SIZE);
     let (kernel_tx, kernel_rx) = mpsc::channel::<KernelToAdapter>(CHANNEL_BUFFER_SIZE);
 
-    // Spawn Telegram adapter as an async task.
-    let adapter = TelegramAdapter::new(config);
+    // Shutdown flag and active task counter (spec 9).
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let active_tasks = Arc::new(AtomicUsize::new(0));
+
+    // Spawn Telegram adapter with journal for offset persistence.
+    let adapter = TelegramAdapter::new(config, Some(journal));
     tokio::spawn(async move {
         if let Err(e) = adapter.run(adapter_tx, kernel_rx).await {
             error!("Telegram adapter error: {e}");
@@ -166,61 +266,131 @@ async fn run_telegram_loop(
 
     info!("PFAR v2 ready -- listening for events");
 
-    // Main event loop: process events from the adapter.
-    while let Some(msg) = adapter_rx.recv().await {
-        match msg {
-            AdapterToKernel::Event(event) => {
-                // Extract chat_id from metadata for response routing.
-                let chat_id = event
-                    .payload
-                    .metadata
-                    .get("chat_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
+    // Send recovery report to owner (feature-persistence-recovery §7.4).
+    if let Some(msg) = recovery_msg {
+        let _ = kernel_tx
+            .send(KernelToAdapter::SendMessage {
+                chat_id: owner_chat_id,
+                text: msg,
+            })
+            .await;
+    }
 
-                // Route event through kernel (spec 6.1).
-                match router.route_event(*event) {
-                    Ok((labeled_event, mut task)) => {
-                        let template = templates.get(&task.template_id);
+    // Main event loop with graceful shutdown support.
+    loop {
+        tokio::select! {
+            msg = adapter_rx.recv() => {
+                let Some(msg) = msg else {
+                    info!("adapter channel closed");
+                    break;
+                };
 
-                        if let Some(tmpl) = template {
-                            // Run full pipeline (spec 7).
-                            match pipeline.run(labeled_event, &mut task, tmpl).await {
-                                Ok(output) => {
-                                    let _ = kernel_tx
-                                        .send(KernelToAdapter::SendMessage {
-                                            chat_id,
-                                            text: output.response_text,
-                                        })
-                                        .await;
-                                }
-                                Err(e) => {
-                                    warn!(task_id = %task.task_id, error = %e, "pipeline error");
-                                    let _ = kernel_tx
-                                        .send(KernelToAdapter::SendMessage {
-                                            chat_id,
-                                            text: "Sorry, I encountered an error processing your request.".to_owned(),
-                                        })
-                                        .await;
+                if shutdown_flag.load(Ordering::Relaxed) {
+                    debug!("shutdown in progress, ignoring new event");
+                    continue;
+                }
+
+                match msg {
+                    AdapterToKernel::Event(event) => {
+                        // Extract chat_id from metadata for response routing.
+                        let chat_id = event
+                            .payload
+                            .metadata
+                            .get("chat_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+
+                        // Route event through kernel (spec 6.1).
+                        match router.route_event(*event) {
+                            Ok((labeled_event, mut task)) => {
+                                let template = templates.get(&task.template_id);
+
+                                if let Some(tmpl) = template {
+                                    active_tasks.fetch_add(1, Ordering::Relaxed);
+                                    // Run full pipeline (spec 7).
+                                    match pipeline.run(labeled_event, &mut task, tmpl).await {
+                                        Ok(output) => {
+                                            let _ = kernel_tx
+                                                .send(KernelToAdapter::SendMessage {
+                                                    chat_id,
+                                                    text: output.response_text,
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            warn!(task_id = %task.task_id, error = %e, "pipeline error");
+                                            let _ = kernel_tx
+                                                .send(KernelToAdapter::SendMessage {
+                                                    chat_id,
+                                                    text: "Sorry, I encountered an error processing your request.".to_owned(),
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                    active_tasks.fetch_sub(1, Ordering::Relaxed);
+                                } else {
+                                    warn!("template not found: {}", task.template_id);
                                 }
                             }
-                        } else {
-                            warn!("template not found: {}", task.template_id);
+                            Err(e) => {
+                                warn!("routing error: {e}");
+                            }
                         }
                     }
-                    Err(e) => {
-                        warn!("routing error: {e}");
+                    AdapterToKernel::Heartbeat => {
+                        debug!("Telegram adapter heartbeat received");
                     }
                 }
             }
-            AdapterToKernel::Heartbeat => {
-                debug!("Telegram adapter heartbeat received");
+            _ = tokio::signal::ctrl_c() => {
+                info!("received shutdown signal, initiating graceful shutdown");
+                shutdown_flag.store(true, Ordering::Relaxed);
+                break;
             }
         }
     }
 
-    info!("PFAR v2 shutting down");
+    // Graceful shutdown sequence (spec 9).
+    let shutdown_timeout_secs: u64 = std::env::var("PFAR_SHUTDOWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+
+    let pending = active_tasks.load(Ordering::Relaxed);
+    if pending > 0 {
+        info!(
+            pending_tasks = pending,
+            timeout_secs = shutdown_timeout_secs,
+            "waiting for in-flight tasks"
+        );
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_secs(shutdown_timeout_secs))
+            .unwrap_or_else(tokio::time::Instant::now);
+
+        while active_tasks.load(Ordering::Relaxed) > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                let remaining = active_tasks.load(Ordering::Relaxed);
+                warn!(
+                    remaining_tasks = remaining,
+                    "shutdown timeout exceeded, tasks remain in journal for recovery"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    // Flush audit log and log shutdown event.
+    let final_pending = active_tasks.load(Ordering::Relaxed);
+    if let Err(e) = audit.log_system_shutdown(final_pending) {
+        warn!(error = %e, "failed to log shutdown audit event");
+    }
+
+    // Signal adapter to stop.
+    let _ = kernel_tx.send(KernelToAdapter::Shutdown).await;
+
+    info!("PFAR v2 shut down cleanly");
     Ok(())
 }
 
