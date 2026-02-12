@@ -256,23 +256,37 @@ fn build_inference_proxy(ollama_url: &str) -> InferenceProxy {
 /// explicitly provided the API key.
 fn resolve_owner_inference_config() -> InferenceConfig {
     if std::env::var("PFAR_ANTHROPIC_API_KEY").is_ok() {
-        info!("owner templates will use Anthropic provider");
+        let model = std::env::var("PFAR_ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        info!(model = %model, "owner templates will use Anthropic provider");
         InferenceConfig {
             provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model,
             owner_acknowledged_cloud_risk: true,
         }
     } else if std::env::var("PFAR_OPENAI_API_KEY").is_ok() {
-        info!("owner templates will use OpenAI provider");
+        let model = std::env::var("PFAR_OPENAI_MODEL")
+            .unwrap_or_else(|_| "gpt-4o".to_string());
+        info!(model = %model, "owner templates will use OpenAI provider");
         InferenceConfig {
             provider: "openai".to_string(),
-            model: "gpt-4o".to_string(),
+            model,
             owner_acknowledged_cloud_risk: true,
+        }
+    } else if std::env::var("PFAR_LMSTUDIO_URL").is_ok() {
+        let model = std::env::var("PFAR_LMSTUDIO_MODEL")
+            .unwrap_or_else(|_| "deepseek-r1".to_string());
+        info!(model = %model, "owner templates will use LM Studio provider");
+        InferenceConfig {
+            provider: "lmstudio".to_string(),
+            model,
+            owner_acknowledged_cloud_risk: false,
         }
     } else {
         InferenceConfig {
             provider: "local".to_string(),
-            model: "llama3".to_string(),
+            model: std::env::var("PFAR_LOCAL_MODEL")
+                .unwrap_or_else(|_| "llama3".to_string()),
             owner_acknowledged_cloud_risk: false,
         }
     }

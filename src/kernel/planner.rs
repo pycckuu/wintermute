@@ -187,10 +187,13 @@ impl Planner {
 
     /// Parse the LLM response into a Plan (spec 10.4).
     ///
-    /// Tries raw JSON first, then extracts from markdown code blocks.
+    /// Strips reasoning model tags (e.g. `<think>...</think>` from DeepSeek R1),
+    /// then tries raw JSON first, then extracts from markdown code blocks.
     /// Returns `InvalidPlanFormat` if no valid JSON plan can be found.
     pub fn parse_plan(response: &str) -> Result<Plan, PlannerError> {
-        let trimmed = response.trim();
+        // Strip reasoning model tags (DeepSeek R1 wraps output in <think>...</think>).
+        let cleaned = strip_reasoning_tags(response);
+        let trimmed = cleaned.trim();
 
         // Try direct JSON parse first.
         if let Ok(plan) = serde_json::from_str::<Plan>(trimmed) {
@@ -302,6 +305,33 @@ fn extract_json_block(text: &str) -> Option<&str> {
     let end_pos = rest.find(end_marker)?;
     let content = rest.get(..end_pos)?;
     Some(content.trim())
+}
+
+/// Strip reasoning model tags from LLM responses.
+///
+/// Some models (e.g. DeepSeek R1) wrap output in `<think>...</think>` tags
+/// containing chain-of-thought reasoning. This function removes those tags
+/// and their content, leaving only the actual response.
+pub fn strip_reasoning_tags(response: &str) -> String {
+    let mut result = response.to_owned();
+
+    // Strip <think>...</think> blocks (DeepSeek R1).
+    while let Some(start) = result.find("<think>") {
+        if let Some(end) = result.find("</think>") {
+            let tag_end = end.saturating_add("</think>".len());
+            result = format!(
+                "{}{}",
+                result.get(..start).unwrap_or_default(),
+                result.get(tag_end..).unwrap_or_default()
+            );
+        } else {
+            // Unclosed <think> — strip from <think> to end of string.
+            result = result.get(..start).unwrap_or_default().to_owned();
+            break;
+        }
+    }
+
+    result
 }
 
 /// Check if a tool ID matches any entry in a pattern list (spec 4.5).
@@ -758,6 +788,48 @@ mod tests {
         let plan = Planner::parse_plan(response).expect("should parse from plain code fence");
         assert_eq!(plan.plan.len(), 1);
         assert_eq!(plan.plan[0].tool, "email.list");
+    }
+
+    #[test]
+    fn test_parse_plan_with_think_tags() {
+        let response = "<think>\nLet me analyze this request...\nThe user wants to check email.\n</think>\n{\"plan\":[{\"step\":1,\"tool\":\"email.list\",\"args\":{\"limit\":10}}]}";
+        let plan = Planner::parse_plan(response).expect("should parse after stripping think tags");
+        assert_eq!(plan.plan.len(), 1);
+        assert_eq!(plan.plan[0].tool, "email.list");
+    }
+
+    #[test]
+    fn test_parse_plan_with_think_tags_and_markdown() {
+        let response = "<think>\nReasoning about the task...\n</think>\n```json\n{\"plan\":[{\"step\":1,\"tool\":\"calendar.freebusy\",\"args\":{}}]}\n```";
+        let plan = Planner::parse_plan(response).expect("should parse think + markdown");
+        assert_eq!(plan.plan.len(), 1);
+        assert_eq!(plan.plan[0].tool, "calendar.freebusy");
+    }
+
+    #[test]
+    fn test_parse_plan_with_unclosed_think_tag() {
+        // If the model only outputs <think> without closing, treat everything as reasoning.
+        let response = "<think>\nStill thinking...";
+        let result = Planner::parse_plan(response);
+        assert!(result.is_err(), "unclosed think with no plan should fail");
+    }
+
+    #[test]
+    fn test_strip_reasoning_tags_basic() {
+        let input = "<think>reasoning</think>actual output";
+        assert_eq!(strip_reasoning_tags(input), "actual output");
+    }
+
+    #[test]
+    fn test_strip_reasoning_tags_no_tags() {
+        let input = "just a normal response";
+        assert_eq!(strip_reasoning_tags(input), "just a normal response");
+    }
+
+    #[test]
+    fn test_strip_reasoning_tags_multiple() {
+        let input = "<think>first</think>middle<think>second</think>end";
+        assert_eq!(strip_reasoning_tags(input), "middleend");
     }
 
     #[test]
