@@ -26,6 +26,12 @@ pub enum PolicyViolation {
         data_label: SecurityLabel,
         sink_label: SecurityLabel,
     },
+    /// Inference routing denied: data ceiling prevents sending to cloud provider (spec 11.1).
+    #[error("inference routing denied: {label:?} data cannot be sent to cloud provider")]
+    InferenceRoutingDenied {
+        /// The security label that triggered the denial.
+        label: SecurityLabel,
+    },
 }
 
 /// Policy error — capability or tool access denied (spec 6.2).
@@ -210,6 +216,54 @@ impl PolicyEngine {
         match self.label_ceilings.get(tool) {
             Some(&ceiling) => ceiling,
             None => reported_label,
+        }
+    }
+
+    // ── Inference routing (spec 11.1) ──
+
+    /// Check if inference routing is allowed for a given data ceiling and provider (spec 11.1).
+    ///
+    /// Routing rules:
+    /// - `Public`/`Internal`: any provider allowed
+    /// - `Sensitive`: local only unless `cloud_risk_ack` is true
+    /// - `Regulated`: always local, cannot be overridden
+    /// - `Secret`: never sent to any LLM
+    pub fn check_inference_routing(
+        &self,
+        data_ceiling: SecurityLabel,
+        provider_is_cloud: bool,
+        cloud_risk_ack: bool,
+    ) -> Result<(), PolicyViolation> {
+        // Secret data must never be sent to any LLM (spec 11.1).
+        if data_ceiling == SecurityLabel::Secret {
+            return Err(PolicyViolation::InferenceRoutingDenied {
+                label: data_ceiling,
+            });
+        }
+
+        // Local providers are always permitted for non-secret data.
+        if !provider_is_cloud {
+            return Ok(());
+        }
+
+        // Cloud provider routing checks by label.
+        match data_ceiling {
+            SecurityLabel::Public | SecurityLabel::Internal => Ok(()),
+            SecurityLabel::Sensitive => {
+                if cloud_risk_ack {
+                    Ok(())
+                } else {
+                    Err(PolicyViolation::InferenceRoutingDenied {
+                        label: data_ceiling,
+                    })
+                }
+            }
+            SecurityLabel::Regulated => Err(PolicyViolation::InferenceRoutingDenied {
+                label: data_ceiling,
+            }),
+            SecurityLabel::Secret => Err(PolicyViolation::InferenceRoutingDenied {
+                label: data_ceiling,
+            }),
         }
     }
 
@@ -845,5 +899,80 @@ mod tests {
     fn test_format_trigger_webhook() {
         let t = format_trigger("webhook", "post", PrincipalClass::WebhookSource);
         assert_eq!(t, "adapter:webhook:post:webhook");
+    }
+
+    // ── Inference routing tests (spec 11.1) ──
+
+    #[test]
+    fn test_inference_routing_public_cloud_ok() {
+        let engine = test_engine();
+        assert!(engine
+            .check_inference_routing(SecurityLabel::Public, true, false)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_inference_routing_internal_cloud_ok() {
+        let engine = test_engine();
+        assert!(engine
+            .check_inference_routing(SecurityLabel::Internal, true, false)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_inference_routing_sensitive_cloud_denied() {
+        let engine = test_engine();
+        let result = engine.check_inference_routing(SecurityLabel::Sensitive, true, false);
+        assert!(matches!(
+            result,
+            Err(PolicyViolation::InferenceRoutingDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn test_inference_routing_sensitive_cloud_with_ack() {
+        let engine = test_engine();
+        assert!(engine
+            .check_inference_routing(SecurityLabel::Sensitive, true, true)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_inference_routing_sensitive_local_ok() {
+        let engine = test_engine();
+        assert!(engine
+            .check_inference_routing(SecurityLabel::Sensitive, false, false)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_inference_routing_regulated_always_local() {
+        let engine = test_engine();
+        // Regulated to cloud denied even with ack.
+        let result = engine.check_inference_routing(SecurityLabel::Regulated, true, true);
+        assert!(matches!(
+            result,
+            Err(PolicyViolation::InferenceRoutingDenied { .. })
+        ));
+        // Regulated to local is fine.
+        assert!(engine
+            .check_inference_routing(SecurityLabel::Regulated, false, false)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_inference_routing_secret_always_denied() {
+        let engine = test_engine();
+        // Secret to any LLM (cloud or local) is denied.
+        let result_cloud = engine.check_inference_routing(SecurityLabel::Secret, true, true);
+        assert!(matches!(
+            result_cloud,
+            Err(PolicyViolation::InferenceRoutingDenied { .. })
+        ));
+        let result_local = engine.check_inference_routing(SecurityLabel::Secret, false, false);
+        assert!(matches!(
+            result_local,
+            Err(PolicyViolation::InferenceRoutingDenied { .. })
+        ));
     }
 }

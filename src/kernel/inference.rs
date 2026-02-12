@@ -1,12 +1,12 @@
-/// Inference proxy — mediates all LLM communication (spec 6.3).
+/// Inference proxy -- mediates all LLM communication (spec 6.3).
 ///
-/// Routes inference requests based on data ceiling. Phase 1 targets
-/// local Ollama only; cloud provider routing (Anthropic, OpenAI) with
-/// label-based guards will be added in Phase 2.
+/// Routes inference requests based on data ceiling. Supports local Ollama
+/// with label-based routing guards for cloud providers (spec 11.1).
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::kernel::template::InferenceConfig;
 use crate::types::SecurityLabel;
 
 /// Inference error types (spec 6.3).
@@ -56,8 +56,8 @@ pub trait InferenceProvider: Send + Sync {
 
 /// Inference proxy routing LLM calls via label-based rules (spec 6.3).
 ///
-/// Phase 1: routes to local Ollama only.
-/// Phase 2: adds cloud providers with label-based routing.
+/// Phase 2: single provider with label-based routing checks.
+/// Cloud provider implementations added separately.
 pub struct InferenceProxy {
     provider: Box<dyn InferenceProvider>,
 }
@@ -80,7 +80,7 @@ impl InferenceProxy {
 
     /// Generate a completion, enforcing label-based routing (spec 6.3).
     ///
-    /// Phase 1: always routes locally. Rejects `Secret` data.
+    /// Uses the default provider. Rejects `Secret` data.
     pub async fn generate(
         &self,
         model: &str,
@@ -95,6 +95,50 @@ impl InferenceProxy {
             });
         }
         self.provider.generate(model, prompt, max_tokens).await
+    }
+
+    /// Generate with full routing check using template inference config (spec 11.1).
+    ///
+    /// Extends `generate` with cloud/local provider discrimination:
+    /// - `public`/`internal`: any provider allowed
+    /// - `sensitive`: local only unless `owner_acknowledged_cloud_risk` is set
+    /// - `regulated`: always local, cannot be overridden
+    /// - `secret`: never sent to any LLM
+    pub async fn generate_with_config(
+        &self,
+        config: &InferenceConfig,
+        prompt: &str,
+        max_tokens: u32,
+        data_ceiling: SecurityLabel,
+    ) -> Result<String, InferenceError> {
+        // Secret data must never reach any LLM.
+        if data_ceiling == SecurityLabel::Secret {
+            return Err(InferenceError::RoutingDenied {
+                label: data_ceiling,
+            });
+        }
+
+        // Determine if the configured provider is cloud-based.
+        let is_cloud = config.provider != "local" && config.provider != "ollama";
+
+        if is_cloud {
+            // Regulated data can never go to cloud, even with ack.
+            if data_ceiling >= SecurityLabel::Regulated {
+                return Err(InferenceError::RoutingDenied {
+                    label: data_ceiling,
+                });
+            }
+            // Sensitive data requires explicit owner acknowledgment.
+            if data_ceiling == SecurityLabel::Sensitive && !config.owner_acknowledged_cloud_risk {
+                return Err(InferenceError::RoutingDenied {
+                    label: data_ceiling,
+                });
+            }
+        }
+
+        self.provider
+            .generate(&config.model, prompt, max_tokens)
+            .await
     }
 }
 
@@ -226,5 +270,129 @@ mod tests {
             .generate("bad_model", "prompt", 100, SecurityLabel::Public)
             .await;
         assert!(matches!(result, Err(InferenceError::ModelUnavailable(_))));
+    }
+
+    // ── generate_with_config tests (spec 11.1) ──
+
+    fn cloud_config(ack: bool) -> InferenceConfig {
+        InferenceConfig {
+            provider: "anthropic".to_owned(),
+            model: "claude-sonnet".to_owned(),
+            owner_acknowledged_cloud_risk: ack,
+        }
+    }
+
+    fn local_config() -> InferenceConfig {
+        InferenceConfig {
+            provider: "local".to_owned(),
+            model: "llama3".to_owned(),
+            owner_acknowledged_cloud_risk: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_cloud_sensitive_no_ack() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(
+                &cloud_config(false),
+                "prompt",
+                100,
+                SecurityLabel::Sensitive,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(InferenceError::RoutingDenied { .. })),
+            "sensitive data to cloud without ack should be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_cloud_sensitive_with_ack() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&cloud_config(true), "prompt", 100, SecurityLabel::Sensitive)
+            .await;
+        assert!(
+            result.is_ok(),
+            "sensitive data to cloud with ack should be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_local_sensitive() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&local_config(), "prompt", 100, SecurityLabel::Sensitive)
+            .await;
+        assert!(
+            result.is_ok(),
+            "sensitive data to local provider should always be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_cloud_regulated_denied() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&cloud_config(true), "prompt", 100, SecurityLabel::Regulated)
+            .await;
+        assert!(
+            matches!(result, Err(InferenceError::RoutingDenied { .. })),
+            "regulated data to cloud should always be denied even with ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_secret_denied() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&local_config(), "prompt", 100, SecurityLabel::Secret)
+            .await;
+        assert!(
+            matches!(result, Err(InferenceError::RoutingDenied { .. })),
+            "secret data to any provider should be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_cloud_public_ok() {
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&cloud_config(false), "prompt", 100, SecurityLabel::Public)
+            .await;
+        assert!(
+            result.is_ok(),
+            "public data to cloud should be allowed without ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_with_config_ollama_provider_is_local() {
+        // "ollama" should be treated as a local provider.
+        let config = InferenceConfig {
+            provider: "ollama".to_owned(),
+            model: "llama3".to_owned(),
+            owner_acknowledged_cloud_risk: false,
+        };
+        let proxy = InferenceProxy::with_provider(Box::new(MockProvider {
+            response: "ok".to_owned(),
+        }));
+        let result = proxy
+            .generate_with_config(&config, "prompt", 100, SecurityLabel::Sensitive)
+            .await;
+        assert!(result.is_ok(), "ollama provider should be treated as local");
     }
 }

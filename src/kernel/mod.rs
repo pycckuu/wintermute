@@ -3,15 +3,20 @@
 //! All security enforcement happens here: label assignment, taint
 //! propagation, capability tokens, sink access control.
 
+pub mod approval;
 pub mod audit;
+pub mod egress;
+pub mod executor;
 pub mod inference;
+pub mod pipeline;
+pub mod planner;
 pub mod policy;
 pub mod router;
+pub mod session;
+pub mod synthesizer;
 pub mod template;
 pub mod vault;
 
 // Sub-modules to be added as implementation progresses:
 // - scheduler: Cron Scheduler (spec 6.5)
-// - approval:  Approval Queue (spec 6.6)
 // - container: Container Manager (spec 6.8)
-// - pipeline:  Plan-Then-Execute Pipeline (spec 7)

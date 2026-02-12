@@ -5,9 +5,9 @@
 //! messages into InboundEvent format.
 
 pub mod cli;
+pub mod telegram;
 
 // Sub-modules will be added as implementation progresses:
-// - telegram:  Telegram Bot API polling (spec 6.9)
 // - slack:     Slack Socket Mode WebSocket (spec 6.9)
 // - whatsapp:  WhatsApp Web via Baileys subprocess (spec 6.9)
 // - webhook:   HTTPS POST with HMAC verification (spec 6.9)
