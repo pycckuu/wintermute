@@ -2,16 +2,13 @@
 
 [graph]
 targets = [
+    # Linux (primary target)
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
     { triple = "x86_64-unknown-linux-musl" },
+    # macOS (secondary target)
     { triple = "aarch64-apple-darwin" },
     { triple = "x86_64-apple-darwin" },
-    { triple = "x86_64-pc-windows-msvc" },
-    { triple = "wasm32-unknown-unknown" },
-    { triple = "wasm32-wasi" },
-    { triple = "aarch64-linux-android" },
-    { triple = "aarch64-apple-ios" },
 ]
 all-features = true
 no-default-features = false
@@ -56,7 +53,6 @@ highlight = "all"
 
 [bans.workspace-dependencies]
 duplicates = 'deny'
-# TODO(template) you should provide an example with the lib usage
 unused = 'deny'
 
 [sources]
