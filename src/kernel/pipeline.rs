@@ -20,7 +20,7 @@ use crate::kernel::audit::AuditLogger;
 use crate::kernel::egress::EgressValidator;
 use crate::kernel::executor::{ExecutorError, PlanExecutor};
 use crate::kernel::inference::InferenceProxy;
-use crate::kernel::planner::{Planner, PlannerContext};
+use crate::kernel::planner::{strip_reasoning_tags, Planner, PlannerContext};
 use crate::kernel::policy::{self, PolicyEngine};
 use crate::kernel::session::{ConversationTurn, SessionStore, StructuredToolOutput, TaskResult};
 use crate::kernel::synthesizer::{OutputInstructions, StepResult, Synthesizer, SynthesizerContext};
@@ -145,8 +145,8 @@ impl Pipeline {
 
         let plan_response = self
             .inference
-            .generate(
-                &template.inference.model,
+            .generate_with_config(
+                &template.inference,
                 &prompt,
                 template.max_tokens_plan,
                 task.data_ceiling,
@@ -220,16 +220,19 @@ impl Pipeline {
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);
 
-        let response_text = self
+        let raw_synth = self
             .inference
-            .generate(
-                &template.inference.model,
+            .generate_with_config(
+                &template.inference,
                 &synth_prompt,
                 template.max_tokens_synthesize,
                 task.data_ceiling,
             )
             .await
             .map_err(|e| PipelineError::SynthesisFailed(e.to_string()))?;
+
+        // Strip reasoning model tags (e.g. DeepSeek R1 <think>...</think>).
+        let response_text = strip_reasoning_tags(&raw_synth).trim().to_owned();
 
         // === EGRESS VALIDATION (spec 10.8) ===
         for sink in &task.output_sinks {
