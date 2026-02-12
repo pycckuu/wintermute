@@ -60,17 +60,18 @@ async fn main() -> Result<()> {
     // Initialize kernel components (spec 5.1).
     let policy = Arc::new(PolicyEngine::with_defaults());
 
-    // Load templates -- for Phase 2, create default templates programmatically.
+    // Load templates -- templates use the best available provider (spec 18.2).
     // Future phases will load from ~/.pfar/templates/ directory.
-    let templates = Arc::new(create_default_templates());
+    let owner_inference = resolve_owner_inference_config();
+    let templates = Arc::new(create_default_templates(&owner_inference));
 
     // Initialize vault (in-memory for Phase 2, spec 6.4).
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::default());
 
-    // Initialize inference proxy (local Ollama, spec 6.3).
+    // Initialize inference proxy with available providers (spec 6.3, 11.1).
     let ollama_url =
         std::env::var("PFAR_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
-    let inference = Arc::new(InferenceProxy::local(&ollama_url));
+    let inference = Arc::new(build_inference_proxy(&ollama_url));
 
     // Initialize tool registry with Phase 2 tools (spec 6.11).
     let tools = Arc::new(create_tool_registry());
@@ -223,16 +224,70 @@ async fn run_telegram_loop(
     Ok(())
 }
 
+/// Build the inference proxy with all available providers (spec 6.3, 11.1).
+///
+/// Always registers local Ollama. Optionally registers OpenAI, Anthropic,
+/// and LM Studio based on environment variables.
+fn build_inference_proxy(ollama_url: &str) -> InferenceProxy {
+    let mut builder = InferenceProxy::builder(ollama_url);
+
+    if let Ok(key) = std::env::var("PFAR_OPENAI_API_KEY") {
+        builder = builder.with_openai("https://api.openai.com", &key);
+        info!("OpenAI provider registered");
+    }
+
+    if let Ok(key) = std::env::var("PFAR_ANTHROPIC_API_KEY") {
+        builder = builder.with_anthropic(&key);
+        info!("Anthropic provider registered");
+    }
+
+    if let Ok(url) = std::env::var("PFAR_LMSTUDIO_URL") {
+        builder = builder.with_lmstudio(&url);
+        info!(url = %url, "LM Studio provider registered");
+    }
+
+    builder.build()
+}
+
+/// Resolve the best available inference config for owner templates (spec 11.1).
+///
+/// Prefers Anthropic > OpenAI > local, based on which API keys are set.
+/// Cloud providers set `owner_acknowledged_cloud_risk: true` since the owner
+/// explicitly provided the API key.
+fn resolve_owner_inference_config() -> InferenceConfig {
+    if std::env::var("PFAR_ANTHROPIC_API_KEY").is_ok() {
+        info!("owner templates will use Anthropic provider");
+        InferenceConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            owner_acknowledged_cloud_risk: true,
+        }
+    } else if std::env::var("PFAR_OPENAI_API_KEY").is_ok() {
+        info!("owner templates will use OpenAI provider");
+        InferenceConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            owner_acknowledged_cloud_risk: true,
+        }
+    } else {
+        InferenceConfig {
+            provider: "local".to_string(),
+            model: "llama3".to_string(),
+            owner_acknowledged_cloud_risk: false,
+        }
+    }
+}
+
 /// Create default task templates for Phase 2 (spec 18.2, 18.3).
-fn create_default_templates() -> TemplateRegistry {
+fn create_default_templates(owner_inference: &InferenceConfig) -> TemplateRegistry {
     let mut registry = TemplateRegistry::new();
-    registry.register(owner_telegram_template());
-    registry.register(owner_cli_template());
+    registry.register(owner_telegram_template(owner_inference));
+    registry.register(owner_cli_template(owner_inference));
     registry.register(whatsapp_scheduling_template());
     registry
 }
 
-fn owner_telegram_template() -> TaskTemplate {
+fn owner_telegram_template(inference: &InferenceConfig) -> TaskTemplate {
     TaskTemplate {
         template_id: "owner_telegram_general".to_string(),
         triggers: vec!["adapter:telegram:message:owner".to_string()],
@@ -250,16 +305,12 @@ fn owner_telegram_template() -> TaskTemplate {
         max_tokens_synthesize: 8000,
         output_sinks: vec!["sink:telegram:owner".to_string()],
         data_ceiling: pfar::types::SecurityLabel::Sensitive,
-        inference: InferenceConfig {
-            provider: "local".to_string(),
-            model: "llama3".to_string(),
-            owner_acknowledged_cloud_risk: false,
-        },
+        inference: inference.clone(),
         require_approval_for_writes: false,
     }
 }
 
-fn owner_cli_template() -> TaskTemplate {
+fn owner_cli_template(inference: &InferenceConfig) -> TaskTemplate {
     TaskTemplate {
         template_id: "owner_cli_general".to_string(),
         triggers: vec!["adapter:cli:message:owner".to_string()],
@@ -277,11 +328,7 @@ fn owner_cli_template() -> TaskTemplate {
         max_tokens_synthesize: 8000,
         output_sinks: vec!["sink:cli:owner".to_string()],
         data_ceiling: pfar::types::SecurityLabel::Sensitive,
-        inference: InferenceConfig {
-            provider: "local".to_string(),
-            model: "llama3".to_string(),
-            owner_acknowledged_cloud_risk: false,
-        },
+        inference: inference.clone(),
         require_approval_for_writes: false,
     }
 }
