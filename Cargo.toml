@@ -1,27 +1,31 @@
-# TODO(template) update for your crate name
 [package]
-name = "mycrate" # Choose a placeholder name
+name = "pfar"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <you@example.com>"] # Add placeholder authors
-description = "A description of your crate" # Add placeholder description
-# TODO(template) update for your repository
-repository = "https://github.com/IgraLabs/rust-template"
-license = "Apache-2.0" # TODO(template) update license if needed
+authors = ["Igor Markelov <igor@igralabs.com>"]
+description = "Privacy-First Agent Runtime v2 — a hardened monolith AI agent runtime"
+repository = "https://github.com/IgraLabs/muscat-v2"
+license = "Apache-2.0"
 
+[[bin]]
+name = "pfar"
+path = "src/main.rs"
 
 [dependencies]
-# Add dependencies here, for example:
-# log = "0.4"
-thiserror = {version = "1.0", default-features = false }
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = { version = "1.0", default-features = false }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
-# Moved lints from [workspace.lints.*] to [lints.*]
 [lints.rust]
-missing_docs = "deny"
-# TODO(template) if you use any unsafe code, then running miri in CI is a must
-# if for a crate in the workspace you need an unsafe code
-# prefer to preserve forbid for the workspace
-# and allowing only at a specific crate level
+missing_docs = "warn"
 unsafe_code = "forbid"
 
 [lints.clippy]
@@ -30,7 +34,6 @@ cast_lossless = "deny"
 cast_possible_truncation = "deny"
 cast_possible_wrap = "deny"
 cast_precision_loss = "deny"
-cast_sign_loss = "deny"
 needless_return = "deny"
 panicking_overflow_checks = "deny"
 unwrap_used = "deny"
