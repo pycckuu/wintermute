@@ -151,6 +151,59 @@ impl SessionStore {
     pub fn get(&self, principal: &Principal) -> Option<&SessionWorkingMemory> {
         self.sessions.get(principal)
     }
+
+    /// Load persisted session data from the task journal (spec 9.1, 9.2).
+    ///
+    /// Populates the in-memory session store with conversation turns and
+    /// working memory results that survived a process restart.
+    pub fn load_from_journal(
+        &mut self,
+        journal: &crate::kernel::journal::TaskJournal,
+    ) -> Result<usize, crate::kernel::journal::JournalError> {
+        let principals = journal.load_session_principals()?;
+        let mut loaded_count = 0usize;
+
+        for principal_json in &principals {
+            // Deserialize the principal key.
+            let principal: Principal = match serde_json::from_str(principal_json) {
+                Ok(p) => p,
+                Err(_) => continue, // Skip undeserializable principals.
+            };
+
+            let session = self.get_or_create(&principal);
+
+            // Load conversation turns (up to capacity).
+            let turns =
+                journal.load_conversation_turns(principal_json, DEFAULT_HISTORY_CAPACITY)?;
+            for (role, summary, timestamp) in turns {
+                session.push_turn(ConversationTurn {
+                    role,
+                    summary,
+                    timestamp,
+                });
+                loaded_count = loaded_count.saturating_add(1);
+            }
+
+            // Load working memory results (up to capacity).
+            let results =
+                journal.load_working_memory_results(principal_json, DEFAULT_RESULTS_CAPACITY)?;
+            for row in results {
+                let tool_outputs: Vec<StructuredToolOutput> =
+                    serde_json::from_str(&row.tool_outputs_json).unwrap_or_default();
+                session.push_result(TaskResult {
+                    task_id: row.task_id,
+                    timestamp: row.timestamp,
+                    request_summary: row.request_summary,
+                    tool_outputs,
+                    response_summary: row.response_summary,
+                    label: row.label,
+                });
+                loaded_count = loaded_count.saturating_add(1);
+            }
+        }
+
+        Ok(loaded_count)
+    }
 }
 
 #[cfg(test)]
@@ -369,5 +422,154 @@ mod tests {
         assert_eq!(deserialized.tool, "calendar");
         assert_eq!(deserialized.action, "freebusy");
         assert_eq!(deserialized.label, SecurityLabel::Internal);
+    }
+
+    // ── Session persistence tests (spec 9.1, 9.2) ──────────────
+
+    #[test]
+    fn test_load_from_journal_empty() {
+        let journal =
+            crate::kernel::journal::TaskJournal::open_in_memory().expect("in-memory journal");
+        let mut store = SessionStore::new();
+        let count = store.load_from_journal(&journal).expect("load");
+        assert_eq!(count, 0);
+        assert!(store.get(&Principal::Owner).is_none());
+    }
+
+    #[test]
+    fn test_load_from_journal_conversation_turns() {
+        let journal =
+            crate::kernel::journal::TaskJournal::open_in_memory().expect("in-memory journal");
+        let now = Utc::now();
+
+        // Save turns for the owner principal.
+        let owner_key = serde_json::to_string(&Principal::Owner).expect("serialize");
+        journal
+            .save_conversation_turn(&owner_key, "user", "check my email", &now)
+            .expect("save");
+        journal
+            .save_conversation_turn(&owner_key, "assistant", "You have 2 emails", &now)
+            .expect("save");
+
+        let mut store = SessionStore::new();
+        let count = store.load_from_journal(&journal).expect("load");
+        assert_eq!(count, 2);
+
+        let session = store.get(&Principal::Owner).expect("owner session");
+        assert_eq!(session.conversation_history().len(), 2);
+        assert_eq!(session.conversation_history()[0].role, "user");
+        assert_eq!(session.conversation_history()[0].summary, "check my email");
+        assert_eq!(session.conversation_history()[1].role, "assistant");
+    }
+
+    #[test]
+    fn test_load_from_journal_working_memory() {
+        let journal =
+            crate::kernel::journal::TaskJournal::open_in_memory().expect("in-memory journal");
+        let now = Utc::now();
+
+        let owner_key = serde_json::to_string(&Principal::Owner).expect("serialize");
+        let outputs = serde_json::to_string(&vec![StructuredToolOutput {
+            tool: "email".to_owned(),
+            action: "list".to_owned(),
+            output: serde_json::json!({"count": 5}),
+            label: SecurityLabel::Sensitive,
+        }])
+        .expect("serialize");
+
+        journal
+            .save_working_memory_result(&crate::kernel::journal::SaveWorkingMemoryParams {
+                principal: &owner_key,
+                task_id: Uuid::nil(),
+                timestamp: &now,
+                request_summary: "check email",
+                tool_outputs_json: &outputs,
+                response_summary: "Listed 5 emails",
+                label: SecurityLabel::Sensitive,
+            })
+            .expect("save");
+
+        let mut store = SessionStore::new();
+        let count = store.load_from_journal(&journal).expect("load");
+        assert_eq!(count, 1);
+
+        let session = store.get(&Principal::Owner).expect("owner session");
+        assert_eq!(session.recent_results().len(), 1);
+        assert_eq!(session.recent_results()[0].request_summary, "check email");
+        assert_eq!(session.recent_results()[0].tool_outputs.len(), 1);
+        assert_eq!(session.recent_results()[0].tool_outputs[0].tool, "email");
+    }
+
+    #[test]
+    fn test_load_from_journal_isolation() {
+        let journal =
+            crate::kernel::journal::TaskJournal::open_in_memory().expect("in-memory journal");
+        let now = Utc::now();
+
+        let owner_key = serde_json::to_string(&Principal::Owner).expect("serialize");
+        let peer = Principal::TelegramPeer("12345".to_owned());
+        let peer_key = serde_json::to_string(&peer).expect("serialize");
+
+        journal
+            .save_conversation_turn(&owner_key, "user", "owner msg", &now)
+            .expect("save");
+        journal
+            .save_conversation_turn(&peer_key, "user", "peer msg", &now)
+            .expect("save");
+
+        let mut store = SessionStore::new();
+        store.load_from_journal(&journal).expect("load");
+
+        // Owner sees only owner data.
+        let owner_session = store.get(&Principal::Owner).expect("owner session");
+        assert_eq!(owner_session.conversation_history().len(), 1);
+        assert_eq!(owner_session.conversation_history()[0].summary, "owner msg");
+
+        // Peer sees only peer data.
+        let peer_session = store.get(&peer).expect("peer session");
+        assert_eq!(peer_session.conversation_history().len(), 1);
+        assert_eq!(peer_session.conversation_history()[0].summary, "peer msg");
+    }
+
+    #[test]
+    fn test_load_from_journal_survives_restart() {
+        // Simulate: save data -> create new store -> load -> verify
+        let journal =
+            crate::kernel::journal::TaskJournal::open_in_memory().expect("in-memory journal");
+        let now = Utc::now();
+        let owner_key = serde_json::to_string(&Principal::Owner).expect("serialize");
+
+        // "First session" saves data.
+        journal
+            .save_conversation_turn(&owner_key, "user", "what's the weather?", &now)
+            .expect("save");
+        journal
+            .save_conversation_turn(&owner_key, "assistant", "It's sunny today", &now)
+            .expect("save");
+        journal
+            .save_working_memory_result(&crate::kernel::journal::SaveWorkingMemoryParams {
+                principal: &owner_key,
+                task_id: Uuid::nil(),
+                timestamp: &now,
+                request_summary: "weather check",
+                tool_outputs_json: "[]",
+                response_summary: "Sunny today",
+                label: SecurityLabel::Public,
+            })
+            .expect("save");
+
+        // "Restart" — new empty store, load from journal.
+        let mut new_store = SessionStore::new();
+        let count = new_store.load_from_journal(&journal).expect("load");
+        assert_eq!(count, 3); // 2 turns + 1 result
+
+        let session = new_store.get(&Principal::Owner).expect("owner session");
+        assert_eq!(session.conversation_history().len(), 2);
+        assert_eq!(
+            session.conversation_history()[0].summary,
+            "what's the weather?"
+        );
+        assert_eq!(session.recent_results().len(), 1);
+        assert_eq!(session.recent_results()[0].request_summary, "weather check");
     }
 }

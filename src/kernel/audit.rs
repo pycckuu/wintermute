@@ -29,6 +29,10 @@ pub enum AuditEventType {
     Egress,
     /// An error occurred during processing.
     Error,
+    /// System startup (spec 9, feature-persistence-recovery).
+    SystemStartup,
+    /// System shutdown (spec 9, feature-persistence-recovery).
+    SystemShutdown,
 }
 
 /// A single structured audit log entry (spec 6.7).
@@ -116,6 +120,28 @@ impl AuditLogger {
             "",
             serde_json::json!({
                 "description": description,
+            }),
+        )
+    }
+
+    /// Log system startup event (spec 9, feature-persistence-recovery).
+    pub fn log_system_startup(&self, version: &str) -> anyhow::Result<()> {
+        self.write_entry(
+            AuditEventType::SystemStartup,
+            "",
+            serde_json::json!({
+                "version": version,
+            }),
+        )
+    }
+
+    /// Log system shutdown event (spec 9, feature-persistence-recovery).
+    pub fn log_system_shutdown(&self, pending_tasks: usize) -> anyhow::Result<()> {
+        self.write_entry(
+            AuditEventType::SystemShutdown,
+            "",
+            serde_json::json!({
+                "pending_tasks": pending_tasks,
             }),
         )
     }
@@ -265,6 +291,34 @@ mod tests {
         assert_eq!(entry["event_type"], "egress");
         assert_eq!(entry["details"]["sink"], "sink:telegram:owner");
         assert_eq!(entry["details"]["size"], 256);
+    }
+
+    #[test]
+    fn test_log_system_startup() {
+        let buf = SharedBuf::new();
+        let logger = AuditLogger::from_writer(Box::new(buf.clone()));
+
+        logger
+            .log_system_startup("0.1.0")
+            .expect("should log startup");
+
+        let output = buf.contents();
+        let entry: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
+        assert_eq!(entry["event_type"], "system_startup");
+        assert_eq!(entry["details"]["version"], "0.1.0");
+    }
+
+    #[test]
+    fn test_log_system_shutdown() {
+        let buf = SharedBuf::new();
+        let logger = AuditLogger::from_writer(Box::new(buf.clone()));
+
+        logger.log_system_shutdown(3).expect("should log shutdown");
+
+        let output = buf.contents();
+        let entry: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
+        assert_eq!(entry["event_type"], "system_shutdown");
+        assert_eq!(entry["details"]["pending_tasks"], 3);
     }
 
     #[test]

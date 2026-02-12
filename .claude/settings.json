@@ -3,8 +3,13 @@
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
-        "command": "cd /Users/igor/conductor/workspaces/wintermute/perth-v4 && cargo fmt --all -- --check 2>&1 | head -20",
-        "description": "Check formatting after file edits"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --all -- --check 2>&1 | head -20",
+            "description": "Check formatting after file edits"
+          }
+        ]
       }
     ]
   },

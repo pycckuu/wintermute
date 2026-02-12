@@ -286,6 +286,7 @@ fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<Ses
         egress,
         tools,
         audit,
+        None, // No journal for regression tests.
     );
 
     (pipeline, sessions)
@@ -666,7 +667,7 @@ async fn regression_05_label_ceiling_in_executor() {
     };
 
     let results = executor
-        .execute_plan(&task, &steps, &taint)
+        .execute_plan(&task, &steps, &taint, None)
         .await
         .expect("should succeed");
 
@@ -751,7 +752,9 @@ async fn regression_07_pipeline_egress_denied() {
     let sessions = Arc::new(RwLock::new(SessionStore::new()));
     let egress = EgressValidator::new(policy.clone(), audit.clone());
 
-    let pipeline = Pipeline::new(policy, inference, executor, sessions, egress, tools, audit);
+    let pipeline = Pipeline::new(
+        policy, inference, executor, sessions, egress, tools, audit, None,
+    );
 
     // Event with Regulated label.
     let mut event = make_labeled_event("health report", Principal::Owner);

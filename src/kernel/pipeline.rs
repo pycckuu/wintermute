@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::extractors::message::MessageIntentExtractor;
 use crate::extractors::{ExtractedMetadata, Extractor};
@@ -20,6 +20,9 @@ use crate::kernel::audit::AuditLogger;
 use crate::kernel::egress::EgressValidator;
 use crate::kernel::executor::{ExecutorError, PlanExecutor};
 use crate::kernel::inference::InferenceProxy;
+use crate::kernel::journal::{
+    CreateTaskParams, PersistedTaskState, SaveWorkingMemoryParams, TaskJournal,
+};
 use crate::kernel::planner::{strip_reasoning_tags, Planner, PlannerContext};
 use crate::kernel::policy::{self, PolicyEngine};
 use crate::kernel::session::{ConversationTurn, SessionStore, StructuredToolOutput, TaskResult};
@@ -81,10 +84,13 @@ pub struct Pipeline {
     tools: Arc<ToolRegistry>,
     #[allow(dead_code)] // Used by future pipeline phases for direct audit logging.
     audit: Arc<AuditLogger>,
+    /// Optional task journal for crash recovery (feature spec: persistence-recovery).
+    journal: Option<Arc<TaskJournal>>,
 }
 
 impl Pipeline {
     /// Create a new pipeline orchestrator (spec 7).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         policy: Arc<PolicyEngine>,
         inference: Arc<InferenceProxy>,
@@ -93,6 +99,7 @@ impl Pipeline {
         egress: EgressValidator,
         tools: Arc<ToolRegistry>,
         audit: Arc<AuditLogger>,
+        journal: Option<Arc<TaskJournal>>,
     ) -> Self {
         Self {
             policy,
@@ -102,7 +109,26 @@ impl Pipeline {
             egress,
             tools,
             audit,
+            journal,
         }
+    }
+
+    /// Best-effort journal write — logs warning on failure, never fails the pipeline.
+    fn journal_write<F>(&self, op_name: &str, f: F)
+    where
+        F: FnOnce(&TaskJournal) -> Result<(), crate::kernel::journal::JournalError>,
+    {
+        if let Some(ref j) = self.journal {
+            if let Err(e) = f(j) {
+                warn!(op = op_name, error = %e, "journal write failed (best-effort)");
+            }
+        }
+    }
+
+    /// Journal a pipeline failure and return the error (feature spec: persistence-recovery 4.3).
+    fn fail_with_journal(&self, task_id: uuid::Uuid, err: PipelineError) -> PipelineError {
+        self.journal_write("failed", |j| j.mark_failed(task_id, &err.to_string()));
+        err
     }
 
     /// Run the full 4-phase pipeline (spec 7).
@@ -124,6 +150,20 @@ impl Pipeline {
         task.state = TaskState::Extracting;
         info!(task_id = %task.task_id, "phase 0: extracting metadata");
 
+        // Journal: create task entry (feature spec: persistence-recovery 4.3).
+        let task_id_for_journal = task.task_id;
+        self.journal_write("create_task", |j| {
+            j.create_task(&CreateTaskParams {
+                task_id: task_id_for_journal,
+                template_id: template.template_id.clone(),
+                principal: serde_json::to_string(&task.principal).unwrap_or_default(),
+                trigger_event: None,
+                data_ceiling: task.data_ceiling,
+                output_sinks: task.output_sinks.clone(),
+                trace_id: Some(task.trace_id.clone()),
+            })
+        });
+
         let extractor = MessageIntentExtractor;
         let raw_text = labeled_event.event.payload.text.clone().unwrap_or_default();
         let metadata = extractor.extract(&raw_text);
@@ -134,6 +174,13 @@ impl Pipeline {
             extracted_taint.level = TaintLevel::Extracted;
             extracted_taint.touched_by.push(extractor.name().to_owned());
         }
+
+        // Journal: Phase 0 complete (feature spec: persistence-recovery 4.3).
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+        self.journal_write("phase0_complete", |j| {
+            j.update_state(task_id_for_journal, &PersistedTaskState::Planning)?;
+            j.update_extracted_metadata(task_id_for_journal, &metadata_json)
+        });
 
         // === PHASE 1: PLAN (spec 7, Phase 1) ===
         task.state = TaskState::Planning;
@@ -152,13 +199,39 @@ impl Pipeline {
                 task.data_ceiling,
             )
             .await
-            .map_err(|e| PipelineError::PlanningFailed(e.to_string()))?;
+            .map_err(|e| {
+                self.fail_with_journal(
+                    task_id_for_journal,
+                    PipelineError::PlanningFailed(e.to_string()),
+                )
+            })?;
 
-        let plan = Planner::parse_plan(&plan_response)
-            .map_err(|e| PipelineError::PlanningFailed(e.to_string()))?;
+        let plan = Planner::parse_plan(&plan_response).map_err(|e| {
+            self.fail_with_journal(
+                task_id_for_journal,
+                PipelineError::PlanningFailed(e.to_string()),
+            )
+        })?;
 
-        Planner::validate_plan(&plan, &task.allowed_tools, &task.denied_tools)
-            .map_err(|e| PipelineError::PlanningFailed(e.to_string()))?;
+        Planner::validate_plan(&plan, &task.allowed_tools, &task.denied_tools).map_err(|e| {
+            self.fail_with_journal(
+                task_id_for_journal,
+                PipelineError::PlanningFailed(e.to_string()),
+            )
+        })?;
+
+        // Journal: Phase 1 complete — save plan (feature spec: persistence-recovery 4.3).
+        let plan_json_for_journal = serde_json::to_string(&plan).unwrap_or_default();
+        self.journal_write("phase1_complete", |j| {
+            j.update_state(
+                task_id_for_journal,
+                &PersistedTaskState::Executing {
+                    current_step: 0,
+                    completed_steps: vec![],
+                },
+            )?;
+            j.update_plan(task_id_for_journal, &plan_json_for_journal)
+        });
 
         // === PHASE 2: EXECUTE (spec 7, Phase 2) ===
         task.state = TaskState::Executing { current_step: 0 };
@@ -178,17 +251,32 @@ impl Pipeline {
         // Use original event taint for write approval checks (not extracted).
         let exec_results = self
             .executor
-            .execute_plan(task, &exec_steps, &labeled_event.taint)
+            .execute_plan(
+                task,
+                &exec_steps,
+                &labeled_event.taint,
+                self.journal.as_deref(),
+            )
             .await
-            .map_err(|e| match e {
-                ExecutorError::ApprovalRequired(reason) => PipelineError::ApprovalRequired(reason),
-                other => PipelineError::ExecutionFailed(other.to_string()),
+            .map_err(|e| {
+                let err = match e {
+                    ExecutorError::ApprovalRequired(reason) => {
+                        PipelineError::ApprovalRequired(reason)
+                    }
+                    other => PipelineError::ExecutionFailed(other.to_string()),
+                };
+                self.fail_with_journal(task_id_for_journal, err)
             })?;
 
         // Propagate labels: result inherits max of all labels (spec 4.3).
         let mut all_labels: Vec<SecurityLabel> = exec_results.iter().map(|r| r.label).collect();
         all_labels.push(labeled_event.label);
         let data_label = self.policy.propagate_label(&all_labels);
+
+        // Journal: Phase 2 complete (feature spec: persistence-recovery 4.3).
+        self.journal_write("phase2_complete", |j| {
+            j.update_state(task_id_for_journal, &PersistedTaskState::Synthesizing)
+        });
 
         // === PHASE 3: SYNTHESIZE (spec 7, Phase 3) ===
         task.state = TaskState::Synthesizing;
@@ -229,7 +317,12 @@ impl Pipeline {
                 task.data_ceiling,
             )
             .await
-            .map_err(|e| PipelineError::SynthesisFailed(e.to_string()))?;
+            .map_err(|e| {
+                self.fail_with_journal(
+                    task_id_for_journal,
+                    PipelineError::SynthesisFailed(e.to_string()),
+                )
+            })?;
 
         // Strip reasoning model tags (e.g. DeepSeek R1 <think>...</think>).
         let response_text = strip_reasoning_tags(&raw_synth).trim().to_owned();
@@ -238,7 +331,12 @@ impl Pipeline {
         for sink in &task.output_sinks {
             self.egress
                 .validate_and_log(data_label, sink, response_text.len())
-                .map_err(|e| PipelineError::EgressDenied(e.to_string()))?;
+                .map_err(|e| {
+                    self.fail_with_journal(
+                        task_id_for_journal,
+                        PipelineError::EgressDenied(e.to_string()),
+                    )
+                })?;
         }
 
         // === STORE IN SESSION (spec 9.1, 9.2) ===
@@ -247,6 +345,10 @@ impl Pipeline {
 
         // Mark task complete.
         task.state = TaskState::Completed;
+
+        // Journal: task completed (feature spec: persistence-recovery 4.3).
+        self.journal_write("completed", |j| j.mark_completed(task_id_for_journal));
+
         info!(task_id = %task.task_id, "pipeline completed");
 
         Ok(PipelineOutput {
@@ -300,6 +402,9 @@ impl Pipeline {
     }
 
     /// Store task results and conversation turns in session memory (spec 9.1, 9.2).
+    ///
+    /// Persists to both the in-memory session store and the SQLite journal
+    /// so that conversation history survives process restarts.
     async fn store_session_results(
         &self,
         task: &Task,
@@ -320,32 +425,66 @@ impl Pipeline {
 
         let request_summary: String = raw_text.chars().take(SUMMARY_MAX_CHARS).collect();
         let response_summary: String = response_text.chars().take(SUMMARY_MAX_CHARS).collect();
+        let now = Utc::now();
 
         let task_result = TaskResult {
             task_id: task.task_id,
-            timestamp: Utc::now(),
-            request_summary,
-            tool_outputs: structured_outputs,
-            response_summary,
+            timestamp: now,
+            request_summary: request_summary.clone(),
+            tool_outputs: structured_outputs.clone(),
+            response_summary: response_summary.clone(),
             label: data_label,
         };
 
         let user_turn = ConversationTurn {
             role: "user".to_owned(),
             summary: raw_text.chars().take(SUMMARY_MAX_CHARS).collect(),
-            timestamp: Utc::now(),
+            timestamp: now,
         };
         let assistant_turn = ConversationTurn {
             role: "assistant".to_owned(),
             summary: response_text.chars().take(SUMMARY_MAX_CHARS).collect(),
-            timestamp: Utc::now(),
+            timestamp: now,
         };
 
+        // Store in-memory.
         let mut sessions = self.sessions.write().await;
         let session = sessions.get_or_create(&task.principal);
         session.push_result(task_result);
-        session.push_turn(user_turn);
-        session.push_turn(assistant_turn);
+        session.push_turn(user_turn.clone());
+        session.push_turn(assistant_turn.clone());
+
+        // Persist to journal (best-effort, spec 9.1, 9.2).
+        let principal_key = serde_json::to_string(&task.principal).unwrap_or_default();
+        self.journal_write("save_user_turn", |j| {
+            j.save_conversation_turn(&principal_key, &user_turn.role, &user_turn.summary, &now)
+        });
+        self.journal_write("save_assistant_turn", |j| {
+            j.save_conversation_turn(
+                &principal_key,
+                &assistant_turn.role,
+                &assistant_turn.summary,
+                &now,
+            )
+        });
+        let outputs_json = serde_json::to_string(&structured_outputs).unwrap_or_default();
+        let task_id_for_memory = task.task_id;
+        self.journal_write("save_working_memory", |j| {
+            j.save_working_memory_result(&SaveWorkingMemoryParams {
+                principal: &principal_key,
+                task_id: task_id_for_memory,
+                timestamp: &now,
+                request_summary: &request_summary,
+                tool_outputs_json: &outputs_json,
+                response_summary: &response_summary,
+                label: data_label,
+            })
+        });
+        // Trim to capacity limits.
+        self.journal_write("trim_turns", |j| {
+            j.trim_conversation_turns(&principal_key, 20)
+        });
+        self.journal_write("trim_memory", |j| j.trim_working_memory(&principal_key, 10));
     }
 }
 
@@ -627,6 +766,7 @@ mod tests {
             egress,
             tools,
             audit,
+            None, // No journal for basic pipeline tests.
         );
 
         (pipeline, sessions)
@@ -767,7 +907,9 @@ mod tests {
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
 
-        let pipeline = Pipeline::new(policy, inference, executor, sessions, egress, tools, audit);
+        let pipeline = Pipeline::new(
+            policy, inference, executor, sessions, egress, tools, audit, None,
+        );
 
         // Event with Regulated label targeting a public sink.
         let mut event = make_labeled_event("health report", Principal::Owner);
@@ -825,6 +967,7 @@ mod tests {
             egress,
             tools,
             audit,
+            None, // No journal for third-party context test.
         );
 
         let template = make_third_party_template();
@@ -862,6 +1005,210 @@ mod tests {
         let session = store.get(&principal);
         assert!(session.is_some(), "third-party session should be created");
     }
+
+    // ── Journal integration helpers ──
+
+    fn make_pipeline_with_journal(
+        plan_json: &str,
+        synth_text: &str,
+    ) -> (Pipeline, Arc<RwLock<SessionStore>>, Arc<TaskJournal>) {
+        let buf = SharedBuf::new();
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+        let inference = Arc::new(InferenceProxy::with_provider(Box::new(
+            MockPlannerProvider::new(plan_json, synth_text),
+        )));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockEmailTool));
+        let tools = Arc::new(registry);
+        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let egress = EgressValidator::new(policy.clone(), audit.clone());
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("in-memory journal"));
+
+        let pipeline = Pipeline::new(
+            policy,
+            inference,
+            executor,
+            sessions.clone(),
+            egress,
+            tools,
+            audit,
+            Some(Arc::clone(&journal)),
+        );
+
+        (pipeline, sessions, journal)
+    }
+
+    // ── Journal integration tests ──
+
+    /// Journal records Completed state after a successful pipeline run
+    /// (feature spec: persistence-recovery 4.3).
+    #[tokio::test]
+    async fn test_journal_records_completed() {
+        let plan_json =
+            r#"{"plan":[{"step":1,"tool":"email.list","args":{"account":"personal","limit":10}}]}"#;
+        let synth_text = "You have 2 emails.";
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(plan_json, synth_text);
+
+        let event = make_labeled_event("check my email", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+        let task_id = task.task_id;
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "pipeline should succeed: {result:?}");
+
+        let persisted = journal
+            .get_task(task_id)
+            .expect("task should exist in journal");
+        assert!(
+            matches!(persisted.state, PersistedTaskState::Completed),
+            "journal state should be Completed, got: {:?}",
+            persisted.state
+        );
+    }
+
+    /// Journal stores the plan JSON from Phase 1
+    /// (feature spec: persistence-recovery 4.3).
+    #[tokio::test]
+    async fn test_journal_stores_plan() {
+        let plan_json = r#"{"plan":[{"step":1,"tool":"email.list","args":{"limit":5}}]}"#;
+        let synth_text = "Listed emails.";
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(plan_json, synth_text);
+
+        let event = make_labeled_event("check email", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+        let task_id = task.task_id;
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok());
+
+        let persisted = journal.get_task(task_id).expect("task should exist");
+        assert!(persisted.plan_json.is_some(), "plan should be stored");
+        let plan_str = persisted.plan_json.expect("checked");
+        assert!(
+            plan_str.contains("email.list"),
+            "plan should contain email.list tool"
+        );
+    }
+
+    /// Journal stores extracted metadata from Phase 0
+    /// (feature spec: persistence-recovery 4.3).
+    #[tokio::test]
+    async fn test_journal_stores_metadata() {
+        let plan_json = r#"{"plan":[]}"#;
+        let synth_text = "Hello!";
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(plan_json, synth_text);
+
+        let event = make_labeled_event("hello world", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+        let task_id = task.task_id;
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok());
+
+        let persisted = journal.get_task(task_id).expect("task should exist");
+        assert!(
+            persisted.extracted_metadata.is_some(),
+            "metadata should be stored"
+        );
+    }
+
+    /// Journal records failure when egress is denied
+    /// (feature spec: persistence-recovery 4.3).
+    #[tokio::test]
+    async fn test_journal_records_failure() {
+        let plan_json = r#"{"plan":[]}"#;
+        let synth_text = "Health report.";
+        let (pipeline, _sessions, journal) = {
+            let buf = SharedBuf::new();
+            let policy = Arc::new(PolicyEngine::with_defaults());
+            let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+            let inference = Arc::new(InferenceProxy::with_provider(Box::new(
+                MockPlannerProvider::new(plan_json, synth_text),
+            )));
+            let mut registry = ToolRegistry::new();
+            registry.register(Box::new(MockEmailTool));
+            let tools = Arc::new(registry);
+            let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+            let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+            let sessions = Arc::new(RwLock::new(SessionStore::new()));
+            let egress = EgressValidator::new(policy.clone(), audit.clone());
+            let journal = Arc::new(TaskJournal::open_in_memory().expect("in-memory journal"));
+            let pipeline = Pipeline::new(
+                policy,
+                inference,
+                executor,
+                sessions.clone(),
+                egress,
+                tools,
+                audit,
+                Some(Arc::clone(&journal)),
+            );
+            (pipeline, sessions, journal)
+        };
+
+        // Regulated event to public sink -> egress denied.
+        let mut event = make_labeled_event("health report", Principal::Owner);
+        event.label = SecurityLabel::Regulated;
+        let template = make_template();
+        let mut task = make_task(&template);
+        task.output_sinks = vec!["sink:whatsapp:reply_to_sender".to_owned()];
+        let task_id = task.task_id;
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_err(), "should fail egress");
+
+        let persisted = journal.get_task(task_id).expect("task should exist");
+        assert!(
+            matches!(persisted.state, PersistedTaskState::Failed),
+            "journal state should be Failed, got: {:?}",
+            persisted.state
+        );
+        assert!(persisted.error.is_some(), "error should be recorded");
+    }
+
+    /// Pipeline with None journal works fine (backward compatibility).
+    #[tokio::test]
+    async fn test_pipeline_none_journal() {
+        let plan_json = r#"{"plan":[]}"#;
+        let synth_text = "Works!";
+        let (pipeline, _sessions) = make_pipeline(plan_json, synth_text);
+
+        let event = make_labeled_event("hello", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "None journal should not affect pipeline");
+    }
+
+    /// Journal records template_id and trace_id correctly
+    /// (feature spec: persistence-recovery 4.3).
+    #[tokio::test]
+    async fn test_journal_records_task_metadata() {
+        let plan_json = r#"{"plan":[]}"#;
+        let synth_text = "Done.";
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(plan_json, synth_text);
+
+        let event = make_labeled_event("hello", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+        let task_id = task.task_id;
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok());
+
+        let persisted = journal.get_task(task_id).expect("task should exist");
+        assert_eq!(persisted.template_id, "test_owner_general");
+        assert_eq!(persisted.trace_id.as_deref(), Some("test-trace"));
+    }
+
+    // ── Existing planner context tests ──
 
     /// Verify that the pipeline correctly builds PlannerContext by exercising
     /// build_planner_context directly. For third-party triggers, the context
