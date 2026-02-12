@@ -6,6 +6,7 @@
 
 - [x] Phase 0: Repository setup from template
 - [x] Phase 1: Kernel Core (73 tests passing — 66 unit + 7 integration)
+- [x] Phase 2: Telegram + Pipeline + First Tools (274 tests — 248 unit + 7 integration + 19 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -28,18 +29,24 @@ Goal: Working kernel that receives events, matches templates, enforces policies.
 
 Goal: End-to-end flow: Telegram message -> extract -> plan -> execute -> synthesize -> reply.
 
-- [ ] 2.1 Telegram adapter (in-process async task, polling)
-- [ ] 2.2 Phase 0: Message intent extractor (simple classifier)
-- [ ] 2.3 Phase 1: Planner (LLM via inference proxy)
-- [ ] 2.4 Phase 2: Kernel plan executor (in-process tool dispatch)
-- [ ] 2.5 Phase 3: Synthesizer (LLM via inference proxy)
-- [ ] 2.6 Egress validation and message delivery
-- [ ] 2.7 Session working memory (per-principal, in vault)
-- [ ] 2.8 Conversation history (sliding window)
-- [ ] 2.9 Two read-only tools: calendar.freebusy, email.list + email.read
-- [ ] 2.10 ScopedHttpClient with domain allowlist + private IP blocking
-- [ ] 2.11 Approval queue (Telegram inline buttons) for tainted writes
-- [ ] 2.12 Regression tests: 1, 2, 4, 5, 7, 8, 9, 13, 16, 17
+- [x] 2.1 Telegram adapter (in-process async task, polling)
+- [x] 2.2 Phase 0: Message intent extractor (simple classifier)
+- [x] 2.3 Phase 1: Planner (LLM via inference proxy)
+- [x] 2.4 Phase 2: Kernel plan executor (in-process tool dispatch)
+- [x] 2.5 Phase 3: Synthesizer (LLM via inference proxy)
+- [x] 2.6 Egress validation and message delivery
+- [x] 2.7 Session working memory (per-principal, in vault)
+- [x] 2.8 Conversation history (sliding window)
+- [x] 2.9 Two read-only tools: calendar.freebusy, email.list + email.read
+- [x] 2.10 ScopedHttpClient with domain allowlist + private IP blocking
+- [x] 2.10b Pipeline orchestrator (4-phase Plan-Then-Execute, spec 7)
+- [x] 2.11a Approval queue core (submit/resolve/timeout, 14 tests)
+- [x] 2.11b-F1 Policy Engine: inference routing check (spec 11.1, 7 tests)
+- [x] 2.11b-F2 InferenceProxy: generate_with_config with label-based routing (7 tests)
+- [x] 2.11b-F3 main.rs: full startup wiring and Telegram event loop (spec 14.1)
+- [x] 2.11b-F4 kernel/mod.rs: cleanup module declarations
+- [ ] 2.11b Approval queue Telegram inline button integration
+- [x] 2.12 Regression tests: 1, 2, 4, 5, 7, 8, 9, 13, 16, 17 (19 tests)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
@@ -67,7 +74,7 @@ Goal: Full multi-channel, scheduled automation, production readiness.
 - [ ] 4.4 WhatsApp adapter (Baileys subprocess)
 - [ ] 4.5 Remaining tools: Bluesky, Twitter, Fireflies, Cloudflare, Moltbook
 - [ ] 4.6 Transcript extractor, health data extractor
-- [ ] 4.7 Cloud LLM routing (label-based, with owner opt-in)
+- [x] 4.7 Cloud LLM routing (label-based, with owner opt-in) — OpenAI + Anthropic providers, multi-provider proxy, env-based config
 - [ ] 4.8 Circuit breakers + fallback chains
 - [ ] 4.9 Vault backup/restore
 - [ ] 4.10 OpenTelemetry integration

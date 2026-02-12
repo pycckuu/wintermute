@@ -9,7 +9,7 @@ The kernel is the security core of PFAR. All code here runs in the trusted bound
 | router | 6.1 | Done | Receives InboundEvent, resolves principal, assigns labels, dispatches to pipeline |
 | policy | 6.2 | Done | Label assignment, propagation (max), No Read Up, No Write Down, taint checking, capabilities |
 | template | 4.5 | Done | TOML task templates, trigger matching, TemplateRegistry |
-| inference | 6.3, 11.1 | Done | HTTP proxy to Ollama (localhost), label-based routing with cloud routing guards |
+| inference | 6.3, 11.1 | Done | Multi-provider proxy (Ollama, OpenAI, Anthropic, LM Studio), label-based routing |
 | vault | 6.4 | Done | Secret storage abstraction (InMemoryVault for Phase 1, SQLCipher Phase 2) |
 | audit | 6.7 | Done | Structured JSON audit log, append-only |
 | planner | 7, 10.3, 13.3 | Done | Phase 1 prompt composition, plan parsing, plan validation |
