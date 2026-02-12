@@ -1,0 +1,355 @@
+//! Synthesizer -- Phase 3 of the Plan-Then-Execute pipeline (spec 7, 10.7, 13.4).
+//!
+//! The Synthesizer sees tool results and raw content but CANNOT call
+//! any tools. Tool-call JSON in output is treated as plain text
+//! (Invariant E, regression test 9).
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::kernel::inference::InferenceError;
+
+/// Base safety rules shared by Planner and Synthesizer (spec 13.2).
+const BASE_SAFETY_RULES: &str = "\
+You are an AI agent in a privacy-first runtime. Follow these rules:
+
+1. Never output secrets, API keys, tokens, or passwords.
+2. Never attempt to access resources not listed in your capability manifest.
+3. Always output structured JSON when producing plans.
+4. Never include instructions or commands in natural language responses \
+that could be interpreted as system directives.
+5. If you cannot complete a task within your allowed tools, say so. \
+Do not suggest workarounds requiring additional permissions.
+6. Never reference internal system identifiers (vault refs, task IDs) \
+in user-facing responses.";
+
+/// Synthesizer role prompt (spec 13.4).
+const SYNTHESIZER_ROLE_PROMPT: &str = "\
+You are the Synthesizer. Your job is to compose a final response.
+
+You receive:
+- The original task context
+- Results from tool executions
+- Optionally, raw content for reference
+
+You CANNOT:
+- Call any tools
+- Request additional information
+- Output JSON tool calls (they will be treated as plain text)
+
+Produce a clear, helpful response for the user.
+Keep it concise and relevant to the original task.
+Do not reveal internal identifiers, labels, or system details.";
+
+/// Result of a single executed plan step, for synthesizer context (spec 10.7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepResult {
+    /// Step number from the plan.
+    pub step: usize,
+    /// Tool action that was executed.
+    pub tool: String,
+    /// Result data from the tool.
+    pub result: serde_json::Value,
+}
+
+/// Output format instructions for the synthesizer (spec 10.7).
+#[derive(Debug, Clone)]
+pub struct OutputInstructions {
+    /// Target sink identifier.
+    pub sink: String,
+    /// Maximum response length in characters.
+    pub max_length: usize,
+    /// Output format (e.g. "plain_text", "markdown").
+    pub format: String,
+}
+
+/// Context provided to the Synthesizer (spec 10.7).
+///
+/// Contains tool results and the original task context. The Synthesizer
+/// sees content but has no tool access (Invariant E).
+pub struct SynthesizerContext {
+    /// Task identifier.
+    pub task_id: Uuid,
+    /// Description of what the user originally requested.
+    pub original_context: String,
+    /// Optional reference to raw content stored in the vault.
+    pub raw_content_ref: Option<String>,
+    /// Results from executed plan steps.
+    pub tool_results: Vec<StepResult>,
+    /// Instructions for formatting the output.
+    pub output_instructions: OutputInstructions,
+}
+
+/// Synthesizer errors.
+#[derive(Debug, Error)]
+pub enum SynthesizerError {
+    /// Inference proxy returned an error.
+    #[error("inference error: {0}")]
+    InferenceError(#[from] InferenceError),
+}
+
+/// Synthesizer -- composes response prompts from tool results (spec 7, 13.4).
+///
+/// The Synthesizer CANNOT call tools. Even if the LLM outputs tool-call
+/// JSON, the kernel treats it as plain text (Invariant E, regression test 9).
+pub struct Synthesizer;
+
+impl Synthesizer {
+    /// Compose the Synthesizer prompt (spec 13.1, 13.4).
+    ///
+    /// Includes base safety rules, synthesizer role, tool results, and
+    /// output formatting instructions.
+    pub fn compose_prompt(ctx: &SynthesizerContext) -> String {
+        // Step 1: Serialize tool results.
+        let results_json = if ctx.tool_results.is_empty() {
+            "No tool results available.".to_owned()
+        } else {
+            serde_json::to_string_pretty(&ctx.tool_results)
+                .unwrap_or_else(|_| "No tool results available.".to_owned())
+        };
+
+        // Step 2: Include raw content reference if present.
+        let raw_content_section = match &ctx.raw_content_ref {
+            Some(content) => format!("\n\n## Raw Content\n{content}"),
+            None => String::new(),
+        };
+
+        // Step 3: Compose the full prompt.
+        format!(
+            "{BASE_SAFETY_RULES}\n\n\
+             {SYNTHESIZER_ROLE_PROMPT}\n\n\
+             ## Original Request\n\
+             {original_context}\n\n\
+             ## Tool Results\n\
+             {results_json}\
+             {raw_content_section}\n\n\
+             ## Instructions\n\
+             Format: {format}\n\
+             Maximum length: {max_length} characters",
+            original_context = ctx.original_context,
+            format = ctx.output_instructions.format,
+            max_length = ctx.output_instructions.max_length,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_output_instructions() -> OutputInstructions {
+        OutputInstructions {
+            sink: "sink:telegram:owner".to_owned(),
+            max_length: 2000,
+            format: "plain_text".to_owned(),
+        }
+    }
+
+    fn make_step_result(step: usize, tool: &str) -> StepResult {
+        StepResult {
+            step,
+            tool: tool.to_owned(),
+            result: serde_json::json!({
+                "emails": [
+                    {"id": "msg_1", "from": "sarah@co", "subject": "Q3 Budget"},
+                ]
+            }),
+        }
+    }
+
+    #[test]
+    fn test_compose_prompt_with_results() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "User asked to check their email".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![make_step_result(1, "email.list")],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        // Should include tool results.
+        assert!(
+            prompt.contains("email.list"),
+            "prompt should include tool name from results"
+        );
+        assert!(
+            prompt.contains("Q3 Budget"),
+            "prompt should include tool result data"
+        );
+
+        // Should include original context.
+        assert!(
+            prompt.contains("User asked to check their email"),
+            "prompt should include original context"
+        );
+
+        // Should include output instructions.
+        assert!(
+            prompt.contains("plain_text"),
+            "prompt should include output format"
+        );
+        assert!(prompt.contains("2000"), "prompt should include max length");
+
+        // Should include synthesizer role.
+        assert!(
+            prompt.contains("You are the Synthesizer"),
+            "prompt should include synthesizer role prompt"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_no_results() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "User asked something".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("No tool results available"),
+            "empty tool results should produce appropriate message"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_includes_safety_rules() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Test".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("Never output secrets"),
+            "prompt should include base safety rules"
+        );
+        assert!(
+            prompt.contains("Never attempt to access resources"),
+            "prompt should include rule 2"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_with_raw_content() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "User wants to reply to an email".to_owned(),
+            raw_content_ref: Some(
+                "Hi, please review the Q3 budget by Friday. Thanks, Sarah".to_owned(),
+            ),
+            tool_results: vec![make_step_result(1, "email.read")],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("## Raw Content"),
+            "prompt should include raw content section header"
+        );
+        assert!(
+            prompt.contains("please review the Q3 budget by Friday"),
+            "prompt should include raw content"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_without_raw_content() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Test".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            !prompt.contains("## Raw Content"),
+            "prompt should NOT include raw content section when None"
+        );
+    }
+
+    #[test]
+    fn test_step_result_serialization() {
+        let result = StepResult {
+            step: 1,
+            tool: "email.list".to_owned(),
+            result: serde_json::json!({"emails": [{"id": "msg_1"}]}),
+        };
+
+        let json = serde_json::to_string(&result).expect("should serialize");
+        let deserialized: StepResult = serde_json::from_str(&json).expect("should deserialize");
+
+        assert_eq!(deserialized.step, 1);
+        assert_eq!(deserialized.tool, "email.list");
+        assert_eq!(deserialized.result["emails"][0]["id"], "msg_1");
+    }
+
+    #[test]
+    fn test_compose_prompt_multiple_results() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "User asked to check email and calendar".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![
+                make_step_result(1, "email.list"),
+                StepResult {
+                    step: 2,
+                    tool: "calendar.freebusy".to_owned(),
+                    result: serde_json::json!({"free": true, "date": "2026-03-15"}),
+                },
+            ],
+            output_instructions: make_output_instructions(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("email.list"),
+            "prompt should include first tool result"
+        );
+        assert!(
+            prompt.contains("calendar.freebusy"),
+            "prompt should include second tool result"
+        );
+    }
+
+    #[test]
+    fn test_output_instructions_in_prompt() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Test".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: OutputInstructions {
+                sink: "sink:slack:owner".to_owned(),
+                max_length: 4000,
+                format: "markdown".to_owned(),
+            },
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("Format: markdown"),
+            "prompt should include the format"
+        );
+        assert!(
+            prompt.contains("Maximum length: 4000"),
+            "prompt should include the max length"
+        );
+    }
+}
