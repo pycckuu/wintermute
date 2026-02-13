@@ -7,6 +7,7 @@
 //! Tools cannot access the vault, other tools, adapters, or kernel
 //! internals directly — isolation is enforced by API design (spec 5.4).
 
+pub mod admin;
 pub mod calendar;
 pub mod email;
 pub mod scoped_http;

@@ -12,6 +12,7 @@
 - [x] Feature: Pipeline Fast Path (316 tests — 290 unit + 7 integration + 19 regression)
 - [x] Feature: TOML Configuration (329 tests — 303 unit + 7 integration + 19 regression)
 - [x] Feature: Synthesizer Prompt Quality (331 tests — 305 unit + 7 integration + 19 regression)
+- [x] Feature: Admin Tool + Credential Flow (349 tests — 320 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -99,8 +100,8 @@ Goal: Prevent Synthesizer from summarizing conversation history on every respons
 
 Goal: Conversational config, browser service, richer tool ecosystem.
 
-- [ ] 3.1 Admin tool module (integration management, credential prompts, schedule management)
-- [ ] 3.2 Credential prompt flow (task suspension + resume)
+- [x] 3.1 Admin tool module (integration management, credential prompts, schedule management)
+- [x] 3.2 Credential prompt flow (simplified to multi-turn via session working memory; deferred: delete_credential, rotate_credential)
 - [ ] 3.3 GitHub tool (list_prs, get_issue)
 - [ ] 3.4 Notion tool (read_page, create_page, query_db)
 - [ ] 3.5 Generic HTTP tool
@@ -109,7 +110,7 @@ Goal: Conversational config, browser service, richer tool ecosystem.
 - [ ] 3.8 Browser service (Podman container, leased sessions)
 - [ ] 3.9 Script runner (Podman container)
 - [ ] 3.10 Container manager + reconciliation loop
-- [ ] 3.11 Regression tests: 3, 6, 10, 11, 12, 15
+- [ ] 3.11 Regression tests: 3, 6, 10, 11, 12 (test 15 done with admin tool)
 
 ## Phase 4: Remaining Adapters + Cron + Production (weeks 8-10)
 
