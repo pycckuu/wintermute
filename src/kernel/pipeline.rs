@@ -41,6 +41,11 @@ const PERSONA_PENDING: &str = "__pending__";
 /// Maximum length for persona string (persona-onboarding spec §3).
 const PERSONA_MAX_LEN: usize = 500;
 
+/// Minimum length for a persona reply to be accepted.
+/// Short replies like "Hi" or "Ok" are not valid persona configurations
+/// and should re-trigger onboarding.
+const PERSONA_MIN_LEN: usize = 10;
+
 /// Truncate text to SUMMARY_MAX_CHARS for session storage (spec 9.1).
 fn truncate_summary(text: &str) -> String {
     text.chars().take(SUMMARY_MAX_CHARS).collect()
@@ -286,15 +291,18 @@ impl Pipeline {
         // Only runs when journal is available (persona requires persistence).
         let mut persona: Option<String> = None;
         let mut is_onboarding = false;
+        let mut is_persona_just_configured = false;
         let mut force_fast_path = false;
 
         if self.journal.is_some() {
             persona = self.load_persona();
+            info!(persona_state = ?persona.as_deref().map(|p| if p == PERSONA_PENDING { "__pending__" } else { "<set>" }), "persona loaded");
 
             if matches!(task.principal, Principal::Owner) {
                 match persona.as_deref() {
                     None => {
                         // First message ever — mark pending, trigger onboarding.
+                        info!("persona: first owner message, triggering onboarding");
                         self.store_persona(PERSONA_PENDING);
                         persona = None;
                         is_onboarding = true;
@@ -303,18 +311,26 @@ impl Pipeline {
                     Some(PERSONA_PENDING) => {
                         // Second message — store owner's reply as real persona.
                         let trimmed = raw_text.trim();
-                        if trimmed.is_empty() {
-                            // Empty reply — stay in pending, re-trigger onboarding.
+                        if trimmed.is_empty() || trimmed.chars().count() < PERSONA_MIN_LEN {
+                            // Too short to be a valid persona config — re-trigger onboarding.
+                            info!(
+                                reply_len = trimmed.len(),
+                                "persona: reply too short, re-triggering onboarding"
+                            );
                             is_onboarding = true;
                             persona = None;
                         } else {
                             let capped: String = trimmed.chars().take(PERSONA_MAX_LEN).collect();
+                            info!("persona: storing owner's configuration");
                             self.store_persona(&capped);
                             persona = Some(capped);
+                            is_persona_just_configured = true;
                         }
                         force_fast_path = true;
                     }
-                    Some(_) => {} // Persona configured, normal flow.
+                    Some(_) => {
+                        info!("persona: already configured, normal flow");
+                    }
                 }
             } else {
                 // Non-owner: filter out pending sentinel.
@@ -377,6 +393,7 @@ impl Pipeline {
             conversation_history: conversation,
             persona,
             is_onboarding,
+            is_persona_just_configured,
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);
@@ -1477,6 +1494,31 @@ mod tests {
         assert!(
             prompts[0].contains("Never mention internal system details"),
             "synth prompt should contain anti-leak instruction"
+        );
+    }
+
+    /// Short reply like "Hi" with __pending__ → re-triggers onboarding, does NOT store.
+    #[tokio::test]
+    async fn test_pipeline_short_reply_retriggers_onboarding() {
+        let synth_text = "I still need your configuration! What should I call myself?";
+        let (pipeline, _sessions, journal) =
+            make_pipeline_with_journal(synth_text, "ERROR: second call unexpected");
+
+        // Pre-set the pending sentinel.
+        journal.set_persona(PERSONA_PENDING).expect("set pending");
+
+        let event = make_labeled_event("Hi", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "short reply should succeed: {result:?}");
+
+        // Journal should still have __pending__ — "Hi" is too short.
+        let stored = journal.get_persona().expect("get").expect("should exist");
+        assert_eq!(
+            stored, PERSONA_PENDING,
+            "short reply should NOT overwrite pending"
         );
     }
 
