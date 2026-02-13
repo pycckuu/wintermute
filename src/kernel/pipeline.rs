@@ -27,12 +27,17 @@ use crate::kernel::session::{ConversationTurn, SessionStore, StructuredToolOutpu
 use crate::kernel::synthesizer::{OutputInstructions, StepResult, Synthesizer, SynthesizerContext};
 use crate::kernel::template::TaskTemplate;
 use crate::tools::ToolRegistry;
-use crate::types::{LabeledEvent, SecurityLabel, TaintLevel, Task, TaskState};
+use crate::types::{LabeledEvent, Principal, SecurityLabel, TaintLevel, Task, TaskState};
 
 use chrono::Utc;
 
 /// Maximum characters stored in request/response summaries for session memory.
 const SUMMARY_MAX_CHARS: usize = 100;
+
+/// Truncate text to SUMMARY_MAX_CHARS for session storage (spec 9.1).
+fn truncate_summary(text: &str) -> String {
+    text.chars().take(SUMMARY_MAX_CHARS).collect()
+}
 
 /// Pipeline errors (spec 7, 14.6).
 #[derive(Debug, Error)]
@@ -123,44 +128,62 @@ impl Pipeline {
         }
     }
 
-    /// Run the full 4-phase pipeline (spec 7).
-    ///
-    /// Phases:
-    /// 0. Extract structured metadata from the raw event
-    /// 1. Plan an execution via LLM (no raw content, no tools)
-    /// 2. Execute the plan mechanically (no LLM)
-    /// 3. Synthesize a response via LLM (sees content, no tools)
-    ///
-    /// Then validates egress and stores results in session working memory.
-    pub async fn run(
+    /// Extract structured metadata from raw event text (spec 7, Phase 0).
+    fn extract_metadata(
         &self,
-        labeled_event: LabeledEvent,
-        task: &mut Task,
-        template: &TaskTemplate,
-    ) -> Result<PipelineOutput, PipelineError> {
-        // === PHASE 0: EXTRACT (spec 7, Phase 0) ===
-        task.state = TaskState::Extracting;
-        info!(task_id = %task.task_id, "phase 0: extracting metadata");
-
+        raw_text: &str,
+        labeled_event: &mut LabeledEvent,
+    ) -> ExtractedMetadata {
         let extractor = MessageIntentExtractor;
-        let raw_text = labeled_event.event.payload.text.clone().unwrap_or_default();
-        let metadata = extractor.extract(&raw_text);
+        let metadata = extractor.extract(raw_text);
 
         // Taint transition: structured fields get Extracted taint (spec 4.4).
-        let mut _extracted_taint = labeled_event.taint.clone();
-        if _extracted_taint.level == TaintLevel::Raw {
-            _extracted_taint.level = TaintLevel::Extracted;
-            _extracted_taint
+        if labeled_event.taint.level == TaintLevel::Raw {
+            labeled_event.taint.level = TaintLevel::Extracted;
+            labeled_event
+                .taint
                 .touched_by
                 .push(extractor.name().to_owned());
         }
 
+        metadata
+    }
+
+    /// Check if this task needs the full pipeline with tool execution (spec 7, fast path).
+    ///
+    /// Returns `true` if the extracted metadata suggests tools could be useful
+    /// AND the template allows relevant tools. Returns `false` for greetings,
+    /// casual chat, or when no matching tools are available.
+    fn should_use_full_pipeline(
+        &self,
+        metadata: &ExtractedMetadata,
+        template: &TaskTemplate,
+    ) -> bool {
+        metadata.intent.is_some() && template.allowed_tools.iter().any(|t| metadata.could_use(t))
+    }
+
+    /// Execute Phases 1-2: Plan and Execute (spec 7, Phases 1-2).
+    ///
+    /// Returns tool execution results, final data label, and pipeline path indicator.
+    async fn execute_full_pipeline(
+        &self,
+        task: &mut Task,
+        template: &TaskTemplate,
+        metadata: &ExtractedMetadata,
+        labeled_event: &LabeledEvent,
+    ) -> Result<
+        (
+            Vec<crate::kernel::executor::StepExecutionResult>,
+            SecurityLabel,
+            &'static str,
+        ),
+        PipelineError,
+    > {
         // === PHASE 1: PLAN (spec 7, Phase 1) ===
         task.state = TaskState::Planning;
-        info!(task_id = %task.task_id, "phase 1: planning");
+        info!(task_id = %task.task_id, pipeline_path = "full", "phase 1: planning");
 
-        let planner_ctx = self.build_planner_context(task, template, &metadata).await;
-
+        let planner_ctx = self.build_planner_context(task, template, metadata).await;
         let prompt = Planner::compose_prompt(&planner_ctx);
 
         let plan_response = self
@@ -210,6 +233,43 @@ impl Pipeline {
         all_labels.push(labeled_event.label);
         let data_label = self.policy.propagate_label(&all_labels);
 
+        Ok((exec_results, data_label, "full"))
+    }
+
+    /// Run the full 4-phase pipeline (spec 7).
+    ///
+    /// Phases:
+    /// 0. Extract structured metadata from the raw event
+    /// 1. Plan an execution via LLM (no raw content, no tools)
+    /// 2. Execute the plan mechanically (no LLM)
+    /// 3. Synthesize a response via LLM (sees content, no tools)
+    ///
+    /// Then validates egress and stores results in session working memory.
+    pub async fn run(
+        &self,
+        mut labeled_event: LabeledEvent,
+        task: &mut Task,
+        template: &TaskTemplate,
+    ) -> Result<PipelineOutput, PipelineError> {
+        // === PHASE 0: EXTRACT (spec 7, Phase 0) ===
+        task.state = TaskState::Extracting;
+        info!(task_id = %task.task_id, "phase 0: extracting metadata");
+
+        let raw_text = labeled_event.event.payload.text.clone().unwrap_or_default();
+        let metadata = self.extract_metadata(&raw_text, &mut labeled_event);
+
+        // === FAST PATH CHECK (spec 7, fast path) ===
+        let needs_tools = self.should_use_full_pipeline(&metadata, template);
+
+        let (exec_results, data_label, pipeline_path) = if needs_tools {
+            self.execute_full_pipeline(task, template, &metadata, &labeled_event)
+                .await?
+        } else {
+            // Fast path: no tools needed, skip directly to Phase 3 (spec 7, fast path).
+            info!(task_id = %task.task_id, pipeline_path = "fast", "skipping planner — no tools needed");
+            (vec![], labeled_event.label, "fast")
+        };
+
         // === PHASE 3: SYNTHESIZE (spec 7, Phase 3) ===
         task.state = TaskState::Synthesizing;
         info!(task_id = %task.task_id, "phase 3: synthesizing response");
@@ -227,18 +287,7 @@ impl Pipeline {
         let first_sink = task.output_sinks.first().unwrap_or(&default_sink);
 
         // Read session data for synthesizer context (spec 9.3).
-        let (working_memory, conversation) = {
-            let sessions = self.sessions.read().await;
-            let memory = sessions
-                .get(&task.principal)
-                .map(|s| s.recent_results().iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            let history = sessions
-                .get(&task.principal)
-                .map(|s| s.conversation_history().iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            (memory, history)
-        };
+        let (working_memory, conversation) = self.read_session_data(&task.principal).await;
 
         let synth_ctx = SynthesizerContext {
             task_id: task.task_id,
@@ -284,13 +333,32 @@ impl Pipeline {
         // Mark task complete.
         task.state = TaskState::Completed;
 
-        info!(task_id = %task.task_id, "pipeline completed");
+        info!(task_id = %task.task_id, pipeline_path, "pipeline completed");
 
         Ok(PipelineOutput {
             response_text,
             output_sinks: task.output_sinks.clone(),
             data_label,
         })
+    }
+
+    /// Read session working memory and conversation history for a principal (spec 9.1, 9.2).
+    ///
+    /// Acquires a read lock on the session store, clones the data, then releases the lock.
+    async fn read_session_data(
+        &self,
+        principal: &Principal,
+    ) -> (Vec<TaskResult>, Vec<ConversationTurn>) {
+        let sessions = self.sessions.read().await;
+        let working_memory = sessions
+            .get(principal)
+            .map(|s| s.recent_results().iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let conversation = sessions
+            .get(principal)
+            .map(|s| s.conversation_history().iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        (working_memory, conversation)
     }
 
     /// Build the PlannerContext from task, template, and extracted metadata (spec 10.3).
@@ -303,19 +371,7 @@ impl Pipeline {
         template: &TaskTemplate,
         metadata: &ExtractedMetadata,
     ) -> PlannerContext {
-        // Read session data under the lock, then release.
-        let (working_memory, conversation) = {
-            let sessions = self.sessions.read().await;
-            let memory = sessions
-                .get(&task.principal)
-                .map(|s| s.recent_results().iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            let history = sessions
-                .get(&task.principal)
-                .map(|s| s.conversation_history().iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            (memory, history)
-        };
+        let (working_memory, conversation) = self.read_session_data(&task.principal).await;
 
         // Get available tools for this template.
         let available_tools = self
@@ -358,8 +414,8 @@ impl Pipeline {
             })
             .collect();
 
-        let request_summary: String = raw_text.chars().take(SUMMARY_MAX_CHARS).collect();
-        let response_summary: String = response_text.chars().take(SUMMARY_MAX_CHARS).collect();
+        let request_summary = truncate_summary(raw_text);
+        let response_summary = truncate_summary(response_text);
         let now = Utc::now();
 
         let task_result = TaskResult {
@@ -373,12 +429,12 @@ impl Pipeline {
 
         let user_turn = ConversationTurn {
             role: "user".to_owned(),
-            summary: raw_text.chars().take(SUMMARY_MAX_CHARS).collect(),
+            summary: truncate_summary(raw_text),
             timestamp: now,
         };
         let assistant_turn = ConversationTurn {
             role: "assistant".to_owned(),
-            summary: response_text.chars().take(SUMMARY_MAX_CHARS).collect(),
+            summary: truncate_summary(response_text),
             timestamp: now,
         };
 
@@ -674,7 +730,17 @@ mod tests {
         }
     }
 
-    fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<SessionStore>>) {
+    /// Build a test pipeline with the given mock responses and optional tool registry.
+    ///
+    /// If `tools_fn` is None, registers MockEmailTool by default.
+    fn make_pipeline_with_tools<F>(
+        plan_json: &str,
+        synth_text: &str,
+        tools_fn: Option<F>,
+    ) -> (Pipeline, Arc<RwLock<SessionStore>>)
+    where
+        F: FnOnce(&mut ToolRegistry),
+    {
         let buf = SharedBuf::new();
         let policy = Arc::new(PolicyEngine::with_defaults());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
@@ -684,7 +750,11 @@ mod tests {
         )));
 
         let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockEmailTool));
+        if let Some(f) = tools_fn {
+            f(&mut registry);
+        } else {
+            registry.register(Box::new(MockEmailTool));
+        }
         let tools = Arc::new(registry);
 
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
@@ -705,6 +775,11 @@ mod tests {
         );
 
         (pipeline, sessions)
+    }
+
+    /// Build a test pipeline with default MockEmailTool registered.
+    fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<SessionStore>>) {
+        make_pipeline_with_tools(plan_json, synth_text, None::<fn(&mut ToolRegistry)>)
     }
 
     // ── Tests ──
@@ -739,13 +814,15 @@ mod tests {
     }
 
     /// Planner returns an empty plan; synthesizer still runs and delivers a response.
+    /// Uses "check my email" (intent: email_check) to trigger the full path,
+    /// but planner returns an empty plan.
     #[tokio::test]
     async fn test_pipeline_empty_plan() {
-        let plan_json = r#"{"plan":[],"explanation":"No tools needed for a greeting"}"#;
-        let synth_text = "Hello! How can I help you today?";
+        let plan_json = r#"{"plan":[],"explanation":"No actionable emails found"}"#;
+        let synth_text = "Your inbox looks clear right now.";
         let (pipeline, _sessions) = make_pipeline(plan_json, synth_text);
 
-        let event = make_labeled_event("hello", Principal::Owner);
+        let event = make_labeled_event("check my email", Principal::Owner);
         let template = make_template();
         let mut task = make_task(&template);
 
@@ -791,13 +868,14 @@ mod tests {
     }
 
     /// After pipeline run, verify both user and assistant conversation turns are stored.
+    /// Uses "check my email" to trigger the full path with an empty plan.
     #[tokio::test]
     async fn test_pipeline_stores_conversation_turns() {
         let plan_json = r#"{"plan":[]}"#;
-        let synth_text = "Hi there!";
+        let synth_text = "No new emails.";
         let (pipeline, sessions) = make_pipeline(plan_json, synth_text);
 
-        let event = make_labeled_event("hello", Principal::Owner);
+        let event = make_labeled_event("check my email", Principal::Owner);
         let template = make_template();
         let mut task = make_task(&template);
 
@@ -812,9 +890,9 @@ mod tests {
         let history = session.conversation_history();
         assert_eq!(history.len(), 2, "should have user + assistant turns");
         assert_eq!(history[0].role, "user");
-        assert!(history[0].summary.contains("hello"));
+        assert!(history[0].summary.contains("check my email"));
         assert_eq!(history[1].role, "assistant");
-        assert!(history[1].summary.contains("Hi there"));
+        assert!(history[1].summary.contains("No new emails"));
     }
 
     /// Egress denied: data label exceeds sink label, pipeline returns EgressDenied.
@@ -822,29 +900,9 @@ mod tests {
     /// Regression test 7: regulated data cannot egress to WhatsApp (public sink).
     #[tokio::test]
     async fn test_pipeline_egress_denied() {
-        // Use a plan that produces no tool results, but set the event label
-        // to Regulated. The egress check against a public sink should fail.
         let plan_json = r#"{"plan":[]}"#;
         let synth_text = "Here is your health report.";
-        let buf = SharedBuf::new();
-        let policy = Arc::new(PolicyEngine::with_defaults());
-        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
-
-        let inference = Arc::new(InferenceProxy::with_provider(Box::new(
-            MockPlannerProvider::new(plan_json, synth_text),
-        )));
-
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockEmailTool));
-        let tools = Arc::new(registry);
-        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
-        let sessions = Arc::new(RwLock::new(SessionStore::new()));
-        let egress = EgressValidator::new(policy.clone(), audit.clone());
-
-        let pipeline = Pipeline::new(
-            policy, inference, executor, sessions, egress, tools, audit, None,
-        );
+        let (pipeline, _sessions) = make_pipeline(plan_json, synth_text);
 
         // Event with Regulated label targeting a public sink.
         let mut event = make_labeled_event("health report", Principal::Owner);
@@ -874,40 +932,15 @@ mod tests {
     /// planner_task_description prevents raw message injection.
     #[tokio::test]
     async fn test_pipeline_third_party_context() {
-        // This plan uses no tools (empty plan) since we don't have calendar tools
-        // registered. The key test is that the pipeline doesn't crash and the
-        // planner context is correctly built for third-party triggers.
         let plan_json = r#"{"plan":[],"explanation":"Cannot schedule without calendar access"}"#;
         let synth_text = "I don't have access to scheduling tools right now.";
-        let buf = SharedBuf::new();
-        let policy = Arc::new(PolicyEngine::with_defaults());
-        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
-
-        let inference = Arc::new(InferenceProxy::with_provider(Box::new(
-            MockPlannerProvider::new(plan_json, synth_text),
-        )));
-
-        let registry = ToolRegistry::new(); // No tools registered.
-        let tools = Arc::new(registry);
-        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
-        let sessions = Arc::new(RwLock::new(SessionStore::new()));
-        let egress = EgressValidator::new(policy.clone(), audit.clone());
-
-        let pipeline = Pipeline::new(
-            policy,
-            inference,
-            executor,
-            sessions.clone(),
-            egress,
-            tools,
-            audit,
-            None, // No journal for third-party context test.
-        );
+        // No tools registered for this test.
+        let (pipeline, sessions) =
+            make_pipeline_with_tools(plan_json, synth_text, Some(|_reg: &mut ToolRegistry| {}));
 
         let template = make_third_party_template();
         let principal = Principal::WhatsAppContact("+34665030077".to_owned());
-        let event = make_labeled_event("Can we meet next Tuesday?", principal.clone());
+        let event = make_labeled_event("schedule a meeting for next Tuesday", principal.clone());
         let mut task = Task {
             task_id: Uuid::nil(),
             template_id: template.template_id.clone(),
@@ -941,6 +974,112 @@ mod tests {
         assert!(session.is_some(), "third-party session should be created");
     }
 
+    // ── Fast path tests ──
+
+    /// Fast path: "Hey!" has no intent → skips planner, goes directly to synthesize.
+    /// The mock provider's first call returns plan_response (which is our synth text
+    /// on the fast path since planner is skipped). If the planner WERE called, it
+    /// would try to parse this as JSON and fail.
+    #[tokio::test]
+    async fn test_fast_path_greeting() {
+        let synth_text = "Hello! How can I help you today?";
+        // plan_response = synth_text because on fast path the first inference call
+        // is synthesis, not planning. synth_response is never reached.
+        let (pipeline, _sessions) = make_pipeline(synth_text, "ERROR: second call unexpected");
+
+        let event = make_labeled_event("Hey!", Principal::Owner);
+        let template = make_template(); // has email tools
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "fast path should succeed: {result:?}");
+
+        let output = result.expect("checked");
+        assert_eq!(output.response_text, synth_text);
+        assert!(matches!(task.state, TaskState::Completed));
+    }
+
+    /// Full path: "check my email" has email_check intent matching email.* tools.
+    #[tokio::test]
+    async fn test_full_path_email_check() {
+        let plan_json =
+            r#"{"plan":[{"step":1,"tool":"email.list","args":{"account":"personal","limit":10}}]}"#;
+        let synth_text = "You have 2 new emails.";
+        let (pipeline, _sessions) = make_pipeline(plan_json, synth_text);
+
+        let event = make_labeled_event("check my email", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "full path should succeed: {result:?}");
+
+        let output = result.expect("checked");
+        assert_eq!(output.response_text, synth_text);
+    }
+
+    /// Fast path: template with no allowed tools always skips planner.
+    #[tokio::test]
+    async fn test_fast_path_no_tools_in_template() {
+        let synth_text = "I can help with that!";
+        let (pipeline, _sessions) = make_pipeline(synth_text, "ERROR: second call unexpected");
+
+        // Even with an intent that normally needs tools, if the template
+        // has no allowed tools, the fast path should engage.
+        let event = make_labeled_event("check my email", Principal::Owner);
+        let mut template = make_template();
+        template.allowed_tools = vec![]; // No tools available.
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(
+            result.is_ok(),
+            "no-tools fast path should succeed: {result:?}"
+        );
+
+        let output = result.expect("checked");
+        assert_eq!(output.response_text, synth_text);
+    }
+
+    /// Fast path still stores working memory and conversation turns.
+    #[tokio::test]
+    async fn test_fast_path_stores_session() {
+        let synth_text = "Hey there! What can I do for you?";
+        let (pipeline, sessions) = make_pipeline(synth_text, "ERROR: second call unexpected");
+
+        let event = make_labeled_event("hello", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok());
+
+        // Verify session has working memory.
+        let store = sessions.read().await;
+        let session = store
+            .get(&Principal::Owner)
+            .expect("owner session should exist after fast path");
+
+        assert_eq!(
+            session.recent_results().len(),
+            1,
+            "fast path should store task result in working memory"
+        );
+        let task_result = &session.recent_results()[0];
+        assert!(
+            task_result.tool_outputs.is_empty(),
+            "fast path should have empty tool outputs"
+        );
+
+        // Verify conversation history.
+        let history = session.conversation_history();
+        assert_eq!(history.len(), 2, "should have user + assistant turns");
+        assert_eq!(history[0].role, "user");
+        assert!(history[0].summary.contains("hello"));
+        assert_eq!(history[1].role, "assistant");
+        assert!(history[1].summary.contains("Hey there"));
+    }
+
     // ── Existing planner context tests ──
 
     /// Verify that the pipeline correctly builds PlannerContext by exercising
@@ -951,19 +1090,10 @@ mod tests {
         let (pipeline, _sessions) = make_pipeline(r#"{"plan":[]}"#, "ok");
 
         let template = make_third_party_template();
-        let task = Task {
-            task_id: Uuid::nil(),
-            template_id: template.template_id.clone(),
-            principal: Principal::WhatsAppContact("+1234".to_owned()),
-            trigger_event: Uuid::nil(),
-            data_ceiling: template.data_ceiling,
-            allowed_tools: template.allowed_tools.clone(),
-            denied_tools: template.denied_tools.clone(),
-            max_tool_calls: template.max_tool_calls,
-            output_sinks: template.output_sinks.clone(),
-            trace_id: "test".to_owned(),
-            state: TaskState::Extracting,
-        };
+        let principal = Principal::WhatsAppContact("+1234".to_owned());
+        let mut task = make_task(&template);
+        // Override the principal for third-party test.
+        task.principal = principal;
 
         let metadata = crate::extractors::ExtractedMetadata {
             intent: Some("scheduling".to_owned()),
