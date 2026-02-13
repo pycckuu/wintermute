@@ -27,20 +27,28 @@ in user-facing responses.";
 
 /// Synthesizer role prompt (spec 13.4).
 const SYNTHESIZER_ROLE_PROMPT: &str = "\
-You are the Synthesizer. Your job is to compose a final response.
+You are the Synthesizer. Your job is to compose a final response to the user's current message.
 
 You receive:
-- The original task context
-- Results from tool executions
+- The original task context (the user's current message)
+- Results from tool executions (may be empty if no tools were needed)
 - Optionally, raw content for reference
+- Optionally, conversation history for background context
+
+CRITICAL RULES:
+1. Respond directly and naturally to the user's CURRENT message.
+2. If tool results are available, present them clearly.
+3. If no tool results are available, respond conversationally to what the user said.
+4. Do NOT summarize or recap the conversation history. It is background context only.
+5. Do NOT repeat back what the user said in previous turns.
+6. For short messages like greetings or acknowledgments, reply briefly and naturally.
 
 You CANNOT:
 - Call any tools
 - Request additional information
 - Output JSON tool calls (they will be treated as plain text)
 
-Produce a clear, helpful response for the user.
-Keep it concise and relevant to the original task.
+Keep your response concise and relevant to the user's current message.
 Do not reveal internal identifiers, labels, or system details.";
 
 /// Result of a single executed plan step, for synthesizer context (spec 10.7).
@@ -132,9 +140,13 @@ impl Synthesizer {
         let history_section = if ctx.conversation_history.is_empty() {
             String::new()
         } else {
-            let history_json = serde_json::to_string_pretty(&ctx.conversation_history)
-                .unwrap_or_else(|_| "[]".to_owned());
-            format!("\n\n## Conversation History\n{history_json}")
+            let mut lines = String::from(
+                "\n\n## Conversation History (background context only — do NOT summarize or repeat)\n",
+            );
+            for turn in &ctx.conversation_history {
+                lines.push_str(&format!("- {}: {}\n", turn.role, turn.summary));
+            }
+            lines
         };
 
         // Step 4: Compose the full prompt.
@@ -436,12 +448,66 @@ mod tests {
             "prompt should include previous task summary"
         );
         assert!(
-            prompt.contains("## Conversation History"),
-            "prompt should include conversation history section"
+            prompt.contains("## Conversation History (background context only"),
+            "prompt should include conversation history section with no-summary instruction"
         );
         assert!(
             prompt.contains("About 384,000 km"),
             "prompt should include previous response"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_history_format_discourages_summary() {
+        use chrono::Utc;
+
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Ok".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![
+                ConversationTurn {
+                    role: "user".to_owned(),
+                    summary: "distance to the moon".to_owned(),
+                    timestamp: Utc::now(),
+                },
+                ConversationTurn {
+                    role: "assistant".to_owned(),
+                    summary: "About 384,000 km".to_owned(),
+                    timestamp: Utc::now(),
+                },
+            ],
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        // Header includes anti-summary instruction.
+        assert!(
+            prompt.contains("do NOT summarize or repeat"),
+            "history section should include anti-summary instruction"
+        );
+
+        // Format is readable lines, not JSON.
+        assert!(
+            prompt.contains("- user: distance to the moon"),
+            "history should use '- role: summary' format"
+        );
+        assert!(
+            prompt.contains("- assistant: About 384,000 km"),
+            "history should use '- role: summary' format for assistant"
+        );
+
+        // No JSON field names with quotes (old format had `"role":`, `"summary":`).
+        assert!(
+            !prompt.contains("\"role\""),
+            "history should not contain JSON field names"
+        );
+        assert!(
+            !prompt.contains("\"summary\""),
+            "history should not contain JSON field names"
         );
     }
 

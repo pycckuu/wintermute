@@ -11,6 +11,7 @@
 - [x] Feature: Trim persistence to simplified spec (304 tests — 278 unit + 7 integration + 19 regression)
 - [x] Feature: Pipeline Fast Path (316 tests — 290 unit + 7 integration + 19 regression)
 - [x] Feature: TOML Configuration (329 tests — 303 unit + 7 integration + 19 regression)
+- [x] Feature: Synthesizer Prompt Quality (330 tests — 304 unit + 7 integration + 19 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -84,6 +85,14 @@ Goal: Centralize config into ./config.toml with env var overrides. Spec: `docs/p
 - [x] C.4 Refactor main.rs to use PfarConfig — remove hardcoded constants
 - [x] C.5 Quality assurance (refactor, review, lint)
 - [x] C.6 config.example.toml with documented defaults
+
+## Feature: Synthesizer Prompt Quality
+
+Goal: Prevent Synthesizer from summarizing conversation history on every response.
+
+- [x] SQ.1 Update Synthesizer role prompt to prevent conversation summary repetition
+- [x] SQ.2 Reformat conversation history from JSON blob to readable lines with anti-summary header
+- [x] SQ.3 Add test verifying history format discourages summarization
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
