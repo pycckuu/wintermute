@@ -1,0 +1,73 @@
+# PFAR v2 Configuration
+#
+# Copy this file to config.toml in the directory where you run pfar.
+# Override any value with the corresponding env var (see comments).
+#
+# Precedence: env vars > config.toml > defaults
+# Use $PFAR_CONFIG_PATH to load from a different location.
+
+# ── Kernel ───────────────────────────────────────────────────────
+
+[kernel]
+# Tracing log level: trace, debug, info, warn, error
+log_level = "info"
+# Sink for admin notifications (spec 6.6)
+admin_sink = "sink:telegram:owner"
+# Approval queue timeout in seconds (spec 6.6)
+approval_timeout_seconds = 300
+# Channel buffer size for adapter <-> kernel mpsc
+channel_buffer_size = 100
+# Graceful shutdown timeout in seconds (spec 14.1)
+# Env: PFAR_SHUTDOWN_TIMEOUT_SECS
+shutdown_timeout_seconds = 30
+
+# ── Paths ────────────────────────────────────────────────────────
+
+[paths]
+# Audit log JSONL path (spec 6.7)
+# Env: PFAR_AUDIT_LOG
+audit_log = "/tmp/pfar-audit.jsonl"
+# Journal SQLite database path (session persistence)
+# Env: PFAR_JOURNAL_PATH
+journal_db = "/tmp/pfar-journal.db"
+
+# ── LLM Providers ───────────────────────────────────────────────
+
+[llm.local]
+# Local Ollama provider — always available (spec 11.2)
+# Env: PFAR_OLLAMA_URL
+base_url = "http://localhost:11434"
+# Env: PFAR_LOCAL_MODEL
+default_model = "llama3"
+
+# Uncomment to enable Anthropic (spec 11.2)
+# Env: PFAR_ANTHROPIC_API_KEY, PFAR_ANTHROPIC_MODEL
+# [llm.anthropic]
+# api_key = "sk-ant-..."
+# default_model = "claude-sonnet-4-20250514"
+
+# Uncomment to enable OpenAI (spec 11.2)
+# Env: PFAR_OPENAI_API_KEY, PFAR_OPENAI_MODEL
+# [llm.openai]
+# base_url = "https://api.openai.com"
+# api_key = "sk-..."
+# default_model = "gpt-4o"
+
+# Uncomment to enable LM Studio (local OpenAI-compatible)
+# Env: PFAR_LMSTUDIO_URL, PFAR_LMSTUDIO_MODEL
+# [llm.lmstudio]
+# base_url = "http://localhost:1234"
+# default_model = "deepseek-r1"
+
+# ── Adapters ─────────────────────────────────────────────────────
+
+[adapter.telegram]
+enabled = true
+# Bot token from @BotFather
+# Env: PFAR_TELEGRAM_BOT_TOKEN
+# bot_token = "123456:ABC-DEF..."
+# Owner's Telegram user ID
+# Env: PFAR_TELEGRAM_OWNER_ID
+owner_id = "415494855"
+# Long-poll timeout in seconds
+poll_timeout_seconds = 30
