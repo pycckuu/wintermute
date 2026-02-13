@@ -14,6 +14,7 @@
 - [x] Feature: Synthesizer Prompt Quality (331 tests — 305 unit + 7 integration + 19 regression)
 - [x] Feature: Admin Tool + Credential Flow (349 tests — 320 unit + 7 integration + 22 regression)
 - [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
+- [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -96,6 +97,16 @@ Goal: Prevent Synthesizer from summarizing conversation history on every respons
 - [x] SQ.2 Reformat conversation history from JSON blob to readable lines with anti-summary header
 - [x] SQ.3 Add test verifying history format discourages summarization
 - [x] SQ.4 Omit conversation history and working memory from Synthesizer on fast path
+
+## Feature: Agent Persona & Onboarding
+
+Goal: First-message onboarding that configures agent identity, persisted in journal.
+Spec: `docs/pfar-feature-persona-onboarding.md`
+
+- [x] PO.1 Persona table in journal.db + get/set methods (3 tests)
+- [x] PO.2 Synthesizer persona-aware prompt composition (3 tests)
+- [x] PO.3 Pipeline persona lifecycle (load/store/onboarding) (4 tests)
+- [ ] PO.4 admin.update_persona action (deferred to later Phase 3 work)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

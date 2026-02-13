@@ -34,6 +34,13 @@ use chrono::Utc;
 /// Maximum characters stored in request/response summaries for session memory.
 const SUMMARY_MAX_CHARS: usize = 100;
 
+/// Sentinel value stored in journal when persona onboarding is in progress
+/// (persona-onboarding spec §3).
+const PERSONA_PENDING: &str = "__pending__";
+
+/// Maximum length for persona string (persona-onboarding spec §3).
+const PERSONA_MAX_LEN: usize = 500;
+
 /// Truncate text to SUMMARY_MAX_CHARS for session storage (spec 9.1).
 fn truncate_summary(text: &str) -> String {
     text.chars().take(SUMMARY_MAX_CHARS).collect()
@@ -126,6 +133,23 @@ impl Pipeline {
                 warn!(op = op_name, error = %e, "journal write failed (best-effort)");
             }
         }
+    }
+
+    /// Load persona string from journal (persona-onboarding spec §3).
+    fn load_persona(&self) -> Option<String> {
+        let journal = self.journal.as_ref()?;
+        match journal.get_persona() {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(error = %e, "failed to load persona from journal");
+                None
+            }
+        }
+    }
+
+    /// Store persona string to journal, best-effort (persona-onboarding spec §3).
+    fn store_persona(&self, value: &str) {
+        self.journal_write("set_persona", |j| j.set_persona(value));
     }
 
     /// Extract structured metadata from raw event text (spec 7, Phase 0).
@@ -258,8 +282,50 @@ impl Pipeline {
         let raw_text = labeled_event.event.payload.text.clone().unwrap_or_default();
         let metadata = self.extract_metadata(&raw_text, &mut labeled_event);
 
+        // === PERSONA CHECK (persona-onboarding spec §3, §5) ===
+        // Only runs when journal is available (persona requires persistence).
+        let mut persona: Option<String> = None;
+        let mut is_onboarding = false;
+        let mut force_fast_path = false;
+
+        if self.journal.is_some() {
+            persona = self.load_persona();
+
+            if matches!(task.principal, Principal::Owner) {
+                match persona.as_deref() {
+                    None => {
+                        // First message ever — mark pending, trigger onboarding.
+                        self.store_persona(PERSONA_PENDING);
+                        persona = None;
+                        is_onboarding = true;
+                        force_fast_path = true;
+                    }
+                    Some(PERSONA_PENDING) => {
+                        // Second message — store owner's reply as real persona.
+                        let trimmed = raw_text.trim();
+                        if trimmed.is_empty() {
+                            // Empty reply — stay in pending, re-trigger onboarding.
+                            is_onboarding = true;
+                            persona = None;
+                        } else {
+                            let capped: String = trimmed.chars().take(PERSONA_MAX_LEN).collect();
+                            self.store_persona(&capped);
+                            persona = Some(capped);
+                        }
+                        force_fast_path = true;
+                    }
+                    Some(_) => {} // Persona configured, normal flow.
+                }
+            } else {
+                // Non-owner: filter out pending sentinel.
+                if persona.as_deref() == Some(PERSONA_PENDING) {
+                    persona = None;
+                }
+            }
+        }
+
         // === FAST PATH CHECK (spec 7, fast path) ===
-        let needs_tools = self.should_use_full_pipeline(&metadata, template);
+        let needs_tools = !force_fast_path && self.should_use_full_pipeline(&metadata, template);
 
         let (exec_results, data_label, pipeline_path) = if needs_tools {
             self.execute_full_pipeline(task, template, &metadata, &labeled_event)
@@ -309,6 +375,8 @@ impl Pipeline {
             },
             session_working_memory: working_memory,
             conversation_history: conversation,
+            persona,
+            is_onboarding,
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);
@@ -790,6 +858,45 @@ mod tests {
         make_pipeline_with_tools(plan_json, synth_text, None::<fn(&mut ToolRegistry)>)
     }
 
+    /// Build a test pipeline with an in-memory journal for persona tests.
+    fn make_pipeline_with_journal(
+        plan_json: &str,
+        synth_text: &str,
+    ) -> (Pipeline, Arc<RwLock<SessionStore>>, Arc<TaskJournal>) {
+        let buf = SharedBuf::new();
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+
+        let inference = Arc::new(InferenceProxy::with_provider(Box::new(
+            MockPlannerProvider::new(plan_json, synth_text),
+        )));
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockEmailTool));
+        let tools = Arc::new(registry);
+
+        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+
+        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let egress = EgressValidator::new(policy.clone(), audit.clone());
+
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("test journal"));
+
+        let pipeline = Pipeline::new(
+            policy,
+            inference,
+            executor,
+            sessions.clone(),
+            egress,
+            tools,
+            audit,
+            Some(journal.clone()),
+        );
+
+        (pipeline, sessions, journal)
+    }
+
     // ── Tests ──
 
     /// Full pipeline: owner asks "check my email", planner returns a plan
@@ -1236,6 +1343,167 @@ mod tests {
         assert!(
             !prompt.contains("Handle scheduling requests from contacts"),
             "third-party prompt must NOT contain template_description"
+        );
+    }
+
+    // ── Persona lifecycle tests (persona-onboarding spec §3, §5) ──
+
+    /// First owner message with no persona → onboarding prompt, fast path.
+    #[tokio::test]
+    async fn test_pipeline_first_message_onboarding() {
+        let synth_text = "Hello! I'm your new assistant. What should I call myself?";
+        let (pipeline, _sessions, journal) =
+            make_pipeline_with_journal(synth_text, "ERROR: second call unexpected");
+
+        // No persona set — journal is fresh.
+        let event = make_labeled_event("Hey!", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "onboarding should succeed: {result:?}");
+
+        // Journal should have __pending__ sentinel.
+        let stored = journal.get_persona().expect("get").expect("should exist");
+        assert_eq!(stored, PERSONA_PENDING);
+
+        // Response should be the onboarding synth text.
+        let output = result.expect("checked");
+        assert_eq!(output.response_text, synth_text);
+    }
+
+    /// Second owner message with __pending__ → stores real persona.
+    #[tokio::test]
+    async fn test_pipeline_second_message_stores_persona() {
+        let synth_text = "Got it, Igor.";
+        let (pipeline, _sessions, journal) =
+            make_pipeline_with_journal(synth_text, "ERROR: second call unexpected");
+
+        // Pre-set the pending sentinel (simulates first message already happened).
+        journal.set_persona(PERSONA_PENDING).expect("set pending");
+
+        let event = make_labeled_event(
+            "Call yourself Atlas. I'm Igor. Keep it concise.",
+            Principal::Owner,
+        );
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "persona store should succeed: {result:?}");
+
+        // Journal should now have the real persona.
+        let stored = journal.get_persona().expect("get").expect("should exist");
+        assert_eq!(stored, "Call yourself Atlas. I'm Igor. Keep it concise.");
+    }
+
+    /// Owner message with existing persona → persona injected into synth prompt.
+    #[tokio::test]
+    async fn test_pipeline_persona_in_normal_flow() {
+        // Use a prompt-capturing provider to verify persona appears in the synth prompt.
+        struct CapturingProvider {
+            response: String,
+            captured_prompts: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl InferenceProvider for CapturingProvider {
+            async fn generate(
+                &self,
+                _model: &str,
+                prompt: &str,
+                _max_tokens: u32,
+            ) -> Result<String, InferenceError> {
+                self.captured_prompts
+                    .lock()
+                    .expect("test lock")
+                    .push(prompt.to_owned());
+                Ok(self.response.clone())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            response: "Hey Igor, what's up?".to_owned(),
+            captured_prompts: captured.clone(),
+        };
+
+        let buf = SharedBuf::new();
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+        let inference = Arc::new(InferenceProxy::with_provider(Box::new(provider)));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockEmailTool));
+        let tools = Arc::new(registry);
+        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let egress = EgressValidator::new(policy.clone(), audit.clone());
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("test journal"));
+
+        // Pre-set a real persona.
+        journal
+            .set_persona("Atlas. Owner: Igor. Style: concise.")
+            .expect("set persona");
+
+        let pipeline = Pipeline::new(
+            policy,
+            inference,
+            executor,
+            sessions,
+            egress,
+            tools,
+            audit,
+            Some(journal),
+        );
+
+        let event = make_labeled_event("Hey!", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "normal flow should succeed: {result:?}");
+
+        // The synthesizer prompt (first inference call, since fast path) should contain the persona.
+        let prompts = captured.lock().expect("test lock");
+        assert!(
+            !prompts.is_empty(),
+            "should have at least one inference call"
+        );
+        assert!(
+            prompts[0].contains("You are Atlas. Owner: Igor. Style: concise."),
+            "synth prompt should contain persona"
+        );
+        assert!(
+            prompts[0].contains("Never mention internal system details"),
+            "synth prompt should contain anti-leak instruction"
+        );
+    }
+
+    /// Non-owner message with no persona → default prompt, no onboarding.
+    #[tokio::test]
+    async fn test_pipeline_non_owner_no_onboarding() {
+        let synth_text = "I can help with scheduling.";
+        let (pipeline, _sessions, journal) =
+            make_pipeline_with_journal(synth_text, "ERROR: second call unexpected");
+
+        // No persona in journal.
+        let principal = Principal::TelegramPeer("12345".to_owned());
+        let event = make_labeled_event("Hey!", principal.clone());
+        let template = make_template();
+        let mut task = make_task(&template);
+        task.principal = principal;
+        // Route to owner sink so egress passes for Internal-labeled data.
+        task.output_sinks = vec!["sink:telegram:owner".to_owned()];
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "non-owner should succeed: {result:?}");
+
+        // Journal should NOT have a persona set (non-owner doesn't trigger onboarding).
+        let stored = journal.get_persona().expect("get");
+        assert!(
+            stored.is_none(),
+            "non-owner should not trigger persona onboarding"
         );
     }
 }
