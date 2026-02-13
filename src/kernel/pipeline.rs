@@ -287,7 +287,15 @@ impl Pipeline {
         let first_sink = task.output_sinks.first().unwrap_or(&default_sink);
 
         // Read session data for synthesizer context (spec 9.3).
+        // On the fast path (no tools), omit conversation history and working memory —
+        // they add no value without tool results and cause the LLM to summarize them
+        // instead of responding naturally (spec 13.5: prompts are not enforcement).
         let (working_memory, conversation) = self.read_session_data(&task.principal).await;
+        let (working_memory, conversation) = if pipeline_path == "fast" {
+            (vec![], vec![])
+        } else {
+            (working_memory, conversation)
+        };
 
         let synth_ctx = SynthesizerContext {
             task_id: task.task_id,
@@ -1078,6 +1086,112 @@ mod tests {
         assert!(history[0].summary.contains("hello"));
         assert_eq!(history[1].role, "assistant");
         assert!(history[1].summary.contains("Hey there"));
+    }
+
+    /// Fast path omits session context from synthesizer prompt (spec 9.3, 13.5).
+    ///
+    /// After a full-path turn populates session data, a subsequent fast-path
+    /// turn must NOT include conversation history or working memory in the
+    /// synthesizer prompt — otherwise the LLM summarizes them.
+    #[tokio::test]
+    async fn test_fast_path_omits_session_context() {
+        // A prompt-capturing provider: records each prompt it receives.
+        struct CapturingProvider {
+            responses: Vec<String>,
+            call_count: AtomicUsize,
+            captured_prompts: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl InferenceProvider for CapturingProvider {
+            async fn generate(
+                &self,
+                _model: &str,
+                prompt: &str,
+                _max_tokens: u32,
+            ) -> Result<String, InferenceError> {
+                self.captured_prompts
+                    .lock()
+                    .expect("test lock")
+                    .push(prompt.to_owned());
+                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(self
+                    .responses
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| "fallback".to_owned()))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+
+        // Responses: [0] = plan for turn 1, [1] = synth for turn 1,
+        //            [2] = synth for turn 2 (fast path, skips planner)
+        let provider = CapturingProvider {
+            responses: vec![
+                // Turn 1: plan response (full path)
+                r#"{"plan":[{"step":1,"tool":"email.list","args":{"limit":5}}]}"#.to_owned(),
+                // Turn 1: synth response
+                "You have 2 emails from Sarah and GitHub.".to_owned(),
+                // Turn 2: synth response (fast path — this is the first inference call)
+                "Hey there!".to_owned(),
+            ],
+            call_count: AtomicUsize::new(0),
+            captured_prompts: captured.clone(),
+        };
+
+        let buf = SharedBuf::new();
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+        let inference = Arc::new(InferenceProxy::with_provider(Box::new(provider)));
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockEmailTool));
+        let tools = Arc::new(registry);
+        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let egress = EgressValidator::new(policy.clone(), audit.clone());
+        let pipeline = Pipeline::new(
+            policy, inference, executor, sessions, egress, tools, audit, None,
+        );
+
+        let template = make_template();
+
+        // Turn 1: full path — "check my email" populates session data.
+        let event1 = make_labeled_event("check my email", Principal::Owner);
+        let mut task1 = make_task(&template);
+        let result1 = pipeline.run(event1, &mut task1, &template).await;
+        assert!(result1.is_ok(), "turn 1 should succeed: {result1:?}");
+
+        // Turn 2: fast path — "hi" should NOT include session context.
+        let event2 = make_labeled_event("hi", Principal::Owner);
+        let mut task2 = make_task(&template);
+        let result2 = pipeline.run(event2, &mut task2, &template).await;
+        assert!(result2.is_ok(), "turn 2 should succeed: {result2:?}");
+
+        // The third captured prompt is the fast-path synthesizer call.
+        let prompts = captured.lock().expect("test lock");
+        assert!(
+            prompts.len() >= 3,
+            "expected at least 3 inference calls, got {}",
+            prompts.len()
+        );
+        let fast_path_synth_prompt = &prompts[2];
+
+        // Fast-path prompt must NOT contain session context.
+        assert!(
+            !fast_path_synth_prompt.contains("## Session Working Memory"),
+            "fast-path synth prompt should NOT include working memory"
+        );
+        assert!(
+            !fast_path_synth_prompt.contains("## Conversation History"),
+            "fast-path synth prompt should NOT include conversation history"
+        );
+        // Sanity: it should still contain the user's current message.
+        assert!(
+            fast_path_synth_prompt.contains("hi"),
+            "fast-path synth prompt should include current message"
+        );
     }
 
     // ── Existing planner context tests ──

@@ -11,7 +11,7 @@
 - [x] Feature: Trim persistence to simplified spec (304 tests — 278 unit + 7 integration + 19 regression)
 - [x] Feature: Pipeline Fast Path (316 tests — 290 unit + 7 integration + 19 regression)
 - [x] Feature: TOML Configuration (329 tests — 303 unit + 7 integration + 19 regression)
-- [x] Feature: Synthesizer Prompt Quality (330 tests — 304 unit + 7 integration + 19 regression)
+- [x] Feature: Synthesizer Prompt Quality (331 tests — 305 unit + 7 integration + 19 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -93,6 +93,7 @@ Goal: Prevent Synthesizer from summarizing conversation history on every respons
 - [x] SQ.1 Update Synthesizer role prompt to prevent conversation summary repetition
 - [x] SQ.2 Reformat conversation history from JSON blob to readable lines with anti-summary header
 - [x] SQ.3 Add test verifying history format discourages summarization
+- [x] SQ.4 Omit conversation history and working memory from Synthesizer on fast path
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
