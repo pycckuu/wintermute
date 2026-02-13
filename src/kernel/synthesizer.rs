@@ -25,6 +25,22 @@ Do not suggest workarounds requiring additional permissions.
 6. Never reference internal system identifiers (vault refs, task IDs) \
 in user-facing responses.";
 
+/// Onboarding preamble for first-ever owner message (persona-onboarding spec §2).
+const ONBOARDING_PREAMBLE: &str = "\
+You are a personal assistant running for the first time.\n\
+You don't have a name or personality configured yet.\n\n\
+In your response, greet the user warmly and ask them three things in a single message:\n\
+1. What should they call you (pick a name for the assistant)\n\
+2. What should you call them\n\
+3. How they want you to communicate (concise/detailed, casual/formal, any quirks)\n\n\
+Keep it brief and natural. Don't mention system internals.";
+
+/// Anti-leak instruction appended when persona is active (persona-onboarding spec §2).
+const PERSONA_ANTI_LEAK: &str = "\
+Never mention internal system details like \"Synthesizer\", \"Planner\", \
+\"pipeline\", \"kernel\", or \"privacy-first runtime\". \
+You are a personal assistant, not a system component.";
+
 /// Synthesizer role prompt (spec 13.4).
 const SYNTHESIZER_ROLE_PROMPT: &str = "\
 You are the Synthesizer. Your job is to compose a final response to the user's current message.
@@ -92,6 +108,10 @@ pub struct SynthesizerContext {
     pub session_working_memory: Vec<TaskResult>,
     /// Conversation history from session (spec 9.3).
     pub conversation_history: Vec<ConversationTurn>,
+    /// Persona string from journal, if configured (persona-onboarding spec §2).
+    pub persona: Option<String>,
+    /// True on the very first owner message when no persona exists yet.
+    pub is_onboarding: bool,
 }
 
 /// Synthesizer errors.
@@ -114,7 +134,16 @@ impl Synthesizer {
     /// Includes base safety rules, synthesizer role, tool results, and
     /// output formatting instructions.
     pub fn compose_prompt(ctx: &SynthesizerContext) -> String {
-        // Step 1: Serialize tool results.
+        // Step 1: Build the role section based on persona state (persona-onboarding spec §2).
+        let role_section = if ctx.is_onboarding {
+            format!("{ONBOARDING_PREAMBLE}\n\n{SYNTHESIZER_ROLE_PROMPT}")
+        } else if let Some(ref persona) = ctx.persona {
+            format!("You are {persona}.\n\n{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
+        } else {
+            SYNTHESIZER_ROLE_PROMPT.to_owned()
+        };
+
+        // Step 2: Serialize tool results.
         let results_json = if ctx.tool_results.is_empty() {
             "No tool results available.".to_owned()
         } else {
@@ -122,13 +151,13 @@ impl Synthesizer {
                 .unwrap_or_else(|_| "No tool results available.".to_owned())
         };
 
-        // Step 2: Include raw content reference if present.
+        // Step 3: Include raw content reference if present.
         let raw_content_section = match &ctx.raw_content_ref {
             Some(content) => format!("\n\n## Raw Content\n{content}"),
             None => String::new(),
         };
 
-        // Step 3: Serialize session context (spec 9.3).
+        // Step 4: Serialize session context (spec 9.3).
         let memory_section = if ctx.session_working_memory.is_empty() {
             String::new()
         } else {
@@ -149,10 +178,10 @@ impl Synthesizer {
             lines
         };
 
-        // Step 4: Compose the full prompt.
+        // Step 5: Compose the full prompt.
         format!(
             "{BASE_SAFETY_RULES}\n\n\
-             {SYNTHESIZER_ROLE_PROMPT}\n\n\
+             {role_section}\n\n\
              ## Original Request\n\
              {original_context}\n\n\
              ## Tool Results\n\
@@ -204,6 +233,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -248,6 +279,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -268,6 +301,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -294,6 +329,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -318,6 +355,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -361,6 +400,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -389,6 +430,8 @@ mod tests {
             },
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -435,6 +478,8 @@ mod tests {
                     timestamp: Utc::now(),
                 },
             ],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -480,6 +525,8 @@ mod tests {
                     timestamp: Utc::now(),
                 },
             ],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -521,6 +568,8 @@ mod tests {
             output_instructions: make_output_instructions(),
             session_working_memory: vec![],
             conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -532,6 +581,99 @@ mod tests {
         assert!(
             !prompt.contains("## Conversation History"),
             "empty history should not produce section header"
+        );
+    }
+
+    // ── Persona tests (persona-onboarding spec §2) ──────────────
+
+    #[test]
+    fn test_compose_prompt_with_persona() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Hey".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: Some("Atlas. Owner: Igor. Style: concise, dry humor.".to_owned()),
+            is_onboarding: false,
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("You are Atlas. Owner: Igor. Style: concise, dry humor."),
+            "prompt should inject persona identity"
+        );
+        assert!(
+            prompt.contains("Never mention internal system details"),
+            "prompt should include anti-leak instruction"
+        );
+        assert!(
+            !prompt.contains("running for the first time"),
+            "prompt should NOT include onboarding preamble"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_onboarding() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Hey".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: None,
+            is_onboarding: true,
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("running for the first time"),
+            "onboarding prompt should ask user to configure"
+        );
+        assert!(
+            prompt.contains("What should they call you"),
+            "onboarding prompt should ask for assistant name"
+        );
+        assert!(
+            !prompt.contains("Never mention internal system details"),
+            "onboarding should NOT include anti-leak (no persona yet)"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_default_no_persona() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Hey".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        // Default: original SYNTHESIZER_ROLE_PROMPT, no persona, no onboarding.
+        assert!(
+            prompt.contains("You are the Synthesizer"),
+            "default prompt should use original role prompt"
+        );
+        assert!(
+            !prompt.contains("running for the first time"),
+            "default should NOT have onboarding"
+        );
+        assert!(
+            !prompt.contains("Never mention internal system details"),
+            "default should NOT have anti-leak"
         );
     }
 }

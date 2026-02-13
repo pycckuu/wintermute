@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS working_memory (
 );
 
 CREATE INDEX IF NOT EXISTS idx_working_memory_principal ON working_memory(principal);
+
+CREATE TABLE IF NOT EXISTS persona (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;
 
 // ── TaskJournal ─────────────────────────────────────────────────
@@ -396,6 +401,37 @@ impl TaskJournal {
         )?;
         Ok(())
     }
+
+    // ── Persona CRUD (persona-onboarding spec §1) ─────────────────
+
+    /// Get the persona string (persona-onboarding spec §1).
+    pub fn get_persona(&self) -> Result<Option<String>, JournalError> {
+        use rusqlite::OptionalExtension;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.query_row(
+            "SELECT value FROM persona WHERE key = 'persona'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(JournalError::from)
+    }
+
+    /// Set the persona string (persona-onboarding spec §1).
+    pub fn set_persona(&self, value: &str) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO persona (key, value) VALUES ('persona', ?1)",
+            params![value],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -617,6 +653,36 @@ mod tests {
             .expect("load");
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].request_summary, "task 3");
+    }
+
+    // ── Persona tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_persona_get_returns_none_when_empty() {
+        let j = make_journal();
+        let persona = j.get_persona().expect("get");
+        assert!(persona.is_none(), "fresh journal should have no persona");
+    }
+
+    #[test]
+    fn test_persona_set_and_get() {
+        let j = make_journal();
+        j.set_persona("Name: Atlas. Owner: Igor. Style: concise.")
+            .expect("set");
+
+        let persona = j.get_persona().expect("get").expect("should exist");
+        assert_eq!(persona, "Name: Atlas. Owner: Igor. Style: concise.");
+    }
+
+    #[test]
+    fn test_persona_overwrite() {
+        let j = make_journal();
+        j.set_persona("__pending__").expect("set");
+        j.set_persona("Name: Nova. Style: detailed.")
+            .expect("overwrite");
+
+        let persona = j.get_persona().expect("get").expect("should exist");
+        assert_eq!(persona, "Name: Nova. Style: detailed.");
     }
 
     #[test]
