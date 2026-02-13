@@ -1,6 +1,6 @@
 ---
 name: plan-pfar-feature
-description: Plan a PFAR feature from description to actionable implementation plan. Gathers spec context, checks privacy invariants, analyzes from 4 lenses (architect, privacy, maintainability, performance), and outputs a concrete plan with file paths, type signatures, and PRD entries.
+description: Plan a PFAR feature with adversarial review cycles. Gathers context, designs minimal approach, runs mandatory Skeptic Review with complexity scorecard, validates privacy invariants as pass/fail gate, and outputs a concrete plan.
 ---
 
 # Plan PFAR Feature: $ARGUMENTS
@@ -12,8 +12,10 @@ Act as a **Senior Rust Systems Architect** who deeply understands the PFAR v2 sp
 1. **Read before reasoning**: Always gather concrete project context before analyzing.
 2. **Spec is authoritative**: Every design decision must trace to a spec section.
 3. **Reuse over recreate**: Check `src/types/mod.rs` and existing modules before proposing new types.
-4. **Privacy invariants are non-negotiable**: Every plan must explicitly state which invariants it touches and how it preserves them.
-5. **Minimal implementation**: Match the spec exactly, do not over-engineer.
+4. **Privacy invariants are non-negotiable**: Every invariant touched must pass the Privacy Gate.
+5. **Simplest first**: Design the minimal approach before considering alternatives. The burden of proof is on complexity, not simplicity.
+6. **Justify every addition**: Every new file, type, and trait requires a written reason why existing code can't do it.
+7. **Skeptic Review is mandatory**: Phase 3 cannot be skipped or abbreviated. The complexity scorecard must be filled in completely.
 
 ---
 
@@ -33,90 +35,134 @@ Before analyzing, gather concrete information:
 5. **Spec sections**: Read relevant sections from `docs/pfar-v2-spec.md`:
    - Section numbers map to: 1=Overview, 2=Goals, 3=Threats, 4=Core Concepts, 5=Architecture, 6=Components, 7=Pipeline, 8=Config, 9=Sessions, 10=Protocols, 11=LLM, 12=Integrations, 13=Prompts, 14=Operations, 15=Invariants, 16=Security, 17=Regression Tests, 18=Config Ref, 19=Impl Plan, 20=Limitations
 6. **Existing feature specs**: Check `docs/pfar-feature-*.md` for related features
-7. **Dependencies**: `cargo tree --depth 1` if new crates might be needed
-8. **Recent commits**: `git log --oneline -10` for recent context
+7. **Comparable feature**: Find the most similar existing feature spec and note its complexity (LoC, files changed). This is your baseline.
+8. **Dependencies**: `cargo tree --depth 1` if new crates might be needed
+9. **Recent commits**: `git log --oneline -10` for recent context
 
 ## Phase 1: Spec Alignment
 
-Based on gathered context, answer:
+Based on gathered context, produce an **Alignment Card**:
 
-1. **Spec sections**: Which sections (1-20) are directly relevant?
-2. **Privacy invariants touched**: Which of the 11 invariants (A-K) does this feature interact with?
-   - A: Session Isolation
-   - B: Secrets Never Readable
-   - C: Mandatory Label Enforcement
-   - D: Graduated Taint-Gated Writes
-   - E: Plan-Then-Execute Separation
-   - F: Label-Based LLM Routing
-   - G: Task Template Ceilings
-   - H: No Tokens in URLs
-   - I: Container GC
-   - J: Capability = Designation + Permission + Provenance
-   - K: Explicit Sink Routing
-3. **PRD status**: Is this feature already in the PRD? Which task IDs?
-4. **Pipeline impact**: Does this touch the 4-phase pipeline (Extract/Plan/Execute/Synthesize)?
-5. **Trust boundary**: Does this change the trusted computing base boundary?
-
-Present findings:
 ```
-Spec Alignment:
-  Sections: [list]
-  Invariants: [list with impact notes]
-  PRD tasks: [task IDs or "new — needs PRD entry"]
-  Pipeline phases affected: [list or "none"]
-  Trust boundary change: yes/no
+Feature:            [name]
+Spec sections:      [list]
+Invariants:         [A-K with impact: enforces / preserves / not-affected]
+  A: Session Isolation           — [impact]
+  B: Secrets Never Readable      — [impact]
+  C: Mandatory Label Enforcement — [impact]
+  D: Graduated Taint-Gated Writes — [impact]
+  E: Plan-Then-Execute Separation — [impact]
+  F: Label-Based LLM Routing     — [impact]
+  G: Task Template Ceilings      — [impact]
+  H: No Tokens in URLs           — [impact]
+  I: Container GC                — [impact]
+  J: Capability Tokens           — [impact]
+  K: Explicit Sink Routing       — [impact]
+PRD tasks:          [existing IDs or "new — needs PRD entry"]
+Pipeline impact:    [phases affected or "none"]
+Trust boundary:     [changed or "unchanged"]
+Comparable feature: [name] — [X files, ~Y LoC]
 ```
 
-## Phase 2: Multi-Perspective Analysis
+## Phase 2: Design
 
-### Architect Lens
+Analyze through two lenses, then produce ONE minimal design proposal.
+
+### Architecture Lens
 - Which kernel module(s) should own this? (check module map from `src/kernel/CLAUDE.md`)
 - New module or extension of existing module?
-- What traits need implementing or extending? (check existing: `Tool`, `Adapter` patterns)
+- What traits need implementing or extending?
 - How does data flow through the 4-phase pipeline for this feature?
-- Are there generic bounds or lifetime considerations?
-
-### Privacy Lens (PFAR-specific — replaces generic "Safety")
-- Which invariants does this feature enforce, weaken, or not affect?
-- Label implications: What `SecurityLabel` do inputs/outputs carry?
-- Taint implications: Does this handle external data? What `TaintLevel`?
-- Sink rules: Where can output go? What egress checks apply?
-- Could this create a new prompt injection path? (Phase 1 must not see raw content)
-- Does this create new tool access that needs template ceiling enforcement?
-
-### Maintainability Lens
-- Unit tests: `#[cfg(test)] mod tests` in each affected module
-- Regression tests: Which of the 17 spec tests (section 17) are affected?
-- Doc comments: `///` with spec section references (e.g., `/// Foo (spec 6.2).`)
-- Clippy compliance: No unsafe, no unwrap, checked arithmetic
-- Error handling: `thiserror` for domain errors, `anyhow` for propagation
-
-### Performance Lens
-- Pipeline latency impact: Does this add LLM calls? Container spawns?
-- Allocation patterns: Avoid unnecessary `clone()`, `to_string()`
+- Latency impact: Does this add LLM calls? Container spawns? Hot path considerations?
 - Async considerations: Any blocking calls that need `spawn_blocking`?
-- Hot paths: Is this called per-message or per-task?
 
-## Phase 3: Solution Exploration
+### Minimal Viable Approach Lens
+- What existing code already does 80% of this?
+- Could this be a change to existing modules instead of new ones?
+- What is the smallest public API surface that works?
+- Can this be done WITHOUT adding any new types?
+- What would a 10-line version of this look like?
 
-Generate 2-3 approaches:
+### Design Proposal
 
-| Approach | Core Idea | Pros | Cons | Complexity | Privacy Risk |
-|----------|-----------|------|------|------------|--------------|
+Output ONE approach (not 2-3):
 
-For each approach include:
-- New types/traits introduced vs. reused from `src/types/mod.rs`
-- New crates to add (check `deny.toml` compatibility)
-- Files created or modified (with specific paths)
-- Privacy invariant impact (preserved/strengthened/at-risk)
-- Estimated test count
+```
+Design Proposal:
+  New files:      [list — with one-line justification for EACH]
+  New types:      [list — with one-line justification for EACH]
+  Modified files: [list]
+  Estimated LoC:  [number]
+  Key signatures: [Rust code block with fn/struct/enum signatures]
+```
 
-## Phase 4: Recommendation
+Mark which types already exist in `src/types/mod.rs` and should be reused.
 
-Output a single actionable plan:
+---
 
-### 1. Chosen Approach
-One-paragraph justification referencing spec sections.
+## Phase 3: Skeptic Review (MANDATORY)
+
+**Do not skip this phase.** Answer all 7 questions in writing.
+
+### 1. "Do Nothing" Test
+What breaks if we don't build this? If the answer is "nothing breaks, it would just be nice" — shrink scope or defer.
+
+### 2. "10-Line Patch" Test
+Could a tiny change to existing code achieve 80% of the value? Describe what that patch would look like. If it works, do that instead.
+
+### 3. New Files Justification
+For EACH new file in the proposal: Why can't this code go in an existing file? "Cleaner as separate" is not sufficient — the file must have a genuinely different responsibility.
+
+### 4. New Types Justification
+For EACH new struct, enum, or trait: Does an equivalent exist in `src/types/mod.rs` or the target module? Could this be a type alias, a field on an existing type, or a method instead?
+
+### 5. Deletion Pass
+Go through every element in the proposal (file, type, function, test). Mark each:
+- **ESSENTIAL**: Required to satisfy the spec
+- **NICE-TO-HAVE**: Improves quality but not spec-required
+
+Remove everything marked NICE-TO-HAVE from the proposal.
+
+### 6. Complexity Scorecard
+
+```
+Complexity Scorecard:
+  New files:         [count] (target: 0-1)
+  New types/traits:  [count] (target: 0-3)
+  Modified files:    [count] (target: 1-3)
+  Estimated new LoC: [count] (target: < 300)
+  New dependencies:  [count] (target: 0)
+```
+
+If ANY number exceeds its target, write one sentence justifying why.
+
+### 7. Senior Engineer Test
+"Would a senior engineer look at this PR and say 'this is too much for what it does'?" Write one honest sentence.
+
+### Revised Design
+
+After answering all 7 questions, produce the **revised** design proposal. Note what was cut and why.
+
+---
+
+## Phase 4: Privacy Gate (pass/fail)
+
+For each invariant marked as "enforces" or "preserves" in the Alignment Card:
+
+```
+Invariant [X]: [name]
+  Status:    PRESERVED / STRENGTHENED / AT RISK
+  Mechanism: [one sentence explaining how the implementation preserves this]
+```
+
+**Gate rule**: If any invariant is AT RISK and no fix is identified, the plan CANNOT proceed. Revise the design until all invariants pass.
+
+---
+
+## Phase 5: Final Plan
+
+### 1. Summary
+One paragraph: what this feature does and why, referencing spec sections.
 
 ### 2. Implementation Steps
 Ordered list with specific file paths:
@@ -126,12 +172,12 @@ Ordered list with specific file paths:
 ...
 ```
 
-### 3. Key Type Signatures
+### 3. Key Code Sketches
 New `struct`, `enum`, `trait`, `fn` signatures (Rust code blocks).
 Mark which types already exist in `src/types/mod.rs` and should be reused.
 
 ### 4. Privacy Invariant Checklist
-For each touched invariant:
+From Phase 4 gate results:
 - [ ] Invariant X: How it's preserved
 
 ### 5. Acceptance Criteria
@@ -148,10 +194,6 @@ Task entries to add/update in `tasks/pfar-v2-prd.md`:
 
 ### 7. Feature Spec (if warranted)
 For non-trivial features, suggest creating `docs/pfar-feature-<name>.md` following the format of existing feature specs (Problem, Solution, Privacy Impact, Implementation Checklist).
-
-### 8. Risks & Mitigations
-| Risk | Mitigation |
-|------|------------|
 
 ---
 
