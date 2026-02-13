@@ -9,6 +9,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::kernel::inference::InferenceError;
+use crate::kernel::session::{ConversationTurn, TaskResult};
 
 /// Base safety rules shared by Planner and Synthesizer (spec 13.2).
 const BASE_SAFETY_RULES: &str = "\
@@ -64,10 +65,10 @@ pub struct OutputInstructions {
     pub format: String,
 }
 
-/// Context provided to the Synthesizer (spec 10.7).
+/// Context provided to the Synthesizer (spec 10.7, 9.3).
 ///
-/// Contains tool results and the original task context. The Synthesizer
-/// sees content but has no tool access (Invariant E).
+/// Contains tool results, the original task context, and session history.
+/// The Synthesizer sees content but has no tool access (Invariant E).
 pub struct SynthesizerContext {
     /// Task identifier.
     pub task_id: Uuid,
@@ -79,6 +80,10 @@ pub struct SynthesizerContext {
     pub tool_results: Vec<StepResult>,
     /// Instructions for formatting the output.
     pub output_instructions: OutputInstructions,
+    /// Session working memory from previous tasks (spec 9.3).
+    pub session_working_memory: Vec<TaskResult>,
+    /// Conversation history from session (spec 9.3).
+    pub conversation_history: Vec<ConversationTurn>,
 }
 
 /// Synthesizer errors.
@@ -115,7 +120,24 @@ impl Synthesizer {
             None => String::new(),
         };
 
-        // Step 3: Compose the full prompt.
+        // Step 3: Serialize session context (spec 9.3).
+        let memory_section = if ctx.session_working_memory.is_empty() {
+            String::new()
+        } else {
+            let memory_json = serde_json::to_string_pretty(&ctx.session_working_memory)
+                .unwrap_or_else(|_| "[]".to_owned());
+            format!("\n\n## Session Working Memory\n{memory_json}")
+        };
+
+        let history_section = if ctx.conversation_history.is_empty() {
+            String::new()
+        } else {
+            let history_json = serde_json::to_string_pretty(&ctx.conversation_history)
+                .unwrap_or_else(|_| "[]".to_owned());
+            format!("\n\n## Conversation History\n{history_json}")
+        };
+
+        // Step 4: Compose the full prompt.
         format!(
             "{BASE_SAFETY_RULES}\n\n\
              {SYNTHESIZER_ROLE_PROMPT}\n\n\
@@ -123,7 +145,9 @@ impl Synthesizer {
              {original_context}\n\n\
              ## Tool Results\n\
              {results_json}\
-             {raw_content_section}\n\n\
+             {raw_content_section}\
+             {memory_section}\
+             {history_section}\n\n\
              ## Instructions\n\
              Format: {format}\n\
              Maximum length: {max_length} characters",
@@ -166,6 +190,8 @@ mod tests {
             raw_content_ref: None,
             tool_results: vec![make_step_result(1, "email.list")],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -208,6 +234,8 @@ mod tests {
             raw_content_ref: None,
             tool_results: vec![],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -226,6 +254,8 @@ mod tests {
             raw_content_ref: None,
             tool_results: vec![],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -250,6 +280,8 @@ mod tests {
             ),
             tool_results: vec![make_step_result(1, "email.read")],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -272,6 +304,8 @@ mod tests {
             raw_content_ref: None,
             tool_results: vec![],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -313,6 +347,8 @@ mod tests {
                 },
             ],
             output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -339,6 +375,8 @@ mod tests {
                 max_length: 4000,
                 format: "markdown".to_owned(),
             },
+            session_working_memory: vec![],
+            conversation_history: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -350,6 +388,84 @@ mod tests {
         assert!(
             prompt.contains("Maximum length: 4000"),
             "prompt should include the max length"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_includes_conversation_history() {
+        use crate::kernel::session::{ConversationTurn, TaskResult};
+        use crate::types::SecurityLabel;
+        use chrono::Utc;
+
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "what did we talk about?".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![TaskResult {
+                task_id: Uuid::nil(),
+                timestamp: Utc::now(),
+                request_summary: "distance to the moon".to_owned(),
+                tool_outputs: vec![],
+                response_summary: "About 384,000 km".to_owned(),
+                label: SecurityLabel::Public,
+            }],
+            conversation_history: vec![
+                ConversationTurn {
+                    role: "user".to_owned(),
+                    summary: "distance to the moon".to_owned(),
+                    timestamp: Utc::now(),
+                },
+                ConversationTurn {
+                    role: "assistant".to_owned(),
+                    summary: "About 384,000 km".to_owned(),
+                    timestamp: Utc::now(),
+                },
+            ],
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("## Session Working Memory"),
+            "prompt should include session working memory section"
+        );
+        assert!(
+            prompt.contains("distance to the moon"),
+            "prompt should include previous task summary"
+        );
+        assert!(
+            prompt.contains("## Conversation History"),
+            "prompt should include conversation history section"
+        );
+        assert!(
+            prompt.contains("About 384,000 km"),
+            "prompt should include previous response"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_no_session_context() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "hello".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            !prompt.contains("## Session Working Memory"),
+            "empty working memory should not produce section header"
+        );
+        assert!(
+            !prompt.contains("## Conversation History"),
+            "empty history should not produce section header"
         );
     }
 }
