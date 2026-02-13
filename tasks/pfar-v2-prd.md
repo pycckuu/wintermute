@@ -9,6 +9,7 @@
 - [x] Phase 2: Telegram + Pipeline + First Tools (274 tests — 248 unit + 7 integration + 19 regression)
 - [x] Feature: Persistence & Recovery (362 tests — 324 unit + 7 integration + 31 regression)
 - [x] Feature: Trim persistence to simplified spec (304 tests — 278 unit + 7 integration + 19 regression)
+- [x] Feature: Pipeline Fast Path (316 tests — 290 unit + 7 integration + 19 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -62,6 +63,15 @@ Spec: `docs/pfar-feature-persistence-recovery.md`
 - [x] P.5 Startup integration and owner notification — simple restart message
 - [x] P.6 Session persistence — conversation history + working memory survive restarts (15 tests)
 - [x] P.7 Trim: removed task journaling, recovery module, ~70 task lifecycle tests
+
+## Feature: Pipeline Fast Path
+
+Goal: Skip Planner for messages that don't need tools. Spec: `docs/pfar-feature-fast-path.md`
+
+- [x] FP.1 Add `could_use(tool)` method to `ExtractedMetadata` (spec 6.10, 8 tests)
+- [x] FP.2 Add fast path branch in `Pipeline::run()` after Phase 0 (spec 7, 4 tests)
+- [x] FP.3 Pipeline path logging (`pipeline_path=fast|full`)
+- [x] FP.4 Quality assurance (refactor, review, lint)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
