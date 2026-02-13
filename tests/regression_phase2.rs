@@ -929,6 +929,7 @@ fn regression_09_synthesizer_prompt_denies_tool_access() {
         conversation_history: vec![],
         persona: None,
         is_onboarding: false,
+        is_persona_just_configured: false,
     };
 
     let prompt = Synthesizer::compose_prompt(&ctx);

@@ -26,20 +26,38 @@ Do not suggest workarounds requiring additional permissions.
 in user-facing responses.";
 
 /// Onboarding preamble for first-ever owner message (persona-onboarding spec §2).
+///
+/// This prompt OVERRIDES the normal Synthesizer role — the assistant must ask
+/// the configuration questions regardless of what the user's message says.
 const ONBOARDING_PREAMBLE: &str = "\
-You are a personal assistant running for the first time.\n\
-You don't have a name or personality configured yet.\n\n\
-In your response, greet the user warmly and ask them three things in a single message:\n\
-1. What should they call you (pick a name for the assistant)\n\
-2. What should you call them\n\
-3. How they want you to communicate (concise/detailed, casual/formal, any quirks)\n\n\
-Keep it brief and natural. Don't mention system internals.";
+IMPORTANT: This is your very first interaction. You MUST configure yourself before doing anything else.
+
+You are a personal assistant running for the first time. You have no name or personality yet.
+
+Your ONLY job in this response is to greet the user and ask them to configure you. \
+Ask these three things in a single, brief message:
+1. What should they call you (pick a name for you)
+2. What should you call them (their name)
+3. How they want you to communicate (concise/detailed, casual/formal, any quirks)
+
+Do NOT answer any question the user asked. Do NOT help with any task yet. \
+Just introduce yourself and ask the three configuration questions above. \
+Keep it brief and natural — 3-4 sentences max.";
 
 /// Anti-leak instruction appended when persona is active (persona-onboarding spec §2).
 const PERSONA_ANTI_LEAK: &str = "\
 Never mention internal system details like \"Synthesizer\", \"Planner\", \
 \"pipeline\", \"kernel\", or \"privacy-first runtime\". \
 You are a personal assistant, not a system component.";
+
+/// Prompt for the turn where the owner just provided their persona configuration.
+/// The Synthesizer should briefly confirm it was saved, not try to fully role-play yet.
+const PERSONA_JUST_CONFIGURED_PROMPT: &str = "\
+The user just provided their preferences for how this assistant should behave. \
+Their configuration has been saved and will take effect from the next message onward.
+
+Briefly acknowledge what they configured (name, their name, style) in 1-2 sentences. \
+Be warm but concise. Do NOT start role-playing the persona yet — just confirm.";
 
 /// Synthesizer role prompt (spec 13.4).
 const SYNTHESIZER_ROLE_PROMPT: &str = "\
@@ -112,6 +130,8 @@ pub struct SynthesizerContext {
     pub persona: Option<String>,
     /// True on the very first owner message when no persona exists yet.
     pub is_onboarding: bool,
+    /// True on the turn where the owner just provided persona configuration.
+    pub is_persona_just_configured: bool,
 }
 
 /// Synthesizer errors.
@@ -135,8 +155,12 @@ impl Synthesizer {
     /// output formatting instructions.
     pub fn compose_prompt(ctx: &SynthesizerContext) -> String {
         // Step 1: Build the role section based on persona state (persona-onboarding spec §2).
+        // Onboarding prompt goes AFTER the role prompt so the LLM sees it last
+        // and prioritizes the onboarding instructions over generic role behavior.
         let role_section = if ctx.is_onboarding {
-            format!("{ONBOARDING_PREAMBLE}\n\n{SYNTHESIZER_ROLE_PROMPT}")
+            format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{ONBOARDING_PREAMBLE}")
+        } else if ctx.is_persona_just_configured {
+            format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{PERSONA_JUST_CONFIGURED_PROMPT}")
         } else if let Some(ref persona) = ctx.persona {
             format!("You are {persona}.\n\n{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
         } else {
@@ -235,6 +259,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -281,6 +306,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -303,6 +329,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -331,6 +358,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -357,6 +385,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -402,6 +431,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -432,6 +462,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -480,6 +511,7 @@ mod tests {
             ],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -527,6 +559,7 @@ mod tests {
             ],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -570,6 +603,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -598,6 +632,7 @@ mod tests {
             conversation_history: vec![],
             persona: Some("Atlas. Owner: Igor. Style: concise, dry humor.".to_owned()),
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -628,6 +663,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: true,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -658,6 +694,7 @@ mod tests {
             conversation_history: vec![],
             persona: None,
             is_onboarding: false,
+            is_persona_just_configured: false,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -674,6 +711,37 @@ mod tests {
         assert!(
             !prompt.contains("Never mention internal system details"),
             "default should NOT have anti-leak"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_persona_just_configured() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Call yourself Atlas. I'm Igor. Keep it concise.".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: Some("Call yourself Atlas. I'm Igor. Keep it concise.".to_owned()),
+            is_onboarding: false,
+            is_persona_just_configured: true,
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("just provided their preferences"),
+            "just-configured prompt should include confirmation instruction"
+        );
+        assert!(
+            !prompt.contains("running for the first time"),
+            "just-configured should NOT include onboarding"
+        );
+        assert!(
+            !prompt.contains("Never mention internal system details"),
+            "just-configured should NOT include anti-leak"
         );
     }
 }
