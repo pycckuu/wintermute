@@ -305,12 +305,23 @@ impl InferenceProvider for AnthropicProvider {
             }],
         };
 
-        let resp = self
+        let mut req = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // OAuth tokens (sk-ant-oat*) use Bearer auth + beta header;
+        // standard API keys use x-api-key.
+        if self.api_key.starts_with("sk-ant-oat") {
+            req = req
+                .header("authorization", format!("Bearer {}", self.api_key))
+                .header("anthropic-beta", "oauth-2025-04-20");
+        } else {
+            req = req.header("x-api-key", &self.api_key);
+        }
+
+        let resp = req
             .json(&body)
             .send()
             .await
