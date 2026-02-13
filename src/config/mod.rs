@@ -102,7 +102,7 @@ impl PfarConfig {
             self.llm.local.base_url = v;
         }
         if let Some(v) = env("PFAR_LOCAL_MODEL") {
-            self.llm.local.default_model = v;
+            self.llm.local.model = v;
         }
 
         // LLM — Anthropic (env var presence creates the provider).
@@ -111,12 +111,12 @@ impl PfarConfig {
                 self.llm
                     .anthropic
                     .as_ref()
-                    .map(|c| c.default_model.clone())
+                    .map(|c| c.model.clone())
                     .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string())
             });
             self.llm.anthropic = Some(LlmCloudConfig {
                 api_key: key,
-                default_model: model,
+                model,
             });
         }
 
@@ -126,7 +126,7 @@ impl PfarConfig {
                 self.llm
                     .openai
                     .as_ref()
-                    .map(|c| c.default_model.clone())
+                    .map(|c| c.model.clone())
                     .unwrap_or_else(|| "gpt-4o".to_string())
             });
             let base_url = self
@@ -138,7 +138,7 @@ impl PfarConfig {
             self.llm.openai = Some(LlmOpenAiConfig {
                 base_url,
                 api_key: key,
-                default_model: model,
+                model,
             });
         }
 
@@ -148,12 +148,12 @@ impl PfarConfig {
                 self.llm
                     .lmstudio
                     .as_ref()
-                    .map(|c| c.default_model.clone())
+                    .map(|c| c.model.clone())
                     .unwrap_or_else(|| "deepseek-r1".to_string())
             });
             self.llm.lmstudio = Some(LlmLocalServerConfig {
                 base_url: url,
-                default_model: model,
+                model,
             });
         }
 
@@ -246,15 +246,16 @@ pub struct LlmConfig {
 pub struct LlmLocalConfig {
     /// Ollama base URL.
     pub base_url: String,
-    /// Default model name.
-    pub default_model: String,
+    /// Model name.
+    #[serde(alias = "default_model")]
+    pub model: String,
 }
 
 impl Default for LlmLocalConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:11434".to_string(),
-            default_model: "llama3".to_string(),
+            model: "llama3".to_string(),
         }
     }
 }
@@ -264,16 +265,16 @@ impl Default for LlmLocalConfig {
 pub struct LlmCloudConfig {
     /// API key (or vault reference like `"vault:anthropic_api_key"`).
     pub api_key: String,
-    /// Default model name.
-    #[serde(default = "default_anthropic_model")]
-    pub default_model: String,
+    /// Model name.
+    #[serde(default = "default_anthropic_model", alias = "default_model")]
+    pub model: String,
 }
 
 impl std::fmt::Debug for LlmCloudConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmCloudConfig")
             .field("api_key", &"__REDACTED__")
-            .field("default_model", &self.default_model)
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -290,9 +291,9 @@ pub struct LlmOpenAiConfig {
     pub base_url: String,
     /// API key (or vault reference).
     pub api_key: String,
-    /// Default model name.
-    #[serde(default = "default_openai_model")]
-    pub default_model: String,
+    /// Model name.
+    #[serde(default = "default_openai_model", alias = "default_model")]
+    pub model: String,
 }
 
 impl std::fmt::Debug for LlmOpenAiConfig {
@@ -300,7 +301,7 @@ impl std::fmt::Debug for LlmOpenAiConfig {
         f.debug_struct("LlmOpenAiConfig")
             .field("base_url", &self.base_url)
             .field("api_key", &"__REDACTED__")
-            .field("default_model", &self.default_model)
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -318,9 +319,9 @@ fn default_openai_model() -> String {
 pub struct LlmLocalServerConfig {
     /// Server base URL.
     pub base_url: String,
-    /// Default model name.
-    #[serde(default = "default_lmstudio_model")]
-    pub default_model: String,
+    /// Model name.
+    #[serde(default = "default_lmstudio_model", alias = "default_model")]
+    pub model: String,
 }
 
 fn default_lmstudio_model() -> String {
@@ -399,7 +400,7 @@ mod tests {
 
         // LLM defaults.
         assert_eq!(config.llm.local.base_url, "http://localhost:11434");
-        assert_eq!(config.llm.local.default_model, "llama3");
+        assert_eq!(config.llm.local.model, "llama3");
         assert!(config.llm.anthropic.is_none());
         assert!(config.llm.openai.is_none());
         assert!(config.llm.lmstudio.is_none());
@@ -427,20 +428,20 @@ journal_db = "/home/igor/.pfar/journal.db"
 
 [llm.local]
 base_url = "http://localhost:11435"
-default_model = "qwen3-8b"
+model = "qwen3-8b"
 
 [llm.anthropic]
 api_key = "vault:anthropic_api_key"
-default_model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-20250514"
 
 [llm.openai]
 base_url = "https://api.openai.com"
 api_key = "vault:openai_api_key"
-default_model = "gpt-4o-mini"
+model = "gpt-4o-mini"
 
 [llm.lmstudio]
 base_url = "http://localhost:1234"
-default_model = "deepseek-r1-8b"
+model = "deepseek-r1-8b"
 
 [adapter.telegram]
 enabled = true
@@ -458,7 +459,7 @@ poll_timeout_seconds = 45
         assert_eq!(config.paths.audit_log, "/home/igor/.pfar/audit.jsonl");
         assert_eq!(config.paths.journal_db, "/home/igor/.pfar/journal.db");
         assert_eq!(config.llm.local.base_url, "http://localhost:11435");
-        assert_eq!(config.llm.local.default_model, "qwen3-8b");
+        assert_eq!(config.llm.local.model, "qwen3-8b");
 
         let anthropic = config
             .llm
@@ -468,7 +469,7 @@ poll_timeout_seconds = 45
         assert_eq!(anthropic.api_key, "vault:anthropic_api_key");
 
         let openai = config.llm.openai.as_ref().expect("openai should exist");
-        assert_eq!(openai.default_model, "gpt-4o-mini");
+        assert_eq!(openai.model, "gpt-4o-mini");
 
         let lmstudio = config.llm.lmstudio.as_ref().expect("lmstudio should exist");
         assert_eq!(lmstudio.base_url, "http://localhost:1234");
@@ -557,7 +558,7 @@ shutdown_timeout_seconds = 60
 
         let anthropic = config.llm.anthropic.as_ref().expect("should be created");
         assert_eq!(anthropic.api_key, "sk-test-123");
-        assert_eq!(anthropic.default_model, "claude-opus-4-20250514");
+        assert_eq!(anthropic.model, "claude-opus-4-20250514");
     }
 
     #[test]
@@ -575,7 +576,7 @@ shutdown_timeout_seconds = 60
 
         let openai = config.llm.openai.as_ref().expect("should be created");
         assert_eq!(openai.api_key, "sk-openai-test");
-        assert_eq!(openai.default_model, "gpt-4o"); // default model
+        assert_eq!(openai.model, "gpt-4o"); // default model
         assert_eq!(openai.base_url, "https://api.openai.com"); // default url
     }
 
@@ -594,7 +595,7 @@ shutdown_timeout_seconds = 60
 
         let lmstudio = config.llm.lmstudio.as_ref().expect("should be created");
         assert_eq!(lmstudio.base_url, "http://localhost:1234");
-        assert_eq!(lmstudio.default_model, "deepseek-r1"); // default model
+        assert_eq!(lmstudio.model, "deepseek-r1"); // default model
     }
 
     #[test]
