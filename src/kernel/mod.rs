@@ -12,7 +12,6 @@ pub mod journal;
 pub mod pipeline;
 pub mod planner;
 pub mod policy;
-pub mod recovery;
 pub mod router;
 pub mod session;
 pub mod synthesizer;

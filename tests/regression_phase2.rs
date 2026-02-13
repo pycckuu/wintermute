@@ -667,7 +667,7 @@ async fn regression_05_label_ceiling_in_executor() {
     };
 
     let results = executor
-        .execute_plan(&task, &steps, &taint, None)
+        .execute_plan(&task, &steps, &taint)
         .await
         .expect("should succeed");
 
