@@ -14,7 +14,7 @@ The kernel is the security core of PFAR. All code here runs in the trusted bound
 | audit | 6.7 | Done | Structured JSON audit log, append-only |
 | planner | 7, 10.3, 13.3 | Done | Phase 1 prompt composition, plan parsing, plan validation |
 | synthesizer | 7, 10.7, 13.4 | Done | Phase 3 prompt composition from tool results |
-| executor | 7, 10.4, 10.6 | Done | Phase 2 plan executor, tool dispatch with policy enforcement |
+| executor | 7, 10.4, 10.6 | Done | Phase 2 plan executor, tool dispatch with policy enforcement, owner_only check |
 | egress | 10.8, 14.6 | Done | Egress validation, No Write Down enforcement, audit logging |
 | scheduler | 6.5 | Skeleton | Cron jobs with explicit template per job |
 | approval | 6.6 | Done | Human approval queue: submit/resolve/timeout with oneshot channels |

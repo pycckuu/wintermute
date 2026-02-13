@@ -28,6 +28,7 @@ use pfar::kernel::router::EventRouter;
 use pfar::kernel::session::SessionStore;
 use pfar::kernel::template::{InferenceConfig, TaskTemplate, TemplateRegistry};
 use pfar::kernel::vault::InMemoryVault;
+use pfar::tools::admin::AdminTool;
 use pfar::tools::calendar::CalendarTool;
 use pfar::tools::email::EmailTool;
 use pfar::tools::ToolRegistry;
@@ -63,8 +64,12 @@ async fn main() -> Result<()> {
     // Initialize inference proxy with available providers (spec 6.3, 11.1).
     let inference = Arc::new(build_inference_proxy(&config.llm));
 
-    // Initialize tool registry with Phase 2 tools (spec 6.11).
-    let tools = Arc::new(create_tool_registry());
+    // Initialize tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2).
+    // Two-phase init: base tools first, then AdminTool with refs to them.
+    let tools = Arc::new(create_tool_registry(
+        Arc::clone(&vault),
+        Arc::clone(&templates),
+    ));
 
     // Initialize audit logger (spec 6.7).
     let audit = Arc::new(
@@ -397,6 +402,7 @@ fn owner_telegram_template(inference: &InferenceConfig) -> TaskTemplate {
             "email.list".to_string(),
             "email.read".to_string(),
             "calendar.freebusy".to_string(),
+            "admin.*".to_string(),
         ],
         denied_tools: vec![],
         max_tool_calls: 15,
@@ -420,6 +426,7 @@ fn owner_cli_template(inference: &InferenceConfig) -> TaskTemplate {
             "email.list".to_string(),
             "email.read".to_string(),
             "calendar.freebusy".to_string(),
+            "admin.*".to_string(),
         ],
         denied_tools: vec![],
         max_tool_calls: 15,
@@ -459,10 +466,27 @@ fn whatsapp_scheduling_template() -> TaskTemplate {
     }
 }
 
-/// Create tool registry with Phase 2 tools (spec 6.11, 12.2).
-fn create_tool_registry() -> ToolRegistry {
+/// Create tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2, 12.2).
+///
+/// Uses two-phase init: builds base tools first, then creates AdminTool
+/// with a snapshot of the base registry so it can list other tools.
+fn create_tool_registry(
+    vault: Arc<dyn pfar::kernel::vault::SecretStore>,
+    templates: Arc<TemplateRegistry>,
+) -> ToolRegistry {
+    // Phase 1: Base tools (email, calendar).
+    let mut base_registry = ToolRegistry::new();
+    base_registry.register(Box::new(CalendarTool::new()));
+    base_registry.register(Box::new(EmailTool::new()));
+    let base_tools = Arc::new(base_registry);
+
+    // Phase 2: AdminTool gets a ref to base tools for listing integrations.
+    let admin = AdminTool::new(vault, base_tools, templates);
+
+    // Phase 3: Final registry includes all tools.
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(CalendarTool::new()));
     registry.register(Box::new(EmailTool::new()));
+    registry.register(Box::new(admin));
     registry
 }

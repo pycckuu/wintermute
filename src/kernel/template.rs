@@ -138,6 +138,11 @@ impl TemplateRegistry {
     pub fn get(&self, id: &str) -> Option<&TaskTemplate> {
         self.templates.get(id)
     }
+
+    /// Return all registered templates (spec 8.2, for admin.list_templates).
+    pub fn list_all(&self) -> Vec<&TaskTemplate> {
+        self.templates.values().collect()
+    }
 }
 
 impl Default for TemplateRegistry {

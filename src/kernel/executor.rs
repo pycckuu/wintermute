@@ -19,7 +19,7 @@ use crate::tools::scoped_http::ScopedHttpClient;
 use crate::tools::{
     ActionSemantics, InjectedCredentials, ToolOutput, ToolRegistry, ValidatedCapability,
 };
-use crate::types::{ApprovalDecision, SecurityLabel, TaintSet, Task};
+use crate::types::{ApprovalDecision, Principal, SecurityLabel, TaintSet, Task};
 
 /// A single step in an execution plan (spec 10.4).
 ///
@@ -75,6 +75,12 @@ pub enum ExecutorError {
     /// Vault error during credential resolution.
     #[error("vault error: {0}")]
     VaultError(String),
+    /// Tool is restricted to owner principal only (spec 8.2, regression test 15).
+    #[error("owner-only tool: {tool}")]
+    OwnerOnly {
+        /// The tool that requires owner access.
+        tool: String,
+    },
 }
 
 /// Plan executor dispatching tool calls with policy enforcement (spec 7).
@@ -144,6 +150,15 @@ impl PlanExecutor {
                 .tools
                 .get_tool_and_action(&step.tool)
                 .ok_or_else(|| ExecutorError::ToolNotFound(step.tool.clone()))?;
+
+            // Step 2b: Check owner_only restriction (spec 8.2, regression test 15).
+            let manifest = tool.manifest();
+            if manifest.owner_only && task.principal != Principal::Owner {
+                warn!(tool = %step.tool, principal = ?task.principal, "owner-only tool rejected");
+                return Err(ExecutorError::OwnerOnly {
+                    tool: step.tool.clone(),
+                });
+            }
 
             // Step 3: Check taint for write operations (spec 4.4).
             if action.semantics == ActionSemantics::Write {
@@ -404,6 +419,57 @@ mod tests {
         PlanExecutor::new(policy, tools, vault, audit)
     }
 
+    /// Mock owner-only tool for testing executor's owner_only enforcement.
+    struct MockOwnerOnlyTool;
+
+    #[async_trait]
+    impl Tool for MockOwnerOnlyTool {
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "admin".to_owned(),
+                owner_only: true,
+                actions: vec![ToolAction {
+                    id: "admin.system_status".to_owned(),
+                    description: "Show system status".to_owned(),
+                    semantics: ActionSemantics::Read,
+                    label_ceiling: SecurityLabel::Secret,
+                    args_schema: serde_json::json!({}),
+                }],
+                network_allowlist: vec![],
+            }
+        }
+
+        async fn execute(
+            &self,
+            _cap: &ValidatedCapability,
+            _creds: &InjectedCredentials,
+            _http: &ScopedHttpClient,
+            action: &str,
+            _args: serde_json::Value,
+        ) -> Result<ToolOutput, ToolError> {
+            if action == "admin.system_status" {
+                Ok(ToolOutput {
+                    data: serde_json::json!({"status": "ok"}),
+                    has_free_text: false,
+                })
+            } else {
+                Err(ToolError::ActionNotFound(action.to_owned()))
+            }
+        }
+    }
+
+    fn make_executor_with_admin(buf: &SharedBuf) -> PlanExecutor {
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::read_tool()));
+        registry.register(Box::new(MockOwnerOnlyTool));
+        let tools = Arc::new(registry);
+        let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf.clone())));
+
+        PlanExecutor::new(policy, tools, vault, audit)
+    }
+
     // ── Tests ──
 
     #[tokio::test]
@@ -648,6 +714,54 @@ mod tests {
             audit_output.contains("email.list"),
             "audit log should contain the tool name"
         );
+    }
+
+    /// Regression test 15: owner_only tool rejects non-owner principal (spec 8.2).
+    #[tokio::test]
+    async fn test_owner_only_rejects_non_owner() {
+        let buf = SharedBuf::new();
+        let executor = make_executor_with_admin(&buf);
+        let mut task = test_task();
+        task.principal = Principal::TelegramPeer("12345".to_owned());
+        task.allowed_tools.push("admin.*".to_owned());
+
+        let steps = vec![PlanStep {
+            step: 1,
+            tool: "admin.system_status".to_owned(),
+            args: serde_json::json!({}),
+        }];
+
+        let result = executor.execute_plan(&task, &steps, &clean_taint()).await;
+        assert!(result.is_err());
+        let err = result.expect_err("should be OwnerOnly");
+        assert!(
+            matches!(err, ExecutorError::OwnerOnly { ref tool } if tool == "admin.system_status"),
+            "expected OwnerOnly error, got: {err}"
+        );
+    }
+
+    /// Owner can invoke owner_only tools (spec 8.2).
+    #[tokio::test]
+    async fn test_owner_only_allows_owner() {
+        let buf = SharedBuf::new();
+        let executor = make_executor_with_admin(&buf);
+        let mut task = test_task();
+        task.principal = Principal::Owner;
+        task.allowed_tools.push("admin.*".to_owned());
+
+        let steps = vec![PlanStep {
+            step: 1,
+            tool: "admin.system_status".to_owned(),
+            args: serde_json::json!({}),
+        }];
+
+        let results = executor
+            .execute_plan(&task, &steps, &clean_taint())
+            .await
+            .expect("owner should be allowed to invoke owner_only tools");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
     }
 
     /// Verify that a tool not in allowed_tools is rejected by policy.
