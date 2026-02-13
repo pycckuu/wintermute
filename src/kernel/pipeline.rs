@@ -294,6 +294,20 @@ impl Pipeline {
         let default_sink = "sink:default".to_owned();
         let first_sink = task.output_sinks.first().unwrap_or(&default_sink);
 
+        // Read session data for synthesizer context (spec 9.3).
+        let (working_memory, conversation) = {
+            let sessions = self.sessions.read().await;
+            let memory = sessions
+                .get(&task.principal)
+                .map(|s| s.recent_results().iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let history = sessions
+                .get(&task.principal)
+                .map(|s| s.conversation_history().iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            (memory, history)
+        };
+
         let synth_ctx = SynthesizerContext {
             task_id: task.task_id,
             original_context: raw_text.clone(),
@@ -304,6 +318,8 @@ impl Pipeline {
                 max_length: 2000,
                 format: "plain_text".to_owned(),
             },
+            session_working_memory: working_memory,
+            conversation_history: conversation,
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);

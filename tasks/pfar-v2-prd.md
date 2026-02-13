@@ -7,7 +7,7 @@
 - [x] Phase 0: Repository setup from template
 - [x] Phase 1: Kernel Core (73 tests passing — 66 unit + 7 integration)
 - [x] Phase 2: Telegram + Pipeline + First Tools (274 tests — 248 unit + 7 integration + 19 regression)
-- [x] Feature: Persistence & Recovery (362 tests — 324 unit + 7 integration + 31 regression)
+- [x] Feature: Persistence & Recovery (364 tests — 326 unit + 7 integration + 31 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 

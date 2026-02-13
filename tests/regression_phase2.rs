@@ -925,6 +925,8 @@ fn regression_09_synthesizer_prompt_denies_tool_access() {
             max_length: 2000,
             format: "plain_text".to_owned(),
         },
+        session_working_memory: vec![],
+        conversation_history: vec![],
     };
 
     let prompt = Synthesizer::compose_prompt(&ctx);
