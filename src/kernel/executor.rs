@@ -13,7 +13,6 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use crate::kernel::audit::AuditLogger;
-use crate::kernel::journal::TaskJournal;
 use crate::kernel::policy::{PolicyEngine, PolicyError};
 use crate::kernel::vault::SecretStore;
 use crate::tools::scoped_http::ScopedHttpClient;
@@ -126,7 +125,6 @@ impl PlanExecutor {
         task: &Task,
         steps: &[PlanStep],
         event_taint: &TaintSet,
-        journal: Option<&TaskJournal>,
     ) -> Result<Vec<StepExecutionResult>, ExecutorError> {
         let mut results = Vec::new();
 
@@ -198,29 +196,11 @@ impl PlanExecutor {
             results.push(StepExecutionResult {
                 step: step.step,
                 tool: step.tool.clone(),
-                output: tool_output.data.clone(),
+                output: tool_output.data,
                 label: final_label,
                 success: true,
                 error: None,
             });
-
-            // Journal: record completed step (feature spec: persistence-recovery 4.3).
-            if let Some(j) = journal {
-                let completed_step = crate::kernel::journal::CompletedStep {
-                    step: step.step,
-                    tool: step.tool.clone(),
-                    action_semantics: match action.semantics {
-                        ActionSemantics::Read => "read".to_owned(),
-                        ActionSemantics::Write => "write".to_owned(),
-                    },
-                    result_json: tool_output.data,
-                    label: final_label,
-                    completed_at: chrono::Utc::now(),
-                };
-                if let Err(e) = j.append_completed_step(task.task_id, &completed_step) {
-                    warn!(step = step.step, error = %e, "journal step write failed (best-effort)");
-                }
-            }
         }
 
         Ok(results)
@@ -438,7 +418,7 @@ mod tests {
         }];
 
         let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
+            .execute_plan(&task, &steps, &clean_taint())
             .await
             .expect("should succeed");
 
@@ -469,7 +449,7 @@ mod tests {
         ];
 
         let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
+            .execute_plan(&task, &steps, &clean_taint())
             .await
             .expect("should succeed");
 
@@ -493,7 +473,7 @@ mod tests {
 
         // Clean taint -> write should be auto-approved.
         let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
+            .execute_plan(&task, &steps, &clean_taint())
             .await
             .expect("clean taint write should succeed");
 
@@ -513,9 +493,7 @@ mod tests {
         }];
 
         // Raw taint -> write should require approval.
-        let result = executor
-            .execute_plan(&task, &steps, &raw_taint(), None)
-            .await;
+        let result = executor.execute_plan(&task, &steps, &raw_taint()).await;
 
         assert!(result.is_err());
         let err = result.expect_err("should be approval required");
@@ -536,9 +514,7 @@ mod tests {
             args: serde_json::json!({}),
         }];
 
-        let result = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
-            .await;
+        let result = executor.execute_plan(&task, &steps, &clean_taint()).await;
 
         assert!(result.is_err());
         let err = result.expect_err("should be tool not found");
@@ -573,9 +549,7 @@ mod tests {
             },
         ];
 
-        let result = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
-            .await;
+        let result = executor.execute_plan(&task, &steps, &clean_taint()).await;
 
         assert!(result.is_err());
         let err = result.expect_err("should exceed max calls");
@@ -602,7 +576,7 @@ mod tests {
         }];
 
         let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
+            .execute_plan(&task, &steps, &clean_taint())
             .await
             .expect("should succeed");
 
@@ -634,9 +608,7 @@ mod tests {
             args: serde_json::json!({}),
         }];
 
-        let result = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
-            .await;
+        let result = executor.execute_plan(&task, &steps, &clean_taint()).await;
 
         assert!(result.is_err());
         let err = result.expect_err("should be policy error");
@@ -659,7 +631,7 @@ mod tests {
         }];
 
         let _results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
+            .execute_plan(&task, &steps, &clean_taint())
             .await
             .expect("should succeed");
 
@@ -693,9 +665,7 @@ mod tests {
             args: serde_json::json!({}),
         }];
 
-        let result = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
-            .await;
+        let result = executor.execute_plan(&task, &steps, &clean_taint()).await;
 
         assert!(result.is_err());
         let err = result.expect_err("should be policy error");
@@ -706,123 +676,5 @@ mod tests {
             ),
             "expected ToolNotAllowed policy error, got: {err}"
         );
-    }
-
-    // ── Journal integration tests ──
-
-    /// Executor journals each completed step when journal is provided
-    /// (feature spec: persistence-recovery 4.3).
-    #[tokio::test]
-    async fn test_executor_journals_each_step() {
-        use crate::kernel::journal::{CreateTaskParams, PersistedTaskState, TaskJournal};
-
-        let buf = SharedBuf::new();
-        let executor = make_executor(&buf);
-        let task = test_task();
-
-        let journal = TaskJournal::open_in_memory().expect("in-memory journal");
-        journal
-            .create_task(&CreateTaskParams {
-                task_id: task.task_id,
-                template_id: task.template_id.clone(),
-                principal: "owner".to_owned(),
-                trigger_event: None,
-                data_ceiling: task.data_ceiling,
-                output_sinks: task.output_sinks.clone(),
-                trace_id: None,
-            })
-            .expect("create task");
-        // Set state to Executing (pipeline does this before calling execute_plan).
-        journal
-            .update_state(
-                task.task_id,
-                &PersistedTaskState::Executing {
-                    current_step: 0,
-                    completed_steps: vec![],
-                },
-            )
-            .expect("set executing state");
-
-        let steps = vec![
-            PlanStep {
-                step: 1,
-                tool: "email.list".to_owned(),
-                args: serde_json::json!({"account": "personal"}),
-            },
-            PlanStep {
-                step: 2,
-                tool: "email.read".to_owned(),
-                args: serde_json::json!({"message_id": "msg_1"}),
-            },
-        ];
-
-        let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), Some(&journal))
-            .await
-            .expect("should succeed");
-        assert_eq!(results.len(), 2);
-
-        // Verify journal has the completed steps.
-        let persisted = journal.get_task(task.task_id).expect("get task");
-        if let PersistedTaskState::Executing {
-            current_step,
-            completed_steps,
-        } = &persisted.state
-        {
-            assert_eq!(completed_steps.len(), 2, "should have 2 completed steps");
-            assert_eq!(completed_steps[0].tool, "email.list");
-            assert_eq!(completed_steps[1].tool, "email.read");
-            assert_eq!(*current_step, 2);
-        } else {
-            panic!("expected Executing state, got: {:?}", persisted.state);
-        }
-    }
-
-    /// Executor with None journal works identically (backward compatibility).
-    #[tokio::test]
-    async fn test_executor_none_journal() {
-        let buf = SharedBuf::new();
-        let executor = make_executor(&buf);
-        let task = test_task();
-        let steps = vec![PlanStep {
-            step: 1,
-            tool: "email.list".to_owned(),
-            args: serde_json::json!({}),
-        }];
-
-        let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), None)
-            .await
-            .expect("None journal should not affect execution");
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
-    }
-
-    /// Journal write failure during step execution is non-fatal
-    /// (feature spec: persistence-recovery best-effort writes).
-    #[tokio::test]
-    async fn test_executor_journal_failure_non_fatal() {
-        use crate::kernel::journal::TaskJournal;
-
-        let buf = SharedBuf::new();
-        let executor = make_executor(&buf);
-        let task = test_task();
-
-        // Create journal but DON'T create the task record — append_completed_step
-        // will fail because the task doesn't exist. Execution should still succeed.
-        let journal = TaskJournal::open_in_memory().expect("in-memory journal");
-
-        let steps = vec![PlanStep {
-            step: 1,
-            tool: "email.list".to_owned(),
-            args: serde_json::json!({}),
-        }];
-
-        let results = executor
-            .execute_plan(&task, &steps, &clean_taint(), Some(&journal))
-            .await
-            .expect("journal failure should not fail execution");
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
     }
 }

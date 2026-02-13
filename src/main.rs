@@ -23,7 +23,6 @@ use pfar::kernel::inference::InferenceProxy;
 use pfar::kernel::journal::TaskJournal;
 use pfar::kernel::pipeline::Pipeline;
 use pfar::kernel::policy::PolicyEngine;
-use pfar::kernel::recovery;
 use pfar::kernel::router::EventRouter;
 use pfar::kernel::session::SessionStore;
 use pfar::kernel::template::{InferenceConfig, TaskTemplate, TemplateRegistry};
@@ -53,15 +52,6 @@ const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 
 /// Default journal database path (feature-persistence-recovery).
 const DEFAULT_JOURNAL_PATH: &str = "/tmp/pfar-journal.db";
-
-/// Default max age for task recovery in seconds (feature-persistence-recovery).
-const DEFAULT_RECOVERY_MAX_AGE_SECS: u64 = 600;
-
-/// Completed task journal retention (24 hours).
-const JOURNAL_RETENTION_COMPLETED_SECS: u64 = 24 * 3600;
-
-/// Failed/abandoned task journal retention (7 days).
-const JOURNAL_RETENTION_FAILED_SECS: u64 = 7 * 24 * 3600;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -113,42 +103,6 @@ async fn main() -> Result<()> {
     let journal =
         Arc::new(TaskJournal::open(&journal_path).context("failed to open task journal")?);
     info!(path = %journal_path, "task journal opened");
-
-    // Run recovery on incomplete tasks (feature-persistence-recovery §7).
-    let recovery_max_age_secs: u64 = std::env::var("PFAR_RECOVERY_MAX_AGE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_RECOVERY_MAX_AGE_SECS);
-    let recovery_max_age_i64 = i64::try_from(recovery_max_age_secs).unwrap_or(i64::MAX);
-    let recovery_report =
-        recovery::recover_tasks(&journal, chrono::Duration::seconds(recovery_max_age_i64));
-    match &recovery_report {
-        Ok(report) => {
-            if report.is_clean() {
-                info!("clean startup -- no pending tasks to recover");
-            } else {
-                info!(
-                    retried = report.retried.len(),
-                    resumed = report.resumed.len(),
-                    reprompted = report.reprompted.len(),
-                    abandoned = report.abandoned.len(),
-                    "recovery completed"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "recovery failed (non-fatal)");
-        }
-    }
-
-    // Cleanup old journal entries (feature-persistence-recovery §4.4).
-    let completed_retention = Duration::from_secs(JOURNAL_RETENTION_COMPLETED_SECS);
-    let failed_retention = Duration::from_secs(JOURNAL_RETENTION_FAILED_SECS);
-    match journal.cleanup_old_tasks(completed_retention, failed_retention) {
-        Ok(cleaned) if cleaned > 0 => info!(count = cleaned, "cleaned up old journal entries"),
-        Ok(_) => {}
-        Err(e) => warn!(error = %e, "journal cleanup failed (non-fatal)"),
-    }
 
     // Load persisted session data from journal (spec 9.1, 9.2).
     let sessions = {
@@ -203,7 +157,6 @@ async fn main() -> Result<()> {
 
     if let Some(token) = bot_token {
         info!("starting Telegram adapter");
-        let recovery_msg = recovery_report.as_ref().map(|r| r.format_message()).ok();
         run_telegram_loop(
             token,
             owner_id,
@@ -212,7 +165,6 @@ async fn main() -> Result<()> {
             templates,
             audit,
             Arc::clone(&journal),
-            recovery_msg,
         )
         .await
     } else {
@@ -238,7 +190,6 @@ async fn run_telegram_loop(
     templates: Arc<TemplateRegistry>,
     audit: Arc<AuditLogger>,
     journal: Arc<TaskJournal>,
-    recovery_msg: Option<String>,
 ) -> Result<()> {
     let owner_chat_id = owner_id.clone();
 
@@ -266,15 +217,13 @@ async fn run_telegram_loop(
 
     info!("PFAR v2 ready -- listening for events");
 
-    // Send recovery report to owner (feature-persistence-recovery §7.4).
-    if let Some(msg) = recovery_msg {
-        let _ = kernel_tx
-            .send(KernelToAdapter::SendMessage {
-                chat_id: owner_chat_id,
-                text: msg,
-            })
-            .await;
-    }
+    // Notify owner of restart (persistence-recovery spec §8).
+    let _ = kernel_tx
+        .send(KernelToAdapter::SendMessage {
+            chat_id: owner_chat_id,
+            text: "System restarted. If you were waiting on something, just ask again.".to_owned(),
+        })
+        .await;
 
     // Main event loop with graceful shutdown support.
     loop {
@@ -373,7 +322,7 @@ async fn run_telegram_loop(
                 let remaining = active_tasks.load(Ordering::Relaxed);
                 warn!(
                     remaining_tasks = remaining,
-                    "shutdown timeout exceeded, tasks remain in journal for recovery"
+                    "shutdown timeout exceeded, abandoning in-flight tasks"
                 );
                 break;
             }
