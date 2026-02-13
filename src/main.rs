@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use pfar::adapters::telegram::{AdapterToKernel, KernelToAdapter, TelegramAdapter, TelegramConfig};
+use pfar::config::{LlmConfig, PfarConfig};
 use pfar::kernel::approval::ApprovalQueue;
 use pfar::kernel::audit::AuditLogger;
 use pfar::kernel::egress::EgressValidator;
@@ -32,34 +33,17 @@ use pfar::tools::email::EmailTool;
 use pfar::tools::ToolRegistry;
 use pfar::types::PrincipalClass;
 
-/// Channel buffer size for adapter <-> kernel communication.
-const CHANNEL_BUFFER_SIZE: usize = 100;
-
-/// Default Ollama URL for local inference.
-const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-
-/// Default Telegram owner ID from spec 18.1.
-const DEFAULT_OWNER_ID: &str = "415494855";
-
-/// Default audit log path.
-const DEFAULT_AUDIT_LOG_PATH: &str = "/tmp/pfar-audit.jsonl";
-
-/// Default approval timeout in seconds (spec 18.1).
-const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
-
-/// Default graceful shutdown timeout in seconds (spec 9).
-const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
-
-/// Default journal database path (feature-persistence-recovery).
-const DEFAULT_JOURNAL_PATH: &str = "/tmp/pfar-journal.db";
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load configuration (spec 18.1).
+    // Precedence: env vars > ./config.toml > defaults.
+    let config = PfarConfig::load().context("failed to load configuration")?;
+
     // Initialize tracing (spec 14.5).
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.kernel.log_level)),
         )
         .init();
 
@@ -68,29 +52,24 @@ async fn main() -> Result<()> {
     // Initialize kernel components (spec 5.1).
     let policy = Arc::new(PolicyEngine::with_defaults());
 
-    // Load templates -- templates use the best available provider (spec 18.2).
+    // Load templates — templates use the best available provider (spec 18.2).
     // Future phases will load from ~/.pfar/templates/ directory.
-    let owner_inference = resolve_owner_inference_config();
+    let owner_inference = resolve_owner_inference_config(&config.llm);
     let templates = Arc::new(create_default_templates(&owner_inference));
 
     // Initialize vault (in-memory for Phase 2, spec 6.4).
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::default());
 
     // Initialize inference proxy with available providers (spec 6.3, 11.1).
-    let ollama_url =
-        std::env::var("PFAR_OLLAMA_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_URL.to_string());
-    let inference = Arc::new(build_inference_proxy(&ollama_url));
+    let inference = Arc::new(build_inference_proxy(&config.llm));
 
     // Initialize tool registry with Phase 2 tools (spec 6.11).
     let tools = Arc::new(create_tool_registry());
 
-    // Initialize session store (spec 9.1).
-    // Sessions are populated from journal after it's opened (below).
-
     // Initialize audit logger (spec 6.7).
-    let audit_path =
-        std::env::var("PFAR_AUDIT_LOG").unwrap_or_else(|_| DEFAULT_AUDIT_LOG_PATH.to_string());
-    let audit = Arc::new(AuditLogger::new(&audit_path).context("failed to create audit logger")?);
+    let audit = Arc::new(
+        AuditLogger::new(&config.paths.audit_log).context("failed to create audit logger")?,
+    );
 
     // Log system startup (feature-persistence-recovery).
     if let Err(e) = audit.log_system_startup(env!("CARGO_PKG_VERSION")) {
@@ -98,11 +77,10 @@ async fn main() -> Result<()> {
     }
 
     // Open task journal (feature-persistence-recovery).
-    let journal_path =
-        std::env::var("PFAR_JOURNAL_PATH").unwrap_or_else(|_| DEFAULT_JOURNAL_PATH.to_string());
-    let journal =
-        Arc::new(TaskJournal::open(&journal_path).context("failed to open task journal")?);
-    info!(path = %journal_path, "task journal opened");
+    let journal = Arc::new(
+        TaskJournal::open(&config.paths.journal_db).context("failed to open task journal")?,
+    );
+    info!(path = %config.paths.journal_db, "task journal opened");
 
     // Load persisted session data from journal (spec 9.1, 9.2).
     let sessions = {
@@ -117,7 +95,7 @@ async fn main() -> Result<()> {
 
     // Initialize approval queue (spec 6.6).
     let _approval_queue = Arc::new(tokio::sync::Mutex::new(ApprovalQueue::new(
-        Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+        Duration::from_secs(config.kernel.approval_timeout_seconds),
     )));
 
     // Build plan executor (spec 7, Phase 2).
@@ -151,15 +129,11 @@ async fn main() -> Result<()> {
     );
 
     // Check if Telegram adapter is configured (spec 6.9).
-    let bot_token = std::env::var("PFAR_TELEGRAM_BOT_TOKEN").ok();
-    let owner_id =
-        std::env::var("PFAR_TELEGRAM_OWNER_ID").unwrap_or_else(|_| DEFAULT_OWNER_ID.to_string());
-
-    if let Some(token) = bot_token {
+    if let Some(token) = config.adapter.telegram.bot_token.clone() {
         info!("starting Telegram adapter");
         run_telegram_loop(
             token,
-            owner_id,
+            &config,
             router,
             pipeline,
             templates,
@@ -168,8 +142,8 @@ async fn main() -> Result<()> {
         )
         .await
     } else {
-        info!("no PFAR_TELEGRAM_BOT_TOKEN set -- running in CLI-only mode");
-        info!("set PFAR_TELEGRAM_BOT_TOKEN to enable Telegram adapter");
+        info!("no Telegram bot token configured -- running in CLI-only mode");
+        info!("set PFAR_TELEGRAM_BOT_TOKEN or [adapter.telegram].bot_token to enable");
         // Future: fall back to CLI adapter event loop.
         info!("PFAR v2 shutting down (no adapter configured)");
         Ok(())
@@ -184,31 +158,33 @@ async fn main() -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn run_telegram_loop(
     token: String,
-    owner_id: String,
+    config: &PfarConfig,
     router: EventRouter,
     pipeline: Pipeline,
     templates: Arc<TemplateRegistry>,
     audit: Arc<AuditLogger>,
     journal: Arc<TaskJournal>,
 ) -> Result<()> {
-    let owner_chat_id = owner_id.clone();
+    let owner_chat_id = config.adapter.telegram.owner_id.clone();
 
-    let config = TelegramConfig {
+    let tg_config = TelegramConfig {
         bot_token: token,
-        owner_id,
-        poll_timeout_seconds: 30,
+        owner_id: config.adapter.telegram.owner_id.clone(),
+        poll_timeout_seconds: config.adapter.telegram.poll_timeout_seconds,
     };
 
     // Create channels for adapter <-> kernel communication.
-    let (adapter_tx, mut adapter_rx) = mpsc::channel::<AdapterToKernel>(CHANNEL_BUFFER_SIZE);
-    let (kernel_tx, kernel_rx) = mpsc::channel::<KernelToAdapter>(CHANNEL_BUFFER_SIZE);
+    let (adapter_tx, mut adapter_rx) =
+        mpsc::channel::<AdapterToKernel>(config.kernel.channel_buffer_size);
+    let (kernel_tx, kernel_rx) =
+        mpsc::channel::<KernelToAdapter>(config.kernel.channel_buffer_size);
 
     // Shutdown flag and active task counter (spec 9).
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let active_tasks = Arc::new(AtomicUsize::new(0));
 
     // Spawn Telegram adapter with journal for offset persistence.
-    let adapter = TelegramAdapter::new(config, Some(journal));
+    let adapter = TelegramAdapter::new(tg_config, Some(journal));
     tokio::spawn(async move {
         if let Err(e) = adapter.run(adapter_tx, kernel_rx).await {
             error!("Telegram adapter error: {e}");
@@ -301,10 +277,7 @@ async fn run_telegram_loop(
     }
 
     // Graceful shutdown sequence (spec 9).
-    let shutdown_timeout_secs: u64 = std::env::var("PFAR_SHUTDOWN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT_SECS);
+    let shutdown_timeout_secs = config.kernel.shutdown_timeout_seconds;
 
     let pending = active_tasks.load(Ordering::Relaxed);
     if pending > 0 {
@@ -343,26 +316,26 @@ async fn run_telegram_loop(
     Ok(())
 }
 
-/// Build the inference proxy with all available providers (spec 6.3, 11.1).
+/// Build the inference proxy from config (spec 6.3, 11.1).
 ///
-/// Always registers local Ollama. Optionally registers OpenAI, Anthropic,
-/// and LM Studio based on environment variables.
-fn build_inference_proxy(ollama_url: &str) -> InferenceProxy {
-    let mut builder = InferenceProxy::builder(ollama_url);
+/// Always registers local Ollama. Optionally registers cloud/local providers
+/// based on config.
+fn build_inference_proxy(llm: &LlmConfig) -> InferenceProxy {
+    let mut builder = InferenceProxy::builder(&llm.local.base_url);
 
-    if let Ok(key) = std::env::var("PFAR_OPENAI_API_KEY") {
-        builder = builder.with_openai("https://api.openai.com", &key);
+    if let Some(ref openai) = llm.openai {
+        builder = builder.with_openai(&openai.base_url, &openai.api_key);
         info!("OpenAI provider registered");
     }
 
-    if let Ok(key) = std::env::var("PFAR_ANTHROPIC_API_KEY") {
-        builder = builder.with_anthropic(&key);
+    if let Some(ref anthropic) = llm.anthropic {
+        builder = builder.with_anthropic(&anthropic.api_key);
         info!("Anthropic provider registered");
     }
 
-    if let Ok(url) = std::env::var("PFAR_LMSTUDIO_URL") {
-        builder = builder.with_lmstudio(&url);
-        info!(url = %url, "LM Studio provider registered");
+    if let Some(ref lmstudio) = llm.lmstudio {
+        builder = builder.with_lmstudio(&lmstudio.base_url);
+        info!(url = %lmstudio.base_url, "LM Studio provider registered");
     }
 
     builder.build()
@@ -370,40 +343,35 @@ fn build_inference_proxy(ollama_url: &str) -> InferenceProxy {
 
 /// Resolve the best available inference config for owner templates (spec 11.1).
 ///
-/// Prefers Anthropic > OpenAI > local, based on which API keys are set.
-/// Cloud providers set `owner_acknowledged_cloud_risk: true` since the owner
-/// explicitly provided the API key.
-fn resolve_owner_inference_config() -> InferenceConfig {
-    if std::env::var("PFAR_ANTHROPIC_API_KEY").is_ok() {
-        let model = std::env::var("PFAR_ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
-        info!(model = %model, "owner templates will use Anthropic provider");
+/// Prefers Anthropic > OpenAI > LM Studio > local, based on which providers
+/// are configured. Cloud providers set `owner_acknowledged_cloud_risk: true`
+/// since the owner explicitly provided the API key.
+fn resolve_owner_inference_config(llm: &LlmConfig) -> InferenceConfig {
+    if let Some(ref anthropic) = llm.anthropic {
+        info!(model = %anthropic.default_model, "owner templates will use Anthropic provider");
         InferenceConfig {
             provider: "anthropic".to_string(),
-            model,
+            model: anthropic.default_model.clone(),
             owner_acknowledged_cloud_risk: true,
         }
-    } else if std::env::var("PFAR_OPENAI_API_KEY").is_ok() {
-        let model = std::env::var("PFAR_OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-        info!(model = %model, "owner templates will use OpenAI provider");
+    } else if let Some(ref openai) = llm.openai {
+        info!(model = %openai.default_model, "owner templates will use OpenAI provider");
         InferenceConfig {
             provider: "openai".to_string(),
-            model,
+            model: openai.default_model.clone(),
             owner_acknowledged_cloud_risk: true,
         }
-    } else if std::env::var("PFAR_LMSTUDIO_URL").is_ok() {
-        let model =
-            std::env::var("PFAR_LMSTUDIO_MODEL").unwrap_or_else(|_| "deepseek-r1".to_string());
-        info!(model = %model, "owner templates will use LM Studio provider");
+    } else if let Some(ref lmstudio) = llm.lmstudio {
+        info!(model = %lmstudio.default_model, "owner templates will use LM Studio provider");
         InferenceConfig {
             provider: "lmstudio".to_string(),
-            model,
+            model: lmstudio.default_model.clone(),
             owner_acknowledged_cloud_risk: false,
         }
     } else {
         InferenceConfig {
             provider: "local".to_string(),
-            model: std::env::var("PFAR_LOCAL_MODEL").unwrap_or_else(|_| "llama3".to_string()),
+            model: llm.local.default_model.clone(),
             owner_acknowledged_cloud_risk: false,
         }
     }

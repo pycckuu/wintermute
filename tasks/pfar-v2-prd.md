@@ -10,6 +10,7 @@
 - [x] Feature: Persistence & Recovery (362 tests — 324 unit + 7 integration + 31 regression)
 - [x] Feature: Trim persistence to simplified spec (304 tests — 278 unit + 7 integration + 19 regression)
 - [x] Feature: Pipeline Fast Path (316 tests — 290 unit + 7 integration + 19 regression)
+- [x] Feature: TOML Configuration (329 tests — 303 unit + 7 integration + 19 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -72,6 +73,17 @@ Goal: Skip Planner for messages that don't need tools. Spec: `docs/pfar-feature-
 - [x] FP.2 Add fast path branch in `Pipeline::run()` after Phase 0 (spec 7, 4 tests)
 - [x] FP.3 Pipeline path logging (`pipeline_path=fast|full`)
 - [x] FP.4 Quality assurance (refactor, review, lint)
+
+## Feature: TOML Configuration
+
+Goal: Centralize config into ./config.toml with env var overrides. Spec: `docs/pfar-feature-config.md`
+
+- [x] C.1 Config structs with serde Deserialize (spec 18.1, 14 tests)
+- [x] C.2 Config loading from ./config.toml with defaults
+- [x] C.3 Env var override layer (backward compat)
+- [x] C.4 Refactor main.rs to use PfarConfig — remove hardcoded constants
+- [x] C.5 Quality assurance (refactor, review, lint)
+- [x] C.6 config.example.toml with documented defaults
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
