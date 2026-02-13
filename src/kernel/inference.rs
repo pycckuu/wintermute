@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::debug;
+use tracing::warn;
 
 use crate::kernel::template::InferenceConfig;
 use crate::types::SecurityLabel;
@@ -422,7 +422,7 @@ impl InferenceProxy {
             }
         }
         // Fall back to default provider.
-        debug!(
+        warn!(
             requested = name,
             default = %self.default_provider,
             "provider not found, falling back to default"

@@ -33,11 +33,11 @@ journal_db = "~/.pfar/journal.db"
 
 [llm.local]
 base_url = "http://localhost:11434"
-default_model = "llama3"
+model = "llama3"
 
 [llm.anthropic]
 api_key = "vault:anthropic_api_key"
-default_model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-20250514"
 
 [adapter.telegram]
 bot_token = "vault:telegram_bot_token"
@@ -60,13 +60,13 @@ None. Config loading is pre-pipeline infrastructure. No privacy invariants are a
 | `PFAR_AUDIT_LOG` | `paths.audit_log` |
 | `PFAR_JOURNAL_PATH` | `paths.journal_db` |
 | `PFAR_OLLAMA_URL` | `llm.local.base_url` |
-| `PFAR_LOCAL_MODEL` | `llm.local.default_model` |
+| `PFAR_LOCAL_MODEL` | `llm.local.model` |
 | `PFAR_ANTHROPIC_API_KEY` | `llm.anthropic.api_key` |
-| `PFAR_ANTHROPIC_MODEL` | `llm.anthropic.default_model` |
+| `PFAR_ANTHROPIC_MODEL` | `llm.anthropic.model` |
 | `PFAR_OPENAI_API_KEY` | `llm.openai.api_key` |
-| `PFAR_OPENAI_MODEL` | `llm.openai.default_model` |
+| `PFAR_OPENAI_MODEL` | `llm.openai.model` |
 | `PFAR_LMSTUDIO_URL` | `llm.lmstudio.base_url` |
-| `PFAR_LMSTUDIO_MODEL` | `llm.lmstudio.default_model` |
+| `PFAR_LMSTUDIO_MODEL` | `llm.lmstudio.model` |
 | `PFAR_TELEGRAM_BOT_TOKEN` | `adapter.telegram.bot_token` |
 | `PFAR_TELEGRAM_OWNER_ID` | `adapter.telegram.owner_id` |
 | `PFAR_SHUTDOWN_TIMEOUT_SECS` | `kernel.shutdown_timeout_seconds` |

@@ -13,6 +13,7 @@
 - [x] Feature: TOML Configuration (329 tests — 303 unit + 7 integration + 19 regression)
 - [x] Feature: Synthesizer Prompt Quality (331 tests — 305 unit + 7 integration + 19 regression)
 - [x] Feature: Admin Tool + Credential Flow (349 tests — 320 unit + 7 integration + 22 regression)
+- [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 

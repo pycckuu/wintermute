@@ -38,26 +38,26 @@ journal_db = "/tmp/pfar-journal.db"
 # Env: PFAR_OLLAMA_URL
 base_url = "http://localhost:11434"
 # Env: PFAR_LOCAL_MODEL
-default_model = "llama3"
+model = "llama3"
 
 # Uncomment to enable Anthropic (spec 11.2)
 # Env: PFAR_ANTHROPIC_API_KEY, PFAR_ANTHROPIC_MODEL
 # [llm.anthropic]
 # api_key = "sk-ant-..."
-# default_model = "claude-sonnet-4-20250514"
+# model = "claude-sonnet-4-20250514"
 
 # Uncomment to enable OpenAI (spec 11.2)
 # Env: PFAR_OPENAI_API_KEY, PFAR_OPENAI_MODEL
 # [llm.openai]
 # base_url = "https://api.openai.com"
 # api_key = "sk-..."
-# default_model = "gpt-4o"
+# model = "gpt-4o"
 
 # Uncomment to enable LM Studio (local OpenAI-compatible)
 # Env: PFAR_LMSTUDIO_URL, PFAR_LMSTUDIO_MODEL
 # [llm.lmstudio]
 # base_url = "http://localhost:1234"
-# default_model = "deepseek-r1"
+# model = "deepseek-r1"
 
 # ── Adapters ─────────────────────────────────────────────────────
 

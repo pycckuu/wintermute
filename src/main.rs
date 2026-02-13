@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
     // Load templates — templates use the best available provider (spec 18.2).
     // Future phases will load from ~/.pfar/templates/ directory.
     let owner_inference = resolve_owner_inference_config(&config.llm);
+    info!(provider = %owner_inference.provider, model = %owner_inference.model, "owner inference resolved");
     let templates = Arc::new(create_default_templates(&owner_inference));
 
     // Initialize vault (in-memory for Phase 2, spec 6.4).
@@ -353,30 +354,31 @@ fn build_inference_proxy(llm: &LlmConfig) -> InferenceProxy {
 /// since the owner explicitly provided the API key.
 fn resolve_owner_inference_config(llm: &LlmConfig) -> InferenceConfig {
     if let Some(ref anthropic) = llm.anthropic {
-        info!(model = %anthropic.default_model, "owner templates will use Anthropic provider");
+        info!(model = %anthropic.model, "owner templates will use Anthropic provider");
         InferenceConfig {
             provider: "anthropic".to_string(),
-            model: anthropic.default_model.clone(),
+            model: anthropic.model.clone(),
             owner_acknowledged_cloud_risk: true,
         }
     } else if let Some(ref openai) = llm.openai {
-        info!(model = %openai.default_model, "owner templates will use OpenAI provider");
+        info!(model = %openai.model, "owner templates will use OpenAI provider");
         InferenceConfig {
             provider: "openai".to_string(),
-            model: openai.default_model.clone(),
+            model: openai.model.clone(),
             owner_acknowledged_cloud_risk: true,
         }
     } else if let Some(ref lmstudio) = llm.lmstudio {
-        info!(model = %lmstudio.default_model, "owner templates will use LM Studio provider");
+        info!(model = %lmstudio.model, "owner templates will use LM Studio provider");
         InferenceConfig {
             provider: "lmstudio".to_string(),
-            model: lmstudio.default_model.clone(),
+            model: lmstudio.model.clone(),
             owner_acknowledged_cloud_risk: false,
         }
     } else {
+        info!(model = %llm.local.model, "owner templates will use local Ollama provider (no cloud keys configured)");
         InferenceConfig {
             provider: "local".to_string(),
-            model: llm.local.default_model.clone(),
+            model: llm.local.model.clone(),
             owner_acknowledged_cloud_risk: false,
         }
     }
