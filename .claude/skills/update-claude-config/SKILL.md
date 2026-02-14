@@ -18,7 +18,7 @@ After implementing a feature, review whether Claude Code config files need updat
 - New kernel sub-module added? Update the module map table
 - New trust boundary rules or privacy implications?
 
-### 3. `tasks/pfar-v2-prd.md`
+### 3. `docs/pfar-v2-prd.md`
 - Mark completed tasks with `- [x]`
 - Add any newly discovered sub-tasks
 
