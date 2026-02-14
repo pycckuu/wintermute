@@ -10,9 +10,11 @@
 pub mod admin;
 pub mod calendar;
 pub mod email;
+pub mod mcp;
 pub mod scoped_http;
 
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -217,38 +219,53 @@ pub trait Tool: Send + Sync {
 ///
 /// The kernel uses this to look up tools when executing plans.
 /// Actions are addressed as `"tool_name.action_name"` (e.g. `"email.list"`).
+/// Uses `RwLock` for interior mutability, enabling dynamic registration
+/// of MCP-discovered tools at runtime (feature-dynamic-integrations).
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl ToolRegistry {
     /// Create an empty tool registry.
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Register a tool. The tool's manifest `name` is used as the key.
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    /// Register a tool. The tool's manifest `name` is used as the key (spec 5.4).
+    ///
+    /// Takes `&self` (not `&mut self`) to support dynamic registration
+    /// after the registry is shared via `Arc`.
+    pub fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.manifest().name.clone();
-        self.tools.insert(name, tool);
+        let mut tools = self.tools.write().unwrap_or_else(|e| e.into_inner());
+        tools.insert(name, tool);
+    }
+
+    /// Unregister a tool by name (feature-dynamic-integrations).
+    ///
+    /// Returns `true` if the tool was present and removed.
+    pub fn unregister(&self, name: &str) -> bool {
+        let mut tools = self.tools.write().unwrap_or_else(|e| e.into_inner());
+        tools.remove(name).is_some()
     }
 
     /// Look up a tool and its action descriptor by fully qualified action ID (spec 5.4).
     ///
     /// The `action_id` format is `"tool_name.action_name"` (e.g. `"email.list"`).
-    /// Returns the tool reference and the matching `ToolAction`, or `None` if
-    /// either the tool or the action is not found.
-    pub fn get_tool_and_action(&self, action_id: &str) -> Option<(&dyn Tool, ToolAction)> {
+    /// Returns an `Arc` clone of the tool and the matching `ToolAction`, or `None`
+    /// if either the tool or the action is not found.
+    pub fn get_tool_and_action(&self, action_id: &str) -> Option<(Arc<dyn Tool>, ToolAction)> {
         let (tool_name, action_name) = action_id.split_once('.')?;
-        let tool = self.tools.get(tool_name)?;
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
+        let tool = tools.get(tool_name)?;
         let manifest = tool.manifest();
         let action = manifest
             .actions
             .into_iter()
             .find(|a| a.id == action_id || a.id.ends_with(&format!(".{action_name}")))?;
-        Some((tool.as_ref(), action))
+        Some((Arc::clone(tool), action))
     }
 
     /// Return all actions from registered tools that are allowed by the template (spec 4.5).
@@ -258,8 +275,9 @@ impl ToolRegistry {
     /// `admin` tool, and `"*"` matches everything.
     pub fn available_actions(&self, allowed: &[String], denied: &[String]) -> Vec<ToolAction> {
         let mut result = Vec::new();
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
 
-        for tool in self.tools.values() {
+        for tool in tools.values() {
             let manifest = tool.manifest();
             for action in &manifest.actions {
                 if is_action_denied(&action.id, denied) {
@@ -317,6 +335,7 @@ fn is_action_denied(action_id: &str, denied: &[String]) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     // ── Mock tool for testing ──
 
@@ -412,8 +431,8 @@ mod tests {
 
     #[test]
     fn test_tool_registry_register_and_lookup() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
 
         let result = registry.get_tool_and_action("email.list");
         assert!(result.is_some(), "should find email.list");
@@ -435,8 +454,8 @@ mod tests {
 
     #[test]
     fn test_tool_registry_missing_action() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
 
         assert!(
             registry.get_tool_and_action("email.send").is_none(),
@@ -446,9 +465,9 @@ mod tests {
 
     #[test]
     fn test_available_actions_filtering() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
-        registry.register(Box::new(MockTool::admin_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
+        registry.register(Arc::new(MockTool::admin_tool()));
 
         // Only allow email.list — should exclude email.read and all admin actions.
         let allowed = vec!["email.list".to_owned()];
@@ -461,9 +480,9 @@ mod tests {
 
     #[test]
     fn test_available_actions_wildcard() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
-        registry.register(Box::new(MockTool::admin_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
+        registry.register(Arc::new(MockTool::admin_tool()));
 
         // Allow all admin actions via wildcard.
         let allowed = vec!["admin.*".to_owned()];
@@ -477,8 +496,8 @@ mod tests {
 
     #[test]
     fn test_available_actions_denied_overrides() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
 
         // Allow all email actions but deny email.read.
         let allowed = vec!["email.*".to_owned()];
@@ -491,9 +510,9 @@ mod tests {
 
     #[test]
     fn test_available_actions_global_wildcard() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
-        registry.register(Box::new(MockTool::admin_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
+        registry.register(Arc::new(MockTool::admin_tool()));
 
         // Allow everything.
         let allowed = vec!["*".to_owned()];
@@ -505,8 +524,8 @@ mod tests {
 
     #[test]
     fn test_available_actions_global_deny() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::email_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
 
         // Allow everything but deny everything.
         let allowed = vec!["*".to_owned()];

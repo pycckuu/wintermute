@@ -31,6 +31,7 @@ use pfar::kernel::vault::InMemoryVault;
 use pfar::tools::admin::AdminTool;
 use pfar::tools::calendar::CalendarTool;
 use pfar::tools::email::EmailTool;
+use pfar::tools::mcp::manager::McpServerManager;
 use pfar::tools::ToolRegistry;
 use pfar::types::PrincipalClass;
 
@@ -65,13 +66,6 @@ async fn main() -> Result<()> {
     // Initialize inference proxy with available providers (spec 6.3, 11.1).
     let inference = Arc::new(build_inference_proxy(&config.llm));
 
-    // Initialize tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2).
-    // Two-phase init: base tools first, then AdminTool with refs to them.
-    let tools = Arc::new(create_tool_registry(
-        Arc::clone(&vault),
-        Arc::clone(&templates),
-    ));
-
     // Initialize audit logger (spec 6.7).
     let audit = Arc::new(
         AuditLogger::new(&config.paths.audit_log).context("failed to create audit logger")?,
@@ -81,6 +75,14 @@ async fn main() -> Result<()> {
     if let Err(e) = audit.log_system_startup(env!("CARGO_PKG_VERSION")) {
         warn!(error = %e, "failed to log startup audit event");
     }
+
+    // Initialize tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2).
+    // Two-phase init: base tools first, then AdminTool with MCP manager.
+    let (tools, mcp_manager) = create_tool_registry(
+        Arc::clone(&vault),
+        Arc::clone(&templates),
+        Arc::clone(&audit),
+    );
 
     // Open task journal (feature-persistence-recovery).
     let journal = Arc::new(
@@ -145,12 +147,14 @@ async fn main() -> Result<()> {
             templates,
             audit,
             Arc::clone(&journal),
+            mcp_manager,
         )
         .await
     } else {
         info!("no Telegram bot token configured -- running in CLI-only mode");
         info!("set PFAR_TELEGRAM_BOT_TOKEN or [adapter.telegram].bot_token to enable");
-        // Future: fall back to CLI adapter event loop.
+        // Shut down MCP servers if any were auto-started.
+        mcp_manager.shutdown_all().await;
         info!("PFAR v2 shutting down (no adapter configured)");
         Ok(())
     }
@@ -170,6 +174,7 @@ async fn run_telegram_loop(
     templates: Arc<TemplateRegistry>,
     audit: Arc<AuditLogger>,
     journal: Arc<TaskJournal>,
+    mcp_manager: Arc<McpServerManager>,
 ) -> Result<()> {
     let owner_chat_id = config.adapter.telegram.owner_id.clone();
 
@@ -308,6 +313,9 @@ async fn run_telegram_loop(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+
+    // Shut down MCP servers (feature-dynamic-integrations).
+    mcp_manager.shutdown_all().await;
 
     // Flush audit log and log shutdown event.
     let final_pending = active_tasks.load(Ordering::Relaxed);
@@ -471,24 +479,37 @@ fn whatsapp_scheduling_template() -> TaskTemplate {
 /// Create tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2, 12.2).
 ///
 /// Uses two-phase init: builds base tools first, then creates AdminTool
-/// with a snapshot of the base registry so it can list other tools.
+/// with MCP manager for dynamic integration support.
+/// Returns `(Arc<ToolRegistry>, Arc<McpServerManager>)` — the manager is
+/// needed for graceful shutdown and auto-start of configured MCP servers.
 fn create_tool_registry(
     vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     templates: Arc<TemplateRegistry>,
-) -> ToolRegistry {
-    // Phase 1: Base tools (email, calendar).
-    let mut base_registry = ToolRegistry::new();
-    base_registry.register(Box::new(CalendarTool::new()));
-    base_registry.register(Box::new(EmailTool::new()));
+    audit: Arc<AuditLogger>,
+) -> (Arc<ToolRegistry>, Arc<McpServerManager>) {
+    // Phase 1: Base tools (email, calendar) — snapshot for AdminTool listing.
+    let base_registry = ToolRegistry::new();
+    base_registry.register(Arc::new(CalendarTool::new()));
+    base_registry.register(Arc::new(EmailTool::new()));
     let base_tools = Arc::new(base_registry);
 
-    // Phase 2: AdminTool gets a ref to base tools for listing integrations.
-    let admin = AdminTool::new(vault, base_tools, templates);
+    // Phase 2: Final registry — MCP tools will be registered here dynamically.
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register(Arc::new(CalendarTool::new()));
+    registry.register(Arc::new(EmailTool::new()));
 
-    // Phase 3: Final registry includes all tools.
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(CalendarTool::new()));
-    registry.register(Box::new(EmailTool::new()));
-    registry.register(Box::new(admin));
-    registry
+    // Phase 3: Create MCP server manager with ref to the final registry
+    // (feature-dynamic-integrations).
+    let mcp_manager = Arc::new(McpServerManager::new(
+        Arc::clone(&registry),
+        Arc::clone(&vault),
+        audit,
+    ));
+
+    // Phase 4: AdminTool gets refs to base tools for listing + MCP manager.
+    let admin =
+        AdminTool::new(vault, base_tools, templates).with_mcp_manager(Arc::clone(&mcp_manager));
+    registry.register(Arc::new(admin));
+
+    (registry, mcp_manager)
 }

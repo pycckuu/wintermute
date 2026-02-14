@@ -267,9 +267,9 @@ fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<Ses
         MockPlannerProvider::new(plan_json, synth_text),
     )));
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(MockEmailTool));
-    registry.register(Box::new(MockCalendarTool));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(MockEmailTool));
+    registry.register(Arc::new(MockCalendarTool));
     let tools = Arc::new(registry);
 
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
@@ -634,8 +634,8 @@ async fn regression_05_label_ceiling_in_executor() {
     let policy = Arc::new(PolicyEngine::with_defaults());
     let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(MockCalendarTool));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(MockCalendarTool));
     let tools = Arc::new(registry);
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
     let executor = PlanExecutor::new(policy, tools, vault, audit);
@@ -744,8 +744,8 @@ async fn regression_07_pipeline_egress_denied() {
         MockPlannerProvider::new(plan_json, synth_text),
     )));
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(MockEmailTool));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(MockEmailTool));
     let tools = Arc::new(registry);
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
     let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
