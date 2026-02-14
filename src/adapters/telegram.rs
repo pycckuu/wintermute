@@ -64,6 +64,13 @@ pub enum KernelToAdapter {
         /// Unique approval identifier encoded into callback data.
         approval_id: Uuid,
     },
+    /// Delete a message (used by credential gate to remove pasted tokens, spec 8.5).
+    DeleteMessage {
+        /// Target chat ID.
+        chat_id: String,
+        /// ID of the message to delete.
+        message_id: String,
+    },
     /// Gracefully stop the adapter.
     Shutdown,
 }
@@ -501,6 +508,16 @@ impl TelegramAdapter {
                         error!(error = %e, chat_id, "failed to send approval request");
                     }
                 }
+                KernelToAdapter::DeleteMessage {
+                    chat_id,
+                    message_id,
+                } => {
+                    if let Err(e) =
+                        Self::delete_message(&client, bot_token, &chat_id, &message_id).await
+                    {
+                        error!(error = %e, chat_id, message_id, "failed to delete Telegram message");
+                    }
+                }
                 KernelToAdapter::Shutdown => {
                     info!("Telegram adapter outbound loop shutting down");
                     break;
@@ -541,6 +558,36 @@ impl TelegramAdapter {
         }
 
         debug!(chat_id, "sent Telegram message");
+        Ok(())
+    }
+
+    /// Delete a message via the Telegram Bot API `deleteMessage` endpoint
+    /// (feature-credential-acquisition, spec 8.5).
+    async fn delete_message(
+        client: &reqwest::Client,
+        bot_token: &str,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<(), AdapterError> {
+        let url = format!("{}/bot{}/deleteMessage", TELEGRAM_API_BASE, bot_token);
+
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        });
+
+        let resp = client.post(&url).json(&body).send().await?;
+        let response: TelegramResponse<serde_json::Value> = resp.json().await?;
+
+        if !response.ok {
+            return Err(AdapterError::ApiError(
+                response
+                    .description
+                    .unwrap_or_else(|| "deleteMessage failed".to_string()),
+            ));
+        }
+
+        debug!(chat_id, message_id, "deleted Telegram message");
         Ok(())
     }
 
@@ -914,5 +961,25 @@ mod tests {
         // Persisting None offset should not overwrite the existing value.
         adapter.persist_offset(None);
         assert_eq!(adapter.load_persisted_offset(), Some(77));
+    }
+
+    // -- DeleteMessage variant --
+
+    #[test]
+    fn delete_message_variant_construction() {
+        let msg = KernelToAdapter::DeleteMessage {
+            chat_id: "12345".to_string(),
+            message_id: "42".to_string(),
+        };
+        match msg {
+            KernelToAdapter::DeleteMessage {
+                chat_id,
+                message_id,
+            } => {
+                assert_eq!(chat_id, "12345");
+                assert_eq!(message_id, "42");
+            }
+            _ => panic!("expected DeleteMessage variant"),
+        }
     }
 }

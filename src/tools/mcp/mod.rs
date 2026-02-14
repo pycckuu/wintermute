@@ -70,6 +70,9 @@ pub struct KnownServer {
     pub credentials: &'static [(&'static str, &'static str)],
     /// Default security label.
     pub default_label: &'static str,
+    /// Expected token prefix for credential gate classification
+    /// (feature-credential-acquisition, spec 8.5).
+    pub expected_prefix: Option<&'static str>,
 }
 
 /// Built-in registry of well-known MCP servers (feature-dynamic-integrations, spec 6.1).
@@ -86,6 +89,7 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
             "Go to notion.so/profile/integrations -> Create integration -> Copy the Internal Integration Secret",
         )],
         default_label: "internal",
+        expected_prefix: Some("ntn_"),
     },
     KnownServer {
         name: "github",
@@ -96,6 +100,7 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
             "Go to github.com/settings/tokens -> Fine-grained tokens -> Generate new token -> Copy",
         )],
         default_label: "internal",
+        expected_prefix: Some("ghp_"),
     },
     KnownServer {
         name: "slack",
@@ -106,6 +111,7 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
             "Go to api.slack.com/apps -> Your app -> OAuth & Permissions -> Bot User OAuth Token",
         )],
         default_label: "internal",
+        expected_prefix: Some("xoxb-"),
     },
     KnownServer {
         name: "filesystem",
@@ -113,6 +119,7 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
         domains: &[],
         credentials: &[],
         default_label: "internal",
+        expected_prefix: None,
     },
     KnownServer {
         name: "fetch",
@@ -120,6 +127,7 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
         domains: &[], // configured per-instance
         credentials: &[],
         default_label: "public",
+        expected_prefix: None,
     },
 ];
 

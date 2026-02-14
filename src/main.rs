@@ -18,6 +18,7 @@ use pfar::adapters::telegram::{AdapterToKernel, KernelToAdapter, TelegramAdapter
 use pfar::config::{LlmConfig, PfarConfig};
 use pfar::kernel::approval::ApprovalQueue;
 use pfar::kernel::audit::AuditLogger;
+use pfar::kernel::credential_gate::{CredentialGate, InterceptResult, PendingCredentialPrompt};
 use pfar::kernel::egress::EgressValidator;
 use pfar::kernel::executor::PlanExecutor;
 use pfar::kernel::inference::InferenceProxy;
@@ -150,6 +151,7 @@ async fn main() -> Result<()> {
             templates,
             audit,
             Arc::clone(&journal),
+            Arc::clone(&vault),
             mcp_manager,
         )
         .await
@@ -177,6 +179,7 @@ async fn run_telegram_loop(
     templates: Arc<TemplateRegistry>,
     audit: Arc<AuditLogger>,
     journal: Arc<TaskJournal>,
+    vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     mcp_manager: Arc<McpServerManager>,
 ) -> Result<()> {
     let owner_chat_id = config.adapter.telegram.owner_id.clone();
@@ -198,12 +201,34 @@ async fn run_telegram_loop(
     let active_tasks = Arc::new(AtomicUsize::new(0));
 
     // Spawn Telegram adapter with journal for offset persistence.
-    let adapter = TelegramAdapter::new(tg_config, Some(journal));
+    let adapter = TelegramAdapter::new(tg_config, Some(Arc::clone(&journal)));
     tokio::spawn(async move {
         if let Err(e) = adapter.run(adapter_tx, kernel_rx).await {
             error!("Telegram adapter error: {e}");
         }
     });
+
+    // Initialize credential gate (feature-credential-acquisition, spec 8.5, Invariant B).
+    let mut credential_gate = CredentialGate::new(Arc::clone(&vault), Some(Arc::clone(&journal)));
+
+    // Retry pending message deletions from previous session (crash recovery).
+    match journal.load_all_pending_deletions() {
+        Ok(deletions) => {
+            for (chat_id, message_id) in deletions {
+                debug!(chat_id = %chat_id, message_id = %message_id, "retrying pending message deletion");
+                let _ = kernel_tx
+                    .send(KernelToAdapter::DeleteMessage {
+                        chat_id: chat_id.clone(),
+                        message_id: message_id.clone(),
+                    })
+                    .await;
+                let _ = journal.delete_pending_deletion(&chat_id, &message_id);
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to load pending deletions (non-fatal)");
+        }
+    }
 
     info!("PFAR v2 ready -- listening for events");
 
@@ -240,6 +265,40 @@ async fn run_telegram_loop(
                             .unwrap_or("unknown")
                             .to_string();
 
+                        // Credential gate: intercept before pipeline (Invariant B, spec 8.5).
+                        match credential_gate.intercept(&event).await {
+                            InterceptResult::Intercepted {
+                                service,
+                                chat_id: cid,
+                                message_id,
+                                ..
+                            } => {
+                                let _ = kernel_tx
+                                    .send(KernelToAdapter::DeleteMessage {
+                                        chat_id: cid.clone(),
+                                        message_id,
+                                    })
+                                    .await;
+                                let _ = kernel_tx
+                                    .send(KernelToAdapter::SendMessage {
+                                        chat_id: cid,
+                                        text: format!("{service} credential stored securely."),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            InterceptResult::Cancelled { service, chat_id: cid } => {
+                                let _ = kernel_tx
+                                    .send(KernelToAdapter::SendMessage {
+                                        chat_id: cid,
+                                        text: format!("{service} setup cancelled."),
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            InterceptResult::NotIntercepted => { /* normal flow */ }
+                        }
+
                         // Route event through kernel (spec 6.1).
                         match router.route_event(*event) {
                             Ok((labeled_event, mut task)) => {
@@ -250,6 +309,21 @@ async fn run_telegram_loop(
                                     // Run full pipeline (spec 7).
                                     match pipeline.run(labeled_event, &mut task, tmpl).await {
                                         Ok(output) => {
+                                            // Register credential prompt for gate intercept
+                                            // (feature-credential-acquisition, spec 8.5).
+                                            if let Some(cred_info) = output.credential_prompt {
+                                                credential_gate.register_pending(
+                                                    &task.principal,
+                                                    PendingCredentialPrompt {
+                                                        service: cred_info.service,
+                                                        vault_key: cred_info.vault_key,
+                                                        expected_prefix: cred_info.expected_prefix,
+                                                        prompted_at: std::time::Instant::now(),
+                                                        ttl: Duration::from_secs(600),
+                                                    },
+                                                );
+                                            }
+
                                             let _ = kernel_tx
                                                 .send(KernelToAdapter::SendMessage {
                                                     chat_id,
