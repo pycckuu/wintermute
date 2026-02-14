@@ -41,6 +41,23 @@ impl From<serde_json::Error> for JournalError {
 
 // ── Types ───────────────────────────────────────────────────────
 
+/// A long-term memory entry from the memories table (memory spec §3).
+#[derive(Debug, Clone)]
+pub struct MemoryRow {
+    /// Unique memory ID (UUID string).
+    pub id: String,
+    /// Memory content text.
+    pub content: String,
+    /// Security label of this memory entry (spec 4.3).
+    pub label: SecurityLabel,
+    /// Source: "explicit" or "consolidated".
+    pub source: String,
+    /// When the memory was created.
+    pub created_at: DateTime<Utc>,
+    /// Task ID that created this memory (optional).
+    pub task_id: Option<String>,
+}
+
 /// A row from the working_memory table (spec 9.1).
 #[derive(Debug, Clone)]
 pub struct WorkingMemoryRow {
@@ -101,6 +118,19 @@ fn str_to_label(s: &str) -> SecurityLabel {
     }
 }
 
+/// Convert `SecurityLabel` to integer for SQL comparison (spec 4.3).
+///
+/// Ordered: public(0) < internal(1) < sensitive(2) < regulated(3) < secret(4).
+fn label_to_int(label: SecurityLabel) -> i32 {
+    match label {
+        SecurityLabel::Public => 0,
+        SecurityLabel::Internal => 1,
+        SecurityLabel::Sensitive => 2,
+        SecurityLabel::Regulated => 3,
+        SecurityLabel::Secret => 4,
+    }
+}
+
 /// Parse an RFC 3339 timestamp or return now.
 fn parse_rfc3339_or_now(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
@@ -144,6 +174,31 @@ CREATE TABLE IF NOT EXISTS persona (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memories (
+    id          TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT 'internal',
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    task_id     TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content,
+    content='memories',
+    content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content)
+    VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
 "#;
 
 // ── TaskJournal ─────────────────────────────────────────────────
@@ -432,6 +487,94 @@ impl TaskJournal {
         )?;
         Ok(())
     }
+
+    // ── Long-term memory CRUD (memory spec §3, §4, §6) ───────────
+
+    /// Save a long-term memory entry (memory spec §4).
+    pub fn save_memory(&self, row: &MemoryRow) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO memories (id, content, label, source, created_at, task_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                row.id,
+                row.content,
+                label_to_str(row.label),
+                row.source,
+                row.created_at.to_rfc3339(),
+                row.task_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Search long-term memories via FTS5, filtered by label ceiling (memory spec §6).
+    ///
+    /// Returns up to `limit` results ranked by FTS5 relevance. Enforces
+    /// No Read Up: only returns entries where `label <= label_ceiling` (spec 4.3).
+    /// Returns an empty vec if query is empty (FTS5 errors on empty MATCH).
+    pub fn search_memories(
+        &self,
+        query: &str,
+        label_ceiling: SecurityLabel,
+        limit: usize,
+    ) -> Result<Vec<MemoryRow>, JournalError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+
+        let ceiling_int = label_to_int(label_ceiling);
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.content, m.label, m.source, m.created_at, m.task_id
+             FROM memories m
+             JOIN memories_fts ON memories_fts.rowid = m.rowid
+             WHERE memories_fts MATCH ?1
+               AND (CASE m.label
+                    WHEN 'public' THEN 0
+                    WHEN 'internal' THEN 1
+                    WHEN 'sensitive' THEN 2
+                    WHEN 'regulated' THEN 3
+                    WHEN 'secret' THEN 4
+                    ELSE 5
+                    END) <= ?2
+             ORDER BY memories_fts.rank
+             LIMIT ?3",
+        )?;
+
+        let rows = stmt.query_map(params![trimmed, ceiling_int, limit_i64], |row| {
+            let id: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let label_str: String = row.get(2)?;
+            let source: String = row.get(3)?;
+            let created_at_str: String = row.get(4)?;
+            let task_id: Option<String> = row.get(5)?;
+            Ok(MemoryRow {
+                id,
+                content,
+                label: str_to_label(&label_str),
+                source,
+                created_at: parse_rfc3339_or_now(&created_at_str),
+                task_id,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -696,5 +839,115 @@ mod tests {
         assert!(results.is_empty());
         let principals = j.load_session_principals().expect("load");
         assert!(principals.is_empty());
+    }
+
+    // ── Long-term memory tests ──────────────────────────────────
+
+    fn make_memory(content: &str, label: SecurityLabel) -> MemoryRow {
+        MemoryRow {
+            id: Uuid::new_v4().to_string(),
+            content: content.to_owned(),
+            label,
+            source: "explicit".to_owned(),
+            created_at: Utc::now(),
+            task_id: None,
+        }
+    }
+
+    #[test]
+    fn test_memory_save_and_search() {
+        let j = make_journal();
+        let row = make_memory("Flight to Bali on March 15th", SecurityLabel::Sensitive);
+        j.save_memory(&row).expect("save");
+
+        let results = j
+            .search_memories("Bali", SecurityLabel::Sensitive, 10)
+            .expect("search");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "Flight to Bali on March 15th");
+        assert_eq!(results[0].label, SecurityLabel::Sensitive);
+        assert_eq!(results[0].source, "explicit");
+    }
+
+    #[test]
+    fn test_memory_label_filtering() {
+        let j = make_journal();
+        // Save a sensitive memory.
+        let row = make_memory(
+            "Private doctor appointment Tuesday",
+            SecurityLabel::Sensitive,
+        );
+        j.save_memory(&row).expect("save");
+
+        // Search with internal ceiling — should NOT find sensitive memory.
+        let results = j
+            .search_memories("doctor", SecurityLabel::Internal, 10)
+            .expect("search");
+        assert!(
+            results.is_empty(),
+            "internal ceiling should not see sensitive memories"
+        );
+
+        // Search with sensitive ceiling — should find it.
+        let results = j
+            .search_memories("doctor", SecurityLabel::Sensitive, 10)
+            .expect("search");
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_memory_empty_query() {
+        let j = make_journal();
+        let row = make_memory("Some fact", SecurityLabel::Internal);
+        j.save_memory(&row).expect("save");
+
+        // Empty query returns empty vec (guard, not FTS5 error).
+        let results = j
+            .search_memories("", SecurityLabel::Sensitive, 10)
+            .expect("search");
+        assert!(results.is_empty());
+
+        let results = j
+            .search_memories("   ", SecurityLabel::Sensitive, 10)
+            .expect("search");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_memory_no_results() {
+        let j = make_journal();
+        let row = make_memory("Flight to Bali", SecurityLabel::Internal);
+        j.save_memory(&row).expect("save");
+
+        let results = j
+            .search_memories("Tokyo", SecurityLabel::Sensitive, 10)
+            .expect("search");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_memory_multiple_results_limited() {
+        let j = make_journal();
+        j.save_memory(&make_memory(
+            "Meeting with Sarah Monday",
+            SecurityLabel::Internal,
+        ))
+        .expect("save");
+        j.save_memory(&make_memory(
+            "Meeting with Alex Tuesday",
+            SecurityLabel::Internal,
+        ))
+        .expect("save");
+        j.save_memory(&make_memory(
+            "Meeting with Bob Wednesday",
+            SecurityLabel::Internal,
+        ))
+        .expect("save");
+
+        // Limit to 2 results.
+        let results = j
+            .search_memories("Meeting", SecurityLabel::Sensitive, 2)
+            .expect("search");
+        assert_eq!(results.len(), 2);
     }
 }

@@ -157,6 +157,52 @@ impl Pipeline {
         self.journal_write("set_persona", |j| j.set_persona(value));
     }
 
+    /// Search long-term memory for entries relevant to extracted metadata (memory spec §6).
+    ///
+    /// Builds search terms from entities and dates in the metadata, queries journal
+    /// FTS5 index, and returns formatted memory strings for prompt injection.
+    /// Enforces label ceiling (Invariant C — No Read Up).
+    fn search_memory(
+        &self,
+        metadata: &ExtractedMetadata,
+        data_ceiling: SecurityLabel,
+    ) -> Vec<String> {
+        let journal = match self.journal.as_ref() {
+            Some(j) => j,
+            None => return vec![],
+        };
+
+        // Build search terms from entities and dates.
+        let mut terms: Vec<&str> = Vec::new();
+        for entity in &metadata.entities {
+            terms.push(&entity.value);
+        }
+        for date in &metadata.dates_mentioned {
+            terms.push(date);
+        }
+
+        if terms.is_empty() {
+            return vec![];
+        }
+
+        // Join terms with OR for FTS5 query.
+        let query = terms.join(" OR ");
+
+        match journal.search_memories(&query, data_ceiling, 5) {
+            Ok(rows) => rows
+                .iter()
+                .map(|r| {
+                    let date = r.created_at.format("%b %d");
+                    format!("{} ({})", r.content, date)
+                })
+                .collect(),
+            Err(e) => {
+                warn!(error = %e, "memory search failed (best-effort)");
+                vec![]
+            }
+        }
+    }
+
     /// Extract structured metadata from raw event text (spec 7, Phase 0).
     fn extract_metadata(
         &self,
@@ -200,6 +246,7 @@ impl Pipeline {
         template: &TaskTemplate,
         metadata: &ExtractedMetadata,
         labeled_event: &LabeledEvent,
+        memory_entries: Vec<String>,
     ) -> Result<
         (
             Vec<crate::kernel::executor::StepExecutionResult>,
@@ -212,7 +259,9 @@ impl Pipeline {
         task.state = TaskState::Planning;
         info!(task_id = %task.task_id, pipeline_path = "full", "phase 1: planning");
 
-        let planner_ctx = self.build_planner_context(task, template, metadata).await;
+        let planner_ctx = self
+            .build_planner_context(task, template, metadata, memory_entries)
+            .await;
         let prompt = Planner::compose_prompt(&planner_ctx);
 
         let plan_response = self
@@ -287,6 +336,14 @@ impl Pipeline {
         let raw_text = labeled_event.event.payload.text.clone().unwrap_or_default();
         let metadata = self.extract_metadata(&raw_text, &mut labeled_event);
 
+        // === MEMORY SEARCH (memory spec §6) ===
+        // Search long-term memory for entries relevant to extracted metadata.
+        // Uses label ceiling from task to enforce No Read Up (Invariant C).
+        let memory_entries = self.search_memory(&metadata, task.data_ceiling);
+        if !memory_entries.is_empty() {
+            info!(task_id = %task.task_id, count = memory_entries.len(), "memory: found relevant entries");
+        }
+
         // === PERSONA CHECK (persona-onboarding spec §3, §5) ===
         // Only runs when journal is available (persona requires persistence).
         let mut persona: Option<String> = None;
@@ -344,8 +401,14 @@ impl Pipeline {
         let needs_tools = !force_fast_path && self.should_use_full_pipeline(&metadata, template);
 
         let (exec_results, data_label, pipeline_path) = if needs_tools {
-            self.execute_full_pipeline(task, template, &metadata, &labeled_event)
-                .await?
+            self.execute_full_pipeline(
+                task,
+                template,
+                &metadata,
+                &labeled_event,
+                memory_entries.clone(),
+            )
+            .await?
         } else {
             // Fast path: no tools needed, skip directly to Phase 3 (spec 7, fast path).
             info!(task_id = %task.task_id, pipeline_path = "fast", "skipping planner — no tools needed");
@@ -394,6 +457,7 @@ impl Pipeline {
             persona,
             is_onboarding,
             is_persona_just_configured,
+            memory_entries,
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);
@@ -463,6 +527,7 @@ impl Pipeline {
         task: &Task,
         template: &TaskTemplate,
         metadata: &ExtractedMetadata,
+        memory_entries: Vec<String>,
     ) -> PlannerContext {
         let (working_memory, conversation) = self.read_session_data(&task.principal).await;
 
@@ -482,6 +547,7 @@ impl Pipeline {
             conversation_history: conversation,
             available_tools,
             principal_class,
+            memory_entries,
         }
     }
 
@@ -1341,7 +1407,7 @@ mod tests {
         };
 
         let ctx = pipeline
-            .build_planner_context(&task, &template, &metadata)
+            .build_planner_context(&task, &template, &metadata, vec![])
             .await;
 
         // The planner_task_description should be set.
@@ -1547,5 +1613,112 @@ mod tests {
             stored.is_none(),
             "non-owner should not trigger persona onboarding"
         );
+    }
+
+    // ── Memory search tests (memory spec §6) ──
+
+    #[test]
+    fn test_search_memory_empty_when_no_entities() {
+        let (pipeline, _sessions, _journal) = make_pipeline_with_journal(r#"{"plan":[]}"#, "ok");
+
+        let metadata = ExtractedMetadata {
+            intent: Some("email_check".to_owned()),
+            entities: vec![],
+            dates_mentioned: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let results = pipeline.search_memory(&metadata, SecurityLabel::Sensitive);
+        assert!(results.is_empty(), "no entities/dates should return empty");
+    }
+
+    #[test]
+    fn test_search_memory_finds_saved_entries() {
+        use crate::kernel::journal::MemoryRow;
+
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(r#"{"plan":[]}"#, "ok");
+
+        // Save a memory about a flight to Bali.
+        let row = MemoryRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: "Flight to Bali is on March 15th".to_owned(),
+            label: SecurityLabel::Sensitive,
+            source: "explicit".to_owned(),
+            created_at: chrono::Utc::now(),
+            task_id: None,
+        };
+        journal.save_memory(&row).expect("save");
+
+        // Search with entity matching "Bali".
+        let metadata = ExtractedMetadata {
+            intent: Some("scheduling".to_owned()),
+            entities: vec![crate::extractors::ExtractedEntity {
+                kind: "location".to_owned(),
+                value: "Bali".to_owned(),
+            }],
+            dates_mentioned: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let results = pipeline.search_memory(&metadata, SecurityLabel::Sensitive);
+        assert_eq!(results.len(), 1, "should find one memory entry");
+        assert!(
+            results[0].contains("Flight to Bali"),
+            "result should contain the memory content"
+        );
+    }
+
+    #[test]
+    fn test_search_memory_label_filtering() {
+        use crate::kernel::journal::MemoryRow;
+
+        let (pipeline, _sessions, journal) = make_pipeline_with_journal(r#"{"plan":[]}"#, "ok");
+
+        // Save a sensitive memory.
+        let row = MemoryRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            content: "Doctor appointment Tuesday".to_owned(),
+            label: SecurityLabel::Sensitive,
+            source: "explicit".to_owned(),
+            created_at: chrono::Utc::now(),
+            task_id: None,
+        };
+        journal.save_memory(&row).expect("save");
+
+        // Search with Internal ceiling — should NOT find Sensitive memory.
+        let metadata = ExtractedMetadata {
+            intent: None,
+            entities: vec![crate::extractors::ExtractedEntity {
+                kind: "person".to_owned(),
+                value: "Doctor".to_owned(),
+            }],
+            dates_mentioned: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let results = pipeline.search_memory(&metadata, SecurityLabel::Internal);
+        assert!(
+            results.is_empty(),
+            "sensitive memory should not be visible at internal ceiling"
+        );
+    }
+
+    #[test]
+    fn test_search_memory_no_journal() {
+        let (pipeline, _sessions) = make_pipeline(r#"{"plan":[]}"#, "ok");
+
+        let metadata = ExtractedMetadata {
+            intent: None,
+            entities: vec![crate::extractors::ExtractedEntity {
+                kind: "person".to_owned(),
+                value: "Sarah".to_owned(),
+            }],
+            dates_mentioned: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        // Pipeline without journal should return empty gracefully.
+        let results = pipeline.search_memory(&metadata, SecurityLabel::Sensitive);
+        assert!(results.is_empty(), "no journal should return empty");
     }
 }

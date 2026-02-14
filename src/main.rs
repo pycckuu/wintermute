@@ -31,6 +31,7 @@ use pfar::kernel::vault::InMemoryVault;
 use pfar::tools::admin::AdminTool;
 use pfar::tools::calendar::CalendarTool;
 use pfar::tools::email::EmailTool;
+use pfar::tools::memory::MemoryTool;
 use pfar::tools::ToolRegistry;
 use pfar::types::PrincipalClass;
 
@@ -65,13 +66,6 @@ async fn main() -> Result<()> {
     // Initialize inference proxy with available providers (spec 6.3, 11.1).
     let inference = Arc::new(build_inference_proxy(&config.llm));
 
-    // Initialize tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2).
-    // Two-phase init: base tools first, then AdminTool with refs to them.
-    let tools = Arc::new(create_tool_registry(
-        Arc::clone(&vault),
-        Arc::clone(&templates),
-    ));
-
     // Initialize audit logger (spec 6.7).
     let audit = Arc::new(
         AuditLogger::new(&config.paths.audit_log).context("failed to create audit logger")?,
@@ -87,6 +81,15 @@ async fn main() -> Result<()> {
         TaskJournal::open(&config.paths.journal_db).context("failed to open task journal")?,
     );
     info!(path = %config.paths.journal_db, "task journal opened");
+
+    // Initialize tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2).
+    // Two-phase init: base tools first, then AdminTool with refs to them.
+    // Must come after journal creation (MemoryTool needs journal ref).
+    let tools = Arc::new(create_tool_registry(
+        Arc::clone(&vault),
+        Arc::clone(&templates),
+        Arc::clone(&journal),
+    ));
 
     // Load persisted session data from journal (spec 9.1, 9.2).
     let sessions = {
@@ -404,6 +407,7 @@ fn owner_telegram_template(inference: &InferenceConfig) -> TaskTemplate {
             "email.list".to_string(),
             "email.read".to_string(),
             "calendar.freebusy".to_string(),
+            "memory.save".to_string(),
             "admin.*".to_string(),
         ],
         denied_tools: vec![],
@@ -428,6 +432,7 @@ fn owner_cli_template(inference: &InferenceConfig) -> TaskTemplate {
             "email.list".to_string(),
             "email.read".to_string(),
             "calendar.freebusy".to_string(),
+            "memory.save".to_string(),
             "admin.*".to_string(),
         ],
         denied_tools: vec![],
@@ -475,11 +480,13 @@ fn whatsapp_scheduling_template() -> TaskTemplate {
 fn create_tool_registry(
     vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     templates: Arc<TemplateRegistry>,
+    journal: Arc<TaskJournal>,
 ) -> ToolRegistry {
-    // Phase 1: Base tools (email, calendar).
+    // Phase 1: Base tools (email, calendar, memory).
     let mut base_registry = ToolRegistry::new();
     base_registry.register(Box::new(CalendarTool::new()));
     base_registry.register(Box::new(EmailTool::new()));
+    base_registry.register(Box::new(MemoryTool::new(Arc::clone(&journal))));
     let base_tools = Arc::new(base_registry);
 
     // Phase 2: AdminTool gets a ref to base tools for listing integrations.
@@ -489,6 +496,7 @@ fn create_tool_registry(
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(CalendarTool::new()));
     registry.register(Box::new(EmailTool::new()));
+    registry.register(Box::new(MemoryTool::new(journal)));
     registry.register(Box::new(admin));
     registry
 }

@@ -104,6 +104,8 @@ pub struct PlannerContext {
     pub available_tools: Vec<ToolAction>,
     /// Principal class of the triggering user.
     pub principal_class: PrincipalClass,
+    /// Relevant long-term memory entries (memory spec §6).
+    pub memory_entries: Vec<String>,
 }
 
 /// Planner errors.
@@ -168,12 +170,25 @@ impl Planner {
                 .unwrap_or_else(|_| "No previous conversation".to_owned())
         };
 
-        // Step 6: Compose the full prompt.
+        // Step 6: Format long-term memory entries (memory spec §6).
+        let long_term_memory_section = if ctx.memory_entries.is_empty() {
+            String::new()
+        } else {
+            let entries: String = ctx
+                .memory_entries
+                .iter()
+                .map(|e| format!("- {e}\n"))
+                .collect();
+            format!("\n\n## Relevant Memory\n{entries}")
+        };
+
+        // Step 7: Compose the full prompt.
         format!(
             "{BASE_SAFETY_RULES}\n\n\
              {PLANNER_ROLE_PROMPT}\n\n\
              ## Task\n\
-             Description: {task_description}\n\n\
+             Description: {task_description}\
+             {long_term_memory_section}\n\n\
              ## Extracted Metadata\n\
              {metadata_json}\n\n\
              ## Available Tools\n\
@@ -426,6 +441,7 @@ mod tests {
                 make_tool_action("email.read", "Read a specific email"),
             ],
             principal_class: PrincipalClass::Owner,
+            memory_entries: vec![],
         }
     }
 
@@ -502,6 +518,7 @@ mod tests {
                 "Check free/busy status",
             )],
             principal_class: PrincipalClass::ThirdParty,
+            memory_entries: vec![],
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -545,6 +562,7 @@ mod tests {
             conversation_history: vec![],
             available_tools: vec![],
             principal_class: PrincipalClass::Owner,
+            memory_entries: vec![],
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -768,6 +786,7 @@ mod tests {
             conversation_history: vec![],
             available_tools: vec![],
             principal_class: PrincipalClass::WebhookSource,
+            memory_entries: vec![],
         };
 
         let prompt = Planner::compose_prompt(&ctx);

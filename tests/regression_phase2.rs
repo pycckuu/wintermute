@@ -930,6 +930,7 @@ fn regression_09_synthesizer_prompt_denies_tool_access() {
         persona: None,
         is_onboarding: false,
         is_persona_just_configured: false,
+        memory_entries: vec![],
     };
 
     let prompt = Synthesizer::compose_prompt(&ctx);
@@ -982,6 +983,7 @@ fn regression_13_third_party_planner_gets_template_description() {
             args_schema: serde_json::json!({"date": "string"}),
         }],
         principal_class: PrincipalClass::ThirdParty,
+        memory_entries: vec![],
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1033,6 +1035,7 @@ fn regression_13_owner_planner_gets_template_description() {
         conversation_history: vec![],
         available_tools: vec![],
         principal_class: PrincipalClass::Owner,
+        memory_entries: vec![],
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1060,6 +1063,7 @@ fn regression_13_webhook_planner_gets_planner_description() {
         conversation_history: vec![],
         available_tools: vec![],
         principal_class: PrincipalClass::WebhookSource,
+        memory_entries: vec![],
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1219,6 +1223,7 @@ fn regression_17_multi_turn_working_memory() {
             },
         ],
         principal_class: PrincipalClass::Owner,
+        memory_entries: vec![],
     };
 
     let prompt = Planner::compose_prompt(&ctx);
