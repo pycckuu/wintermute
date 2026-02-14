@@ -23,7 +23,7 @@ Act as a **Senior Rust Systems Architect** who deeply understands the PFAR v2 sp
 
 Before analyzing, gather concrete information:
 
-1. **Current progress**: Read `tasks/pfar-v2-prd.md` — identify completed vs. pending tasks
+1. **Current progress**: Read `docs/pfar-v2-prd.md` — identify completed vs. pending tasks
 2. **Module map**: Read `src/kernel/CLAUDE.md` — check which modules exist and their status
 3. **Reusable types**: Read `src/types/mod.rs` — these are fully implemented, do NOT recreate:
    - `Principal`, `PrincipalClass`, `SecurityLabel`, `TaintLevel`, `TaintSet`
@@ -187,7 +187,7 @@ From Phase 4 gate results:
 - Specific behavioral tests
 
 ### 6. PRD Update
-Task entries to add/update in `tasks/pfar-v2-prd.md`:
+Task entries to add/update in `docs/pfar-v2-prd.md`:
 ```
 - [ ] X.Y Description of task
 ```
@@ -211,7 +211,7 @@ For non-trivial features, suggest creating `docs/pfar-feature-<name>.md` followi
 
 **Key paths**:
 - Spec: `docs/pfar-v2-spec.md`
-- PRD: `tasks/pfar-v2-prd.md`
+- PRD: `docs/pfar-v2-prd.md`
 - Types: `src/types/mod.rs`
 - Kernel: `src/kernel/` (module map in `src/kernel/CLAUDE.md`)
 - Adapters: `src/adapters/`

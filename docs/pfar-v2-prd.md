@@ -15,6 +15,7 @@
 - [x] Feature: Admin Tool + Credential Flow (349 tests — 320 unit + 7 integration + 22 regression)
 - [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
 - [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
+- [x] Feature: Memory System (378 tests — 349 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -107,6 +108,23 @@ Spec: `docs/pfar-feature-persona-onboarding.md`
 - [x] PO.2 Synthesizer persona-aware prompt composition (3 tests)
 - [x] PO.3 Pipeline persona lifecycle (load/store/onboarding) (4 tests)
 - [ ] PO.4 admin.update_persona action (deferred to later Phase 3 work)
+
+## Feature: Memory System
+
+Goal: Persistent, searchable, label-filtered long-term memory.
+Spec: `docs/pfar-feature-memory.md`
+
+- [x] M.1 memories table + FTS5 in journal.db with save/search methods (5 tests)
+- [x] M.2 MemoryTool (memory.save action) + registration (4 tests)
+- [x] M.3 memory_save intent detection + could_use mapping (4 tests)
+- [x] M.4 Planner + Synthesizer memory_entries context fields + prompt injection
+- [x] M.5 Pipeline memory search after Phase 0 + context injection (4 tests)
+- [x] M.6 main.rs wiring: tool registration, template allowed_tools
+- [x] M.7 Quality assurance (fmt, clippy, full test suite)
+
+Deferred (needs scheduler):
+- [ ] M.8 Daily consolidation cron job with label-aware LLM routing
+- [ ] M.9 Consolidation tests
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

@@ -5,7 +5,7 @@ Privacy-First Agent Runtime v2. Single Rust binary with mandatory access control
 ## Key References
 
 - Spec (authoritative): @docs/pfar-v2-spec.md
-- Task tracking: @tasks/pfar-v2-prd.md — update checkboxes as tasks complete
+- Task tracking: @docs/pfar-v2-prd.md — update checkboxes as tasks complete
 - Contributing: @CONTRIBUTING.md
 - Core types in `src/types/mod.rs` are fully implemented — do not recreate
 
@@ -37,7 +37,7 @@ Full pre-push (includes cargo-deny and typos): `.githooks/pre-push`
 - Do NOT commit to git — suggest commit message at end of implementation
 - Do NOT add co-authored-by lines in commits or PRs
 - GitHub CLI alias: `github` (not `gh`)
-- Update `tasks/pfar-v2-prd.md` progress after completing tasks
+- Update `docs/pfar-v2-prd.md` progress after completing tasks
 - Keep implementations minimal — match the spec exactly, do not over-engineer
 
 ## Testing

@@ -12,12 +12,12 @@ Act as a **Senior Tech Lead & Orchestrator**. Guide the implementation through a
 1. **Sequential Execution**: Follow phases in order. Do not skip quality checks.
 2. **Spec First**: Always read the relevant spec section before writing any code.
 3. **Human Gates**: STOP and ask for confirmation before **committing** and **creating the PR**.
-4. **Progress Tracking**: Update `tasks/pfar-v2-prd.md` checkboxes after each phase.
+4. **Progress Tracking**: Update `docs/pfar-v2-prd.md` checkboxes after each phase.
 
 ---
 
 ### Phase 1: Preparation
-1. **Read PRD**: Open `tasks/pfar-v2-prd.md`, find the task (e.g. `1.4`).
+1. **Read PRD**: Open `docs/pfar-v2-prd.md`, find the task (e.g. `1.4`).
 2. **Read Spec**: Open `docs/pfar-v2-spec.md` and read the section(s) referenced by the task.
 3. **Review Types**: Read `src/types/mod.rs` — identify reusable types. Do NOT recreate existing types.
 4. **Scan Related Code**: Check existing modules for patterns to follow.
@@ -75,7 +75,7 @@ Execute in order:
 ### Phase 4: Documentation
 1. **Claude Config**: Run `/update-claude-config` to check if any Claude Code files need updates (CLAUDE.md, kernel CLAUDE.md, skills, agents, MEMORY.md).
 2. **README**: Does it reference changed functionality? Update if so.
-3. **PRD**: Mark QA as complete in `tasks/pfar-v2-prd.md`.
+3. **PRD**: Mark QA as complete in `docs/pfar-v2-prd.md`.
 
 ### Phase 5: Delivery
 1. **Draft Commit**:
@@ -125,4 +125,4 @@ Execute in order:
 - [ ] **Claude Config Updated** (`/update-claude-config`)
 - [ ] **Commit Verified & Applied**
 - [ ] **PR Created & Reviewed** (`/pr-reviewer`)
-- [ ] **PRD Updated** (`tasks/pfar-v2-prd.md`)
+- [ ] **PRD Updated** (`docs/pfar-v2-prd.md`)
