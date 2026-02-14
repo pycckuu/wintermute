@@ -132,6 +132,8 @@ pub struct SynthesizerContext {
     pub is_onboarding: bool,
     /// True on the turn where the owner just provided persona configuration.
     pub is_persona_just_configured: bool,
+    /// Relevant long-term memory entries (memory spec §6).
+    pub memory_entries: Vec<String>,
 }
 
 /// Synthesizer errors.
@@ -181,7 +183,19 @@ impl Synthesizer {
             None => String::new(),
         };
 
-        // Step 4: Serialize session context (spec 9.3).
+        // Step 4: Format long-term memory entries (memory spec §6).
+        let long_term_memory_section = if ctx.memory_entries.is_empty() {
+            String::new()
+        } else {
+            let entries: String = ctx
+                .memory_entries
+                .iter()
+                .map(|e| format!("- {e}\n"))
+                .collect();
+            format!("\n\n## Relevant Memory\n{entries}")
+        };
+
+        // Step 5: Serialize session context (spec 9.3).
         let memory_section = if ctx.session_working_memory.is_empty() {
             String::new()
         } else {
@@ -202,7 +216,7 @@ impl Synthesizer {
             lines
         };
 
-        // Step 5: Compose the full prompt.
+        // Step 6: Compose the full prompt.
         format!(
             "{BASE_SAFETY_RULES}\n\n\
              {role_section}\n\n\
@@ -211,6 +225,7 @@ impl Synthesizer {
              ## Tool Results\n\
              {results_json}\
              {raw_content_section}\
+             {long_term_memory_section}\
              {memory_section}\
              {history_section}\n\n\
              ## Instructions\n\
@@ -260,6 +275,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -307,6 +323,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -330,6 +347,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -359,6 +377,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -386,6 +405,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -432,6 +452,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -463,6 +484,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -512,6 +534,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -560,6 +583,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -604,6 +628,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -633,6 +658,7 @@ mod tests {
             persona: Some("Atlas. Owner: Igor. Style: concise, dry humor.".to_owned()),
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -664,6 +690,7 @@ mod tests {
             persona: None,
             is_onboarding: true,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -695,6 +722,7 @@ mod tests {
             persona: None,
             is_onboarding: false,
             is_persona_just_configured: false,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -727,6 +755,7 @@ mod tests {
             persona: Some("Call yourself Atlas. I'm Igor. Keep it concise.".to_owned()),
             is_onboarding: false,
             is_persona_just_configured: true,
+            memory_entries: vec![],
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);

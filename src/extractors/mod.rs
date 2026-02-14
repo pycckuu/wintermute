@@ -58,6 +58,7 @@ impl ExtractedMetadata {
             "github_check" => domain == "github",
             "web_browse" => domain == "browser" || domain == "http",
             "admin_config" => domain == "admin",
+            "memory_save" => domain == "memory",
             _ => true, // unknown intent — conservative, assume tools needed
         }
     }
@@ -157,6 +158,15 @@ mod tests {
             "admin_config",
             &["admin.list_integrations", "admin.system_status"],
             &["email.list"],
+        );
+    }
+
+    #[test]
+    fn test_could_use_memory_save_matches_memory() {
+        assert_intent_matches(
+            "memory_save",
+            &["memory.save"],
+            &["email.list", "calendar.freebusy"],
         );
     }
 

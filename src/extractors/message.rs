@@ -41,7 +41,7 @@ impl Extractor for MessageIntentExtractor {
 /// Priority order — first match wins:
 /// 1. email_reply  2. email_send  3. email_check
 /// 4. scheduling   5. github_check  6. web_browse
-/// 7. admin_config  8. None
+/// 7. admin_config  8. memory_save  9. None
 fn detect_intent(lower: &str) -> Option<String> {
     // 1. "reply" + email-related keyword
     if lower.contains("reply") && has_email_keyword(lower) {
@@ -88,7 +88,17 @@ fn detect_intent(lower: &str) -> Option<String> {
         return Some("admin_config".to_owned());
     }
 
-    // 8. No specific intent detected
+    // 8. Memory save (memory spec §4)
+    if lower.contains("remember")
+        || lower.contains("don't forget")
+        || lower.contains("keep in mind")
+        || lower.contains("note that")
+        || lower.contains("save this")
+    {
+        return Some("memory_save".to_owned());
+    }
+
+    // 9. No specific intent detected
     None
 }
 
@@ -456,5 +466,26 @@ mod tests {
         let extractor = MessageIntentExtractor;
         let meta = extractor.extract("check freebusy for next week");
         assert_eq!(meta.intent.as_deref(), Some("scheduling"));
+    }
+
+    #[test]
+    fn test_memory_save_intent_remember() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("remember that my flight to Bali is March 15th");
+        assert_eq!(meta.intent.as_deref(), Some("memory_save"));
+    }
+
+    #[test]
+    fn test_memory_save_intent_dont_forget() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("don't forget my passport expires in June");
+        assert_eq!(meta.intent.as_deref(), Some("memory_save"));
+    }
+
+    #[test]
+    fn test_memory_save_intent_note_that() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("note that the API key needs rotating next month");
+        assert_eq!(meta.intent.as_deref(), Some("memory_save"));
     }
 }

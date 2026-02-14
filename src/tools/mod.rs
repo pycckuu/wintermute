@@ -10,6 +10,7 @@
 pub mod admin;
 pub mod calendar;
 pub mod email;
+pub mod memory;
 pub mod scoped_http;
 
 use std::collections::HashMap;
@@ -689,5 +690,32 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(ToolError::ActionNotFound(_))));
+    }
+}
+
+/// Test helpers for creating tool test fixtures.
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+
+    /// Create a minimal `ValidatedCapability` for testing (spec 4.6).
+    pub fn make_test_capability(tool: &str) -> ValidatedCapability {
+        let token = CapabilityToken {
+            capability_id: uuid::Uuid::new_v4(),
+            task_id: uuid::Uuid::nil(),
+            template_id: "test_template".to_owned(),
+            principal: crate::types::Principal::Owner,
+            tool: tool.to_owned(),
+            resource_scope: "test".to_owned(),
+            taint_of_arguments: crate::types::TaintSet {
+                level: crate::types::TaintLevel::Clean,
+                origin: "owner".to_owned(),
+                touched_by: vec![],
+            },
+            issued_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now(),
+            max_invocations: 1,
+        };
+        ValidatedCapability::new(token)
     }
 }
