@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 use crate::types::SecurityLabel;
 
+/// (principal, service, vault_key, expected_prefix) — returned by
+/// [`TaskJournal::load_all_pending_credential_prompts`].
+pub type PendingPromptRow = (String, String, String, Option<String>);
+
 // ── Errors ──────────────────────────────────────────────────────
 
 /// Journal operation errors (persistence-recovery spec §2).
@@ -199,6 +203,21 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content)
     VALUES ('delete', old.rowid, old.content);
 END;
+
+CREATE TABLE IF NOT EXISTS pending_credential_prompts (
+    principal        TEXT PRIMARY KEY,
+    service          TEXT NOT NULL,
+    vault_key        TEXT NOT NULL,
+    expected_prefix  TEXT,
+    created_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_message_deletions (
+    chat_id    TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
 "#;
 
 // ── TaskJournal ─────────────────────────────────────────────────
@@ -569,6 +588,152 @@ impl TaskJournal {
             })
         })?;
 
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    // ── Pending credential prompts (credential-acquisition spec §6) ──
+
+    /// Save a pending credential prompt for a principal (credential-acquisition spec §6).
+    pub fn save_pending_credential_prompt(
+        &self,
+        principal: &str,
+        service: &str,
+        vault_key: &str,
+        expected_prefix: Option<&str>,
+    ) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_credential_prompts (principal, service, vault_key, expected_prefix, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![principal, service, vault_key, expected_prefix, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load a pending credential prompt for a principal (credential-acquisition spec §6).
+    pub fn load_pending_credential_prompt(
+        &self,
+        principal: &str,
+    ) -> Result<Option<(String, String, Option<String>)>, JournalError> {
+        use rusqlite::OptionalExtension;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.query_row(
+            "SELECT service, vault_key, expected_prefix FROM pending_credential_prompts WHERE principal = ?1",
+            params![principal],
+            |row| {
+                let service: String = row.get(0)?;
+                let vault_key: String = row.get(1)?;
+                let expected_prefix: Option<String> = row.get(2)?;
+                Ok((service, vault_key, expected_prefix))
+            },
+        )
+        .optional()
+        .map_err(JournalError::from)
+    }
+
+    /// Delete a pending credential prompt for a principal (credential-acquisition spec §6).
+    pub fn delete_pending_credential_prompt(&self, principal: &str) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM pending_credential_prompts WHERE principal = ?1",
+            params![principal],
+        )?;
+        Ok(())
+    }
+
+    /// Load all pending credential prompts (credential-acquisition spec §6).
+    ///
+    /// Used on startup to restore the CredentialGate's in-memory state.
+    pub fn load_all_pending_credential_prompts(
+        &self,
+    ) -> Result<Vec<PendingPromptRow>, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT principal, service, vault_key, expected_prefix FROM pending_credential_prompts",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let principal: String = row.get(0)?;
+            let service: String = row.get(1)?;
+            let vault_key: String = row.get(2)?;
+            let expected_prefix: Option<String> = row.get(3)?;
+            Ok((principal, service, vault_key, expected_prefix))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    // ── Pending message deletions (credential-acquisition spec §8) ──
+
+    /// Save a pending message deletion (credential-acquisition spec §8).
+    pub fn save_pending_deletion(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_message_deletions (chat_id, message_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![chat_id, message_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a pending message deletion record (credential-acquisition spec §8).
+    pub fn delete_pending_deletion(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM pending_message_deletions WHERE chat_id = ?1 AND message_id = ?2",
+            params![chat_id, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Load all pending message deletions (credential-acquisition spec §8).
+    ///
+    /// Used on startup to retry deletions that failed before shutdown.
+    pub fn load_all_pending_deletions(&self) -> Result<Vec<(String, String)>, JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| JournalError::Database(e.to_string()))?;
+        let mut stmt = conn.prepare("SELECT chat_id, message_id FROM pending_message_deletions")?;
+        let rows = stmt.query_map([], |row| {
+            let chat_id: String = row.get(0)?;
+            let message_id: String = row.get(1)?;
+            Ok((chat_id, message_id))
+        })?;
         let mut results = Vec::new();
         for row in rows {
             results.push(row?);
@@ -949,5 +1114,86 @@ mod tests {
             .search_memories("Meeting", SecurityLabel::Sensitive, 2)
             .expect("search");
         assert_eq!(results.len(), 2);
+    }
+
+    // ── Pending credential prompt tests (credential-acquisition spec §6) ──
+
+    #[test]
+    fn test_pending_credential_prompt_roundtrip() {
+        let j = make_journal();
+        j.save_pending_credential_prompt("\"Owner\"", "notion", "vault:notion_token", Some("ntn_"))
+            .expect("save");
+
+        let prompt = j
+            .load_pending_credential_prompt("\"Owner\"")
+            .expect("load")
+            .expect("should exist");
+        assert_eq!(prompt.0, "notion");
+        assert_eq!(prompt.1, "vault:notion_token");
+        assert_eq!(prompt.2.as_deref(), Some("ntn_"));
+
+        j.delete_pending_credential_prompt("\"Owner\"")
+            .expect("delete");
+        let deleted = j.load_pending_credential_prompt("\"Owner\"").expect("load");
+        assert!(deleted.is_none());
+    }
+
+    #[test]
+    fn test_pending_credential_prompt_no_prefix() {
+        let j = make_journal();
+        j.save_pending_credential_prompt("\"Owner\"", "custom_api", "vault:custom_token", None)
+            .expect("save");
+
+        let prompt = j
+            .load_pending_credential_prompt("\"Owner\"")
+            .expect("load")
+            .expect("should exist");
+        assert_eq!(prompt.0, "custom_api");
+        assert!(prompt.2.is_none());
+    }
+
+    #[test]
+    fn test_load_all_pending_credential_prompts() {
+        let j = make_journal();
+        j.save_pending_credential_prompt("\"Owner\"", "notion", "vault:notion_token", Some("ntn_"))
+            .expect("save");
+        j.save_pending_credential_prompt(
+            "{\"TelegramPeer\":\"123\"}",
+            "github",
+            "vault:github_token",
+            Some("ghp_"),
+        )
+        .expect("save");
+
+        let all = j.load_all_pending_credential_prompts().expect("load");
+        assert_eq!(all.len(), 2);
+    }
+
+    // ── Pending message deletion tests (credential-acquisition spec §8) ──
+
+    #[test]
+    fn test_pending_deletion_roundtrip() {
+        let j = make_journal();
+        j.save_pending_deletion("12345", "42").expect("save");
+
+        let all = j.load_all_pending_deletions().expect("load");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "12345");
+        assert_eq!(all[0].1, "42");
+
+        j.delete_pending_deletion("12345", "42").expect("delete");
+        let all2 = j.load_all_pending_deletions().expect("load");
+        assert!(all2.is_empty());
+    }
+
+    #[test]
+    fn test_pending_deletion_idempotent() {
+        let j = make_journal();
+        j.save_pending_deletion("100", "200").expect("save");
+        // Saving again should not fail (INSERT OR REPLACE).
+        j.save_pending_deletion("100", "200").expect("save again");
+
+        let all = j.load_all_pending_deletions().expect("load");
+        assert_eq!(all.len(), 1);
     }
 }

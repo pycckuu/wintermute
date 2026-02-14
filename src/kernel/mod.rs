@@ -5,6 +5,7 @@
 
 pub mod approval;
 pub mod audit;
+pub mod credential_gate;
 pub mod egress;
 pub mod executor;
 pub mod inference;

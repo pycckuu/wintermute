@@ -29,8 +29,8 @@ use crate::types::SecurityLabel;
 /// Admin tool for conversational configuration (spec 8.2).
 ///
 /// Holds `Arc` references to kernel components, accessible only to
-/// `principal:owner`. All actions carry `label_ceiling: Secret` since
-/// admin operations may touch credential storage.
+/// `principal:owner`. All actions carry `label_ceiling: Sensitive`
+/// since admin outputs never contain raw secret values.
 pub struct AdminTool {
     vault: Arc<dyn SecretStore>,
     tools: Arc<ToolRegistry>,
@@ -187,6 +187,10 @@ impl AdminTool {
 
     /// Return credential prompt instructions for a service (spec 8.5).
     ///
+    /// For known services (notion, github, slack), auto-fills credential
+    /// type and setup instructions from the built-in registry. For unknown
+    /// services, uses args or generic defaults.
+    ///
     /// This is a Read action that returns structured instructions. The
     /// synthesizer (Phase 3) turns this into a natural language message
     /// asking the owner to provide the credential.
@@ -196,15 +200,44 @@ impl AdminTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArguments("missing 'service' argument".to_owned()))?;
 
-        let credential_type = args
-            .get("credential_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("api_token");
+        // Auto-fill from known server registry (feature-dynamic-integrations).
+        let known = find_known_server(service);
 
-        let instructions = args
-            .get("instructions")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Please provide the credential.");
+        let (credential_type, instructions, ref_id) = if let Some(known) = known {
+            if let Some(&(env_name, setup_instructions)) = known.credentials.first() {
+                let cred_type = env_name.to_lowercase();
+                let vault_ref = format!("vault:{service}_{}", env_name.to_lowercase());
+                (cred_type, setup_instructions.to_owned(), vault_ref)
+            } else {
+                // Known server with no credentials needed.
+                return Ok(ToolOutput {
+                    data: json!({
+                        "prompt_required": false,
+                        "service": service,
+                        "message": format!("{service} does not require credentials. You can connect it directly with admin.connect_mcp_server."),
+                    }),
+                    has_free_text: false,
+                });
+            }
+        } else {
+            // Unknown service — use args or defaults.
+            let cred_type = args
+                .get("credential_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("api_token")
+                .to_owned();
+            let instr = args
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Please provide the API credential for this service.")
+                .to_owned();
+            let vault_ref = format!("vault:{service}_{cred_type}");
+            (cred_type, instr, vault_ref)
+        };
+
+        // Include expected_prefix from known server registry for credential gate
+        // classification (feature-credential-acquisition, spec 8.5).
+        let expected_prefix = known.and_then(|k| k.expected_prefix);
 
         Ok(ToolOutput {
             data: json!({
@@ -212,7 +245,8 @@ impl AdminTool {
                 "service": service,
                 "credential_type": credential_type,
                 "instructions": instructions,
-                "ref_id": format!("vault:{service}_{credential_type}"),
+                "ref_id": ref_id,
+                "expected_prefix": expected_prefix,
             }),
             has_free_text: false,
         })
@@ -429,78 +463,97 @@ impl Tool for AdminTool {
             actions: vec![
                 ToolAction {
                     id: "admin.list_integrations".to_owned(),
-                    description: "List all available and active integrations".to_owned(),
+                    description: "List all active tool integrations and their available actions"
+                        .to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({}),
                 },
                 ToolAction {
                     id: "admin.check_integration".to_owned(),
-                    description: "Check if an integration module exists and its requirements"
-                        .to_owned(),
+                    description:
+                        "Check if a built-in integration module exists and list its actions"
+                            .to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
-                    args_schema: json!({"service": "string"}),
+                    label_ceiling: SecurityLabel::Sensitive,
+                    args_schema: json!({"service": "string (e.g. 'email', 'calendar', 'notion')"}),
                 },
                 ToolAction {
                     id: "admin.list_templates".to_owned(),
                     description: "List all task templates".to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({}),
                 },
                 ToolAction {
                     id: "admin.system_status".to_owned(),
                     description: "Show active tools, templates, and system health".to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({}),
                 },
                 ToolAction {
                     id: "admin.prompt_credential".to_owned(),
-                    description: "Ask owner for a credential and provide setup instructions"
-                        .to_owned(),
+                    description: concat!(
+                        "Get setup instructions for a service's API credential. ",
+                        "For known services (notion, github, slack), instructions ",
+                        "are provided automatically. Use this FIRST when setting up ",
+                        "a new integration — the owner needs to provide the credential ",
+                        "before the service can be connected."
+                    )
+                    .to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({
-                        "service": "string",
-                        "credential_type": "string (optional, default: api_token)",
-                        "instructions": "string (optional)"
+                        "service": "string (e.g. 'notion', 'github', 'slack')"
                     }),
                 },
                 ToolAction {
                     id: "admin.store_credential".to_owned(),
-                    description: "Store a credential value in the vault".to_owned(),
+                    description: concat!(
+                        "Store a credential (API token) in the secure vault. ",
+                        "Use after the owner provides a credential value. ",
+                        "The ref_id should match the one returned by admin.prompt_credential."
+                    )
+                    .to_owned(),
                     semantics: ActionSemantics::Write,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({"ref_id": "string", "value": "string"}),
                 },
                 ToolAction {
                     id: "admin.list_mcp_servers".to_owned(),
-                    description: "List running MCP integration servers".to_owned(),
+                    description: "List currently connected external services".to_owned(),
                     semantics: ActionSemantics::Read,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({}),
                 },
                 ToolAction {
                     id: "admin.connect_mcp_server".to_owned(),
-                    description: "Connect an MCP server for dynamic tool integration".to_owned(),
+                    description: concat!(
+                        "Connect an external service (e.g. Notion, GitHub, Slack) ",
+                        "and discover its tools. Known services: notion, github, slack, ",
+                        "filesystem, fetch — just pass the name. ",
+                        "IMPORTANT: credentials must be stored in vault first via ",
+                        "admin.store_credential before connecting."
+                    )
+                    .to_owned(),
                     semantics: ActionSemantics::Write,
-                    label_ceiling: SecurityLabel::Secret,
+                    label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({
-                        "name": "string (server name, e.g. 'notion')",
-                        "command": "string (optional, executable to run)",
-                        "args": "string[] (optional, command arguments)",
+                        "name": "string (service name, e.g. 'notion', 'github', 'slack')",
+                        "command": "string (optional, for custom servers)",
+                        "args": "string[] (optional, for custom servers)",
                         "label": "string (optional, security label, default: internal)",
                         "allowed_domains": "string[] (optional, network allowlist)"
                     }),
                 },
                 ToolAction {
                     id: "admin.disconnect_mcp_server".to_owned(),
-                    description: "Disconnect a running MCP server and remove its tools".to_owned(),
+                    description: "Disconnect an external service and remove all its tools"
+                        .to_owned(),
                     semantics: ActionSemantics::Write,
-                    label_ceiling: SecurityLabel::Secret,
-                    args_schema: json!({"name": "string (server name)"}),
+                    label_ceiling: SecurityLabel::Sensitive,
+                    args_schema: json!({"name": "string (service name, e.g. 'notion')"}),
                 },
             ],
             network_allowlist: vec![], // Admin tool doesn't need network (spec 8.2).
@@ -618,14 +671,14 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_secret_ceiling() {
+    fn test_manifest_label_ceilings() {
         let admin = make_admin_tool();
         let manifest = admin.manifest();
         for action in &manifest.actions {
             assert_eq!(
                 action.label_ceiling,
-                SecurityLabel::Secret,
-                "admin action {} should have Secret ceiling",
+                SecurityLabel::Sensitive,
+                "admin action {} should have Sensitive ceiling (admin outputs never contain raw secrets)",
                 action.id
             );
         }
@@ -739,23 +792,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prompt_credential() {
+    async fn test_prompt_credential_known_server() {
         let admin = make_admin_tool();
         let cap = make_cap("admin.prompt_credential");
         let creds = InjectedCredentials::new();
         let http = make_http();
 
+        // For known servers (notion), instructions auto-fill from registry.
         let result = admin
             .execute(
                 &cap,
                 &creds,
                 &http,
                 "admin.prompt_credential",
-                json!({
-                    "service": "notion",
-                    "credential_type": "integration_token",
-                    "instructions": "Go to notion.so/my-integrations"
-                }),
+                json!({"service": "notion"}),
             )
             .await;
         assert!(result.is_ok());
@@ -763,14 +813,81 @@ mod tests {
         let output = result.expect("checked");
         assert_eq!(output.data["prompt_required"], json!(true));
         assert_eq!(output.data["service"], json!("notion"));
-        assert_eq!(output.data["credential_type"], json!("integration_token"));
-        assert!(output.data["instructions"]
-            .as_str()
-            .expect("str")
-            .contains("notion.so"));
+        // Auto-filled from KnownServer registry.
+        assert!(
+            output.data["instructions"]
+                .as_str()
+                .expect("str")
+                .contains("notion.so"),
+            "known server should auto-fill setup instructions"
+        );
+        // Ref ID derived from known server env var name.
+        assert!(
+            output.data["ref_id"]
+                .as_str()
+                .expect("str")
+                .starts_with("vault:notion_"),
+            "ref_id should be vault-prefixed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_credential_unknown_server() {
+        let admin = make_admin_tool();
+        let cap = make_cap("admin.prompt_credential");
+        let creds = InjectedCredentials::new();
+        let http = make_http();
+
+        // For unknown servers, uses args or defaults.
+        let result = admin
+            .execute(
+                &cap,
+                &creds,
+                &http,
+                "admin.prompt_credential",
+                json!({
+                    "service": "custom_api",
+                    "credential_type": "bearer_token",
+                    "instructions": "Get your token from the dashboard"
+                }),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.expect("checked");
+        assert_eq!(output.data["prompt_required"], json!(true));
+        assert_eq!(output.data["service"], json!("custom_api"));
+        assert_eq!(output.data["credential_type"], json!("bearer_token"));
         assert_eq!(
             output.data["ref_id"],
-            json!("vault:notion_integration_token")
+            json!("vault:custom_api_bearer_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_credential_no_creds_needed() {
+        let admin = make_admin_tool();
+        let cap = make_cap("admin.prompt_credential");
+        let creds = InjectedCredentials::new();
+        let http = make_http();
+
+        // filesystem is a known server with no credentials.
+        let result = admin
+            .execute(
+                &cap,
+                &creds,
+                &http,
+                "admin.prompt_credential",
+                json!({"service": "filesystem"}),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.expect("checked");
+        assert_eq!(
+            output.data["prompt_required"],
+            json!(false),
+            "filesystem needs no credentials"
         );
     }
 

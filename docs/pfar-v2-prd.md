@@ -17,6 +17,9 @@
 - [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
 - [x] Feature: Memory System (378 tests — 349 unit + 7 integration + 22 regression)
 - [x] Feature: Dynamic Integrations via MCP (399 tests — 370 unit + 7 integration + 22 regression)
+- [x] Fix: Admin tool descriptions for MCP integration discovery (401 tests — 372 unit + 7 integration + 22 regression)
+- [x] Fix: Admin tool label ceilings — Secret→Sensitive for non-secret actions (401 tests)
+- [x] Feature: Credential Acquisition — In-Chat Paste with Kernel Intercept (423 tests — 394 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -141,6 +144,20 @@ Spec: `docs/pfar-feature-dynamic-integrations.md`
 - [x] MCP.7 Startup wiring + graceful shutdown integration
 - [x] MCP.8 SecurityLabel::FromStr + Display (5 tests)
 - [x] MCP.9 Quality assurance (fmt, clippy, all tests green)
+
+## Feature: Credential Acquisition (In-Chat Paste)
+
+Goal: Intercept credential messages before the LLM pipeline (Invariant B).
+Spec: `docs/pfar-credential-acquisition.md` (Method 3 only)
+
+- [x] CG.1 Journal: pending_credential_prompts + pending_message_deletions tables (5 tests)
+- [x] CG.2 Telegram adapter: DeleteMessage variant + delete_message API call (1 test)
+- [x] CG.3 CredentialGate module: classify, intercept, looks_like_token (13 tests)
+- [x] CG.4 Pipeline: CredentialPromptInfo in PipelineOutput (2 tests)
+- [x] CG.5 KnownServer: expected_prefix field + prompt_credential output update
+- [x] CG.6 main.rs: wire gate into event loop + startup recovery
+- [x] CG.7 Fix store_credential label ceiling Secret→Sensitive
+- [x] CG.8 Quality assurance (fmt, clippy, all tests green)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
