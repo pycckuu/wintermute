@@ -57,6 +57,35 @@ pub enum SecurityLabel {
     Secret,
 }
 
+impl std::fmt::Display for SecurityLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => f.write_str("public"),
+            Self::Internal => f.write_str("internal"),
+            Self::Sensitive => f.write_str("sensitive"),
+            Self::Regulated => f.write_str("regulated"),
+            Self::Secret => f.write_str("secret"),
+        }
+    }
+}
+
+impl std::str::FromStr for SecurityLabel {
+    type Err = anyhow::Error;
+
+    /// Parse a security label from its lowercase string representation
+    /// (feature-dynamic-integrations, spec 4.3).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "public" => Ok(Self::Public),
+            "internal" => Ok(Self::Internal),
+            "sensitive" => Ok(Self::Sensitive),
+            "regulated" => Ok(Self::Regulated),
+            "secret" => Ok(Self::Secret),
+            other => Err(anyhow::anyhow!("unknown security label: {other}")),
+        }
+    }
+}
+
 /// Taint level tracking sanitization state (spec 4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TaintLevel {
@@ -182,4 +211,79 @@ pub struct ToolResult {
     pub success: bool,
     pub output: serde_json::Value,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_security_label_from_str() {
+        assert_eq!(
+            "public".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Public
+        );
+        assert_eq!(
+            "internal".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Internal
+        );
+        assert_eq!(
+            "sensitive".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Sensitive
+        );
+        assert_eq!(
+            "regulated".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Regulated
+        );
+        assert_eq!(
+            "secret".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Secret
+        );
+    }
+
+    #[test]
+    fn test_security_label_from_str_case_insensitive() {
+        assert_eq!(
+            "Public".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Public
+        );
+        assert_eq!(
+            "INTERNAL".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Internal
+        );
+        assert_eq!(
+            "Sensitive".parse::<SecurityLabel>().expect("ok"),
+            SecurityLabel::Sensitive
+        );
+    }
+
+    #[test]
+    fn test_security_label_from_str_invalid() {
+        assert!("bogus".parse::<SecurityLabel>().is_err());
+        assert!("".parse::<SecurityLabel>().is_err());
+    }
+
+    #[test]
+    fn test_security_label_display() {
+        assert_eq!(SecurityLabel::Public.to_string(), "public");
+        assert_eq!(SecurityLabel::Internal.to_string(), "internal");
+        assert_eq!(SecurityLabel::Sensitive.to_string(), "sensitive");
+        assert_eq!(SecurityLabel::Regulated.to_string(), "regulated");
+        assert_eq!(SecurityLabel::Secret.to_string(), "secret");
+    }
+
+    #[test]
+    fn test_security_label_roundtrip() {
+        for label in &[
+            SecurityLabel::Public,
+            SecurityLabel::Internal,
+            SecurityLabel::Sensitive,
+            SecurityLabel::Regulated,
+            SecurityLabel::Secret,
+        ] {
+            let s = label.to_string();
+            let parsed: SecurityLabel = s.parse().expect("roundtrip should work");
+            assert_eq!(*label, parsed);
+        }
+    }
 }

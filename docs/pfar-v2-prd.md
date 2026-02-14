@@ -16,6 +16,7 @@
 - [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
 - [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
 - [x] Feature: Memory System (378 tests — 349 unit + 7 integration + 22 regression)
+- [x] Feature: Dynamic Integrations via MCP (399 tests — 370 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -125,6 +126,21 @@ Spec: `docs/pfar-feature-memory.md`
 Deferred (needs scheduler):
 - [ ] M.8 Daily consolidation cron job with label-aware LLM routing
 - [ ] M.9 Consolidation tests
+
+## Feature: Dynamic Integrations via MCP
+
+Goal: Add service integrations conversationally using MCP servers.
+Spec: `docs/pfar-feature-dynamic-integrations.md`
+
+- [x] MCP.1 ToolRegistry mutability — RwLock + Arc<dyn Tool> + unregister()
+- [x] MCP.2 MCP client — JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) (15 tests)
+- [x] MCP.3 McpTool — Tool trait adapter routing execute() to MCP server (3 tests)
+- [x] MCP.4 MCP config types + known server registry (5 entries) + infer_semantics (10 tests)
+- [x] MCP.5 McpServerManager — spawn, stop, shutdown lifecycle (5 tests)
+- [x] MCP.6 Admin tool MCP actions (connect, disconnect, list_mcp_servers)
+- [x] MCP.7 Startup wiring + graceful shutdown integration
+- [x] MCP.8 SecurityLabel::FromStr + Display (5 tests)
+- [x] MCP.9 Quality assurance (fmt, clippy, all tests green)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

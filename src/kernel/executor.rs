@@ -397,9 +397,9 @@ mod tests {
 
     fn make_executor(buf: &SharedBuf) -> PlanExecutor {
         let policy = Arc::new(PolicyEngine::with_defaults());
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::read_tool()));
-        registry.register(Box::new(MockTool::calendar_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::read_tool()));
+        registry.register(Arc::new(MockTool::calendar_tool()));
         let tools = Arc::new(registry);
         let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf.clone())));
@@ -409,9 +409,9 @@ mod tests {
 
     fn make_executor_with_write_tool(buf: &SharedBuf) -> PlanExecutor {
         let policy = Arc::new(PolicyEngine::with_defaults());
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::write_tool()));
-        registry.register(Box::new(MockTool::calendar_tool()));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::write_tool()));
+        registry.register(Arc::new(MockTool::calendar_tool()));
         let tools = Arc::new(registry);
         let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf.clone())));
@@ -460,9 +460,9 @@ mod tests {
 
     fn make_executor_with_admin(buf: &SharedBuf) -> PlanExecutor {
         let policy = Arc::new(PolicyEngine::with_defaults());
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockTool::read_tool()));
-        registry.register(Box::new(MockOwnerOnlyTool));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::read_tool()));
+        registry.register(Arc::new(MockOwnerOnlyTool));
         let tools = Arc::new(registry);
         let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf.clone())));

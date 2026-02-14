@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::tools::mcp::McpConfig;
+
 // ── Top-level config ────────────────────────────────────────────
 
 /// Top-level PFAR configuration loaded from TOML (spec 18.1).
@@ -27,6 +29,8 @@ pub struct PfarConfig {
     pub llm: LlmConfig,
     /// Adapter configuration (spec 18.1 `[adapter]`).
     pub adapter: AdapterConfig,
+    /// MCP server configuration (feature-dynamic-integrations).
+    pub mcp: McpConfig,
 }
 
 impl PfarConfig {
