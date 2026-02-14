@@ -17,6 +17,8 @@ use serde_json::json;
 
 use crate::kernel::template::TemplateRegistry;
 use crate::kernel::vault::{SecretStore, SecretValue};
+use crate::tools::mcp::manager::McpServerManager;
+use crate::tools::mcp::{find_known_server, McpServerCommand, McpServerConfig};
 use crate::tools::scoped_http::ScopedHttpClient;
 use crate::tools::{
     ActionSemantics, InjectedCredentials, Tool, ToolAction, ToolError, ToolManifest, ToolOutput,
@@ -33,6 +35,7 @@ pub struct AdminTool {
     vault: Arc<dyn SecretStore>,
     tools: Arc<ToolRegistry>,
     templates: Arc<TemplateRegistry>,
+    mcp_manager: Option<Arc<McpServerManager>>,
 }
 
 impl AdminTool {
@@ -46,7 +49,15 @@ impl AdminTool {
             vault,
             tools,
             templates,
+            mcp_manager: None,
         }
+    }
+
+    /// Set the MCP server manager for dynamic integration support
+    /// (feature-dynamic-integrations).
+    pub fn with_mcp_manager(mut self, manager: Arc<McpServerManager>) -> Self {
+        self.mcp_manager = Some(manager);
+        self
     }
 
     /// List all registered tool integrations (spec 8.2).
@@ -207,6 +218,175 @@ impl AdminTool {
         })
     }
 
+    /// List running MCP servers (feature-dynamic-integrations).
+    async fn list_mcp_servers(&self) -> Result<ToolOutput, ToolError> {
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed("MCP manager not configured".into()))?;
+
+        let servers = manager.list_servers().await;
+
+        Ok(ToolOutput {
+            data: json!({
+                "servers": servers,
+                "count": servers.len(),
+            }),
+            has_free_text: false,
+        })
+    }
+
+    /// Connect an MCP server (feature-dynamic-integrations).
+    ///
+    /// Accepts either a known server name (looked up in the built-in registry)
+    /// or a custom config with command and args.
+    async fn connect_mcp_server(&self, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed("MCP manager not configured".into()))?;
+
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing 'name' argument".into()))?;
+
+        // Check if this is a known server.
+        let config = if let Some(known) = find_known_server(name) {
+            // For known servers, the command/args should be provided or defaulted.
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("npx")
+                .to_owned();
+            let default_args = if command == "npx" {
+                vec!["-y".to_owned(), known.package.to_owned()]
+            } else {
+                args.get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+
+            let mut auth = std::collections::HashMap::new();
+            for (env_name, _instructions) in known.credentials {
+                auth.insert(
+                    (*env_name).to_owned(),
+                    format!("vault:{name}_{}", env_name.to_lowercase()),
+                );
+            }
+
+            McpServerConfig {
+                name: name.to_owned(),
+                description: format!("Known MCP server: {name}"),
+                label: known.default_label.to_owned(),
+                allowed_domains: known.domains.iter().map(|d| (*d).to_owned()).collect(),
+                server: McpServerCommand {
+                    command,
+                    args: default_args,
+                },
+                auth,
+            }
+        } else {
+            // Custom server — require command and label.
+            let command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments(
+                        "missing 'command' for unknown server (not in known registry)".into(),
+                    )
+                })?
+                .to_owned();
+
+            let cmd_args: Vec<String> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("internal")
+                .to_owned();
+
+            let allowed_domains: Vec<String> = args
+                .get("allowed_domains")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            McpServerConfig {
+                name: name.to_owned(),
+                description: format!("Custom MCP server: {name}"),
+                label,
+                allowed_domains,
+                server: McpServerCommand {
+                    command,
+                    args: cmd_args,
+                },
+                auth: std::collections::HashMap::new(),
+            }
+        };
+
+        let action_ids = manager
+            .spawn_server(&config)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to connect: {e}")))?;
+
+        Ok(ToolOutput {
+            data: json!({
+                "connected": true,
+                "server": name,
+                "tools_discovered": action_ids.len(),
+                "tool_ids": action_ids,
+            }),
+            has_free_text: false,
+        })
+    }
+
+    /// Disconnect an MCP server (feature-dynamic-integrations).
+    async fn disconnect_mcp_server(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let manager = self
+            .mcp_manager
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed("MCP manager not configured".into()))?;
+
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidArguments("missing 'name' argument".into()))?;
+
+        manager
+            .stop_server(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to disconnect: {e}")))?;
+
+        Ok(ToolOutput {
+            data: json!({
+                "disconnected": true,
+                "server": name,
+            }),
+            has_free_text: false,
+        })
+    }
+
     /// Store a credential in the vault (spec 8.5).
     ///
     /// Write action — stores the provided value in the vault under the
@@ -295,6 +475,33 @@ impl Tool for AdminTool {
                     label_ceiling: SecurityLabel::Secret,
                     args_schema: json!({"ref_id": "string", "value": "string"}),
                 },
+                ToolAction {
+                    id: "admin.list_mcp_servers".to_owned(),
+                    description: "List running MCP integration servers".to_owned(),
+                    semantics: ActionSemantics::Read,
+                    label_ceiling: SecurityLabel::Secret,
+                    args_schema: json!({}),
+                },
+                ToolAction {
+                    id: "admin.connect_mcp_server".to_owned(),
+                    description: "Connect an MCP server for dynamic tool integration".to_owned(),
+                    semantics: ActionSemantics::Write,
+                    label_ceiling: SecurityLabel::Secret,
+                    args_schema: json!({
+                        "name": "string (server name, e.g. 'notion')",
+                        "command": "string (optional, executable to run)",
+                        "args": "string[] (optional, command arguments)",
+                        "label": "string (optional, security label, default: internal)",
+                        "allowed_domains": "string[] (optional, network allowlist)"
+                    }),
+                },
+                ToolAction {
+                    id: "admin.disconnect_mcp_server".to_owned(),
+                    description: "Disconnect a running MCP server and remove its tools".to_owned(),
+                    semantics: ActionSemantics::Write,
+                    label_ceiling: SecurityLabel::Secret,
+                    args_schema: json!({"name": "string (server name)"}),
+                },
             ],
             network_allowlist: vec![], // Admin tool doesn't need network (spec 8.2).
         }
@@ -316,6 +523,9 @@ impl Tool for AdminTool {
             "admin.system_status" => self.system_status(),
             "admin.prompt_credential" => self.prompt_credential(args),
             "admin.store_credential" => self.store_credential(args).await,
+            "admin.list_mcp_servers" => self.list_mcp_servers().await,
+            "admin.connect_mcp_server" => self.connect_mcp_server(args).await,
+            "admin.disconnect_mcp_server" => self.disconnect_mcp_server(args).await,
             _ => Err(ToolError::ActionNotFound(action.to_owned())),
         }
     }
@@ -333,9 +543,9 @@ mod tests {
 
     fn make_admin_tool() -> AdminTool {
         let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
-        let mut tools = ToolRegistry::new();
-        tools.register(Box::new(EmailTool::new()));
-        tools.register(Box::new(CalendarTool::new()));
+        let tools = ToolRegistry::new();
+        tools.register(Arc::new(EmailTool::new()));
+        tools.register(Arc::new(CalendarTool::new()));
         let tools = Arc::new(tools);
 
         let mut templates = TemplateRegistry::new();

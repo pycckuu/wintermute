@@ -74,8 +74,8 @@ async fn regression_15_admin_tools_reject_non_owner() {
         Arc::clone(&templates),
     );
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(admin));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(admin));
     let tools = Arc::new(registry);
 
     let executor = PlanExecutor::new(
@@ -137,8 +137,8 @@ async fn regression_15_admin_tools_allow_owner() {
         Arc::clone(&templates),
     );
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(admin));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(admin));
     let tools = Arc::new(registry);
 
     let executor = PlanExecutor::new(
@@ -194,8 +194,8 @@ async fn regression_15_admin_store_credential_rejects_peer() {
         Arc::clone(&templates),
     );
 
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(admin));
+    let registry = ToolRegistry::new();
+    registry.register(Arc::new(admin));
     let tools = Arc::new(registry);
 
     let executor = PlanExecutor::new(

@@ -898,7 +898,7 @@ mod tests {
         tools_fn: Option<F>,
     ) -> (Pipeline, Arc<RwLock<SessionStore>>)
     where
-        F: FnOnce(&mut ToolRegistry),
+        F: FnOnce(&ToolRegistry),
     {
         let buf = SharedBuf::new();
         let policy = Arc::new(PolicyEngine::with_defaults());
@@ -908,11 +908,11 @@ mod tests {
             MockPlannerProvider::new(plan_json, synth_text),
         )));
 
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         if let Some(f) = tools_fn {
-            f(&mut registry);
+            f(&registry);
         } else {
-            registry.register(Box::new(MockEmailTool));
+            registry.register(Arc::new(MockEmailTool));
         }
         let tools = Arc::new(registry);
 
@@ -938,7 +938,7 @@ mod tests {
 
     /// Build a test pipeline with default MockEmailTool registered.
     fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<SessionStore>>) {
-        make_pipeline_with_tools(plan_json, synth_text, None::<fn(&mut ToolRegistry)>)
+        make_pipeline_with_tools(plan_json, synth_text, None::<fn(&ToolRegistry)>)
     }
 
     /// Build a test pipeline with an in-memory journal for persona tests.
@@ -954,8 +954,8 @@ mod tests {
             MockPlannerProvider::new(plan_json, synth_text),
         )));
 
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockEmailTool));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockEmailTool));
         let tools = Arc::new(registry);
 
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
@@ -1134,7 +1134,7 @@ mod tests {
         let synth_text = "I don't have access to scheduling tools right now.";
         // No tools registered for this test.
         let (pipeline, sessions) =
-            make_pipeline_with_tools(plan_json, synth_text, Some(|_reg: &mut ToolRegistry| {}));
+            make_pipeline_with_tools(plan_json, synth_text, Some(|_reg: &ToolRegistry| {}));
 
         let template = make_third_party_template();
         let principal = Principal::WhatsAppContact("+34665030077".to_owned());
@@ -1334,8 +1334,8 @@ mod tests {
         let policy = Arc::new(PolicyEngine::with_defaults());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
         let inference = Arc::new(InferenceProxy::with_provider(Box::new(provider)));
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockEmailTool));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockEmailTool));
         let tools = Arc::new(registry);
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
         let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
@@ -1515,8 +1515,8 @@ mod tests {
         let policy = Arc::new(PolicyEngine::with_defaults());
         let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
         let inference = Arc::new(InferenceProxy::with_provider(Box::new(provider)));
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(MockEmailTool));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockEmailTool));
         let tools = Arc::new(registry);
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
         let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
