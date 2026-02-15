@@ -269,6 +269,23 @@ impl ToolRegistry {
         Some((Arc::clone(tool), action))
     }
 
+    /// Return names and action counts of all registered tools
+    /// (pfar-system-identity-document.md, SID assembly).
+    ///
+    /// Results are sorted by name for deterministic prompt rendering.
+    pub fn tool_summaries(&self) -> Vec<(String, usize)> {
+        let tools = self.tools.read().unwrap_or_else(|e| e.into_inner());
+        let mut summaries: Vec<(String, usize)> = tools
+            .values()
+            .map(|t| {
+                let m = t.manifest();
+                (m.name.clone(), m.actions.len())
+            })
+            .collect();
+        summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        summaries
+    }
+
     /// Return all actions from registered tools that are allowed by the template (spec 4.5).
     ///
     /// Filters actions against `allowed_tools` and `denied_tools` lists.
@@ -709,6 +726,19 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(ToolError::ActionNotFound(_))));
+    }
+
+    #[test]
+    fn test_tool_summaries() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockTool::email_tool()));
+        registry.register(Arc::new(MockTool::admin_tool()));
+
+        let summaries = registry.tool_summaries();
+        // Sorted by name: admin before email.
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0], ("admin".to_owned(), 2));
+        assert_eq!(summaries[1], ("email".to_owned(), 2));
     }
 }
 

@@ -106,6 +106,9 @@ pub struct PlannerContext {
     pub principal_class: PrincipalClass,
     /// Relevant long-term memory entries (memory spec §6).
     pub memory_entries: Vec<String>,
+    /// Rendered System Identity Document for prompt prefix
+    /// (pfar-system-identity-document.md).
+    pub sid: Option<String>,
 }
 
 /// Planner errors.
@@ -182,9 +185,15 @@ impl Planner {
             format!("\n\n## Relevant Memory\n{entries}")
         };
 
-        // Step 7: Compose the full prompt.
+        // Step 7: Prepend SID when available (pfar-system-identity-document.md).
+        let sid_section = match &ctx.sid {
+            Some(sid) => format!("{sid}\n\n"),
+            None => String::new(),
+        };
+
+        // Step 8: Compose the full prompt.
         format!(
-            "{BASE_SAFETY_RULES}\n\n\
+            "{sid_section}{BASE_SAFETY_RULES}\n\n\
              {PLANNER_ROLE_PROMPT}\n\n\
              ## Task\n\
              Description: {task_description}\
@@ -442,6 +451,7 @@ mod tests {
             ],
             principal_class: PrincipalClass::Owner,
             memory_entries: vec![],
+            sid: None,
         }
     }
 
@@ -519,6 +529,7 @@ mod tests {
             )],
             principal_class: PrincipalClass::ThirdParty,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -563,6 +574,7 @@ mod tests {
             available_tools: vec![],
             principal_class: PrincipalClass::Owner,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -787,6 +799,7 @@ mod tests {
             available_tools: vec![],
             principal_class: PrincipalClass::WebhookSource,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -858,5 +871,50 @@ mod tests {
 
         let long = "a".repeat(300);
         assert_eq!(truncate_for_error(&long, 200).len(), 200);
+    }
+
+    // ── SID tests (pfar-system-identity-document.md) ──
+
+    #[test]
+    fn test_compose_prompt_with_sid() {
+        let mut ctx = make_owner_context();
+        ctx.sid =
+            Some("You are Atlas.\n\nCAPABILITIES:\n- Built-in tools: email, calendar\n".to_owned());
+
+        let prompt = Planner::compose_prompt(&ctx);
+
+        // SID should appear in the prompt.
+        assert!(
+            prompt.contains("You are Atlas."),
+            "prompt should contain SID persona"
+        );
+        assert!(
+            prompt.contains("CAPABILITIES:"),
+            "prompt should contain SID capabilities"
+        );
+        // Planner role prompt should still be present.
+        assert!(
+            prompt.contains("You are the Planner"),
+            "prompt should still contain planner role"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_sid_before_safety_rules() {
+        let mut ctx = make_owner_context();
+        ctx.sid = Some("SID_MARKER_START\n".to_owned());
+
+        let prompt = Planner::compose_prompt(&ctx);
+
+        let sid_pos = prompt
+            .find("SID_MARKER_START")
+            .expect("SID should be in prompt");
+        let safety_pos = prompt
+            .find("Never output secrets")
+            .expect("safety rules should be in prompt");
+        assert!(
+            sid_pos < safety_pos,
+            "SID should appear before safety rules"
+        );
     }
 }
