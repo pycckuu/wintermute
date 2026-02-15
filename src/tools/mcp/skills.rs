@@ -14,6 +14,13 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::{McpServerCommand, McpServerConfig};
+use crate::types::SecurityLabel;
+
+/// Built-in tool names that skills must not shadow (spec 5.2).
+///
+/// A skill named "admin" would shadow AdminTool's actions in the
+/// tool registry, breaking conversational config.
+const RESERVED_TOOL_NAMES: &[&str] = &["admin", "email", "calendar", "memory"];
 
 // ── Skill config types (feature-self-extending-skills, spec 3) ──
 
@@ -110,24 +117,28 @@ impl SkillConfig {
     /// If `server.working_dir` is set, it takes precedence over the
     /// skill directory.
     pub fn to_mcp_config(&self, skill_dir: &Path) -> McpServerConfig {
-        // Resolve working directory: explicit override or skill directory.
+        // Resolve working directory: explicit override (with tilde expansion)
+        // or skill directory (feature-self-extending-skills, spec 3).
         let working_dir = self
             .server
             .working_dir
             .as_deref()
-            .map(PathBuf::from)
+            .map(expand_tilde)
             .unwrap_or_else(|| skill_dir.to_path_buf());
 
         // Resolve relative file paths in args to absolute paths.
         // This allows skill.toml to reference "server.py" which gets
         // resolved to the full path inside the skill directory.
+        // Only resolve args that look like file paths (contain '.' or '/');
+        // pure values like "8080" are kept as-is.
         let resolved_args: Vec<String> = self
             .server
             .args
             .iter()
             .map(|arg| {
                 let p = Path::new(arg);
-                if p.is_relative() && !arg.starts_with('-') {
+                let looks_like_path = arg.contains('.') || arg.contains('/');
+                if p.is_relative() && !arg.starts_with('-') && looks_like_path {
                     working_dir.join(p).to_string_lossy().into_owned()
                 } else {
                     arg.clone()
@@ -200,10 +211,20 @@ pub fn find_local_skills(skills_dir: &str) -> Vec<(SkillConfig, PathBuf)> {
             }
         };
 
-        let skill_dir = entry.path();
-        if !skill_dir.is_dir() {
+        // Use entry.file_type() which does NOT follow symlinks,
+        // preventing symlink-based path traversal attacks.
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read file type for skills entry");
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
             continue;
         }
+
+        let skill_dir = entry.path();
 
         let manifest_path = skill_dir.join("skill.toml");
         if !manifest_path.is_file() {
@@ -239,7 +260,32 @@ fn load_skill_config(path: &Path) -> Result<SkillConfig> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let config: SkillConfig =
         toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_skill_config(&config)?;
     Ok(config)
+}
+
+/// Validate a skill config against safety constraints
+/// (feature-self-extending-skills, spec 3, 5.2).
+fn validate_skill_config(config: &SkillConfig) -> Result<()> {
+    // Reject names that would shadow built-in tools.
+    if RESERVED_TOOL_NAMES.contains(&config.name.as_str()) {
+        anyhow::bail!("skill name '{}' conflicts with built-in tool", config.name);
+    }
+
+    // Validate label and reject secret/regulated — skills are
+    // MCP servers and cannot handle secret material (spec 4.3).
+    let label: SecurityLabel = config
+        .label
+        .parse()
+        .with_context(|| format!("invalid label '{}' in skill config", config.label))?;
+    if matches!(label, SecurityLabel::Secret | SecurityLabel::Regulated) {
+        anyhow::bail!(
+            "skills cannot use label '{}' — only public, internal, sensitive are allowed",
+            config.label
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -333,11 +379,17 @@ command = "python3"
         assert_eq!(mcp.label, "public");
         assert_eq!(mcp.allowed_domains, vec!["status.myapp.io", "api.myapp.io"]);
         assert_eq!(mcp.server.command, "python3");
-        // working_dir is set explicitly in the skill.toml, so args resolve
-        // against that path.
-        assert_eq!(
-            mcp.server.args,
-            vec!["~/.pfar/skills/uptime-checker/server.py"]
+        // working_dir has tilde expanded, args resolve against that.
+        // With HOME set, "~/.pfar/skills/uptime-checker" expands to
+        // "$HOME/.pfar/skills/uptime-checker/server.py".
+        let arg0 = &mcp.server.args[0];
+        assert!(
+            arg0.ends_with("/.pfar/skills/uptime-checker/server.py"),
+            "expected resolved server.py path, got: {arg0}"
+        );
+        assert!(
+            !arg0.starts_with('~'),
+            "tilde should be expanded in working_dir, got: {arg0}"
         );
     }
 
@@ -356,12 +408,12 @@ args = ["server.py", "--port", "8080"]
         let skill_dir = PathBuf::from("/skills/test-skill");
         let mcp = config.to_mcp_config(&skill_dir);
 
-        // "server.py" is relative → resolved to /skills/test-skill/server.py
+        // "server.py" contains '.' → resolved to /skills/test-skill/server.py
         // "--port" starts with '-' → kept as-is
-        // "8080" is relative but not a file path, still resolved (acceptable)
+        // "8080" has no '.' or '/' → kept as-is (not a file path)
         assert_eq!(mcp.server.args[0], "/skills/test-skill/server.py");
         assert_eq!(mcp.server.args[1], "--port");
-        assert_eq!(mcp.server.args[2], "/skills/test-skill/8080");
+        assert_eq!(mcp.server.args[2], "8080");
     }
 
     #[test]
@@ -482,6 +534,110 @@ command = "python3"
         let skills = find_local_skills(tmp.path().to_str().expect("path"));
         assert_eq!(skills.len(), 1, "should find only the valid skill");
         assert_eq!(skills[0].0.name, "valid");
+    }
+
+    #[test]
+    fn test_reserved_name_rejected() {
+        for name in &["admin", "email", "calendar", "memory"] {
+            let toml_str = format!(
+                "name = \"{name}\"\ndescription = \"test\"\nlabel = \"public\"\n\n[server]\ncommand = \"python3\"\n"
+            );
+            let result: Result<SkillConfig, _> = toml::from_str(&toml_str);
+            let config = result.expect("should parse TOML");
+            let err = validate_skill_config(&config);
+            assert!(
+                err.is_err(),
+                "skill name '{name}' should be rejected as reserved"
+            );
+            assert!(
+                err.expect_err("checked").to_string().contains("conflicts"),
+                "error should mention conflict"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secret_label_rejected() {
+        let toml_str = r#"
+name = "evil-skill"
+description = "tries secret label"
+label = "secret"
+
+[server]
+command = "python3"
+"#;
+        let config: SkillConfig = toml::from_str(toml_str).expect("should parse TOML");
+        let err = validate_skill_config(&config);
+        assert!(err.is_err(), "secret label should be rejected");
+        assert!(
+            err.expect_err("checked")
+                .to_string()
+                .contains("cannot use label"),
+            "error should mention label restriction"
+        );
+    }
+
+    #[test]
+    fn test_regulated_label_rejected() {
+        let toml_str = r#"
+name = "health-skill"
+description = "tries regulated label"
+label = "regulated"
+
+[server]
+command = "python3"
+"#;
+        let config: SkillConfig = toml::from_str(toml_str).expect("should parse TOML");
+        let err = validate_skill_config(&config);
+        assert!(err.is_err(), "regulated label should be rejected");
+    }
+
+    #[test]
+    fn test_invalid_label_rejected() {
+        let toml_str = r#"
+name = "bad-label"
+description = "invalid label string"
+label = "top_secret"
+
+[server]
+command = "python3"
+"#;
+        let config: SkillConfig = toml::from_str(toml_str).expect("should parse TOML");
+        let err = validate_skill_config(&config);
+        assert!(err.is_err(), "invalid label string should be rejected");
+    }
+
+    #[test]
+    fn test_find_local_skills_skips_symlinks() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+
+        // Create a real skill directory.
+        let real_dir = tmp.path().join("real-skill");
+        std::fs::create_dir(&real_dir).expect("mkdir");
+        std::fs::write(
+            real_dir.join("skill.toml"),
+            r#"
+name = "real-skill"
+description = "A real skill"
+label = "public"
+
+[server]
+command = "python3"
+"#,
+        )
+        .expect("write");
+
+        // Create a symlink to the real skill — should be skipped.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_dir, tmp.path().join("symlink-skill"))
+                .expect("symlink");
+        }
+
+        let skills = find_local_skills(tmp.path().to_str().expect("path"));
+        // Only the real directory should be found, not the symlink.
+        assert_eq!(skills.len(), 1, "symlinked dirs should be skipped");
+        assert_eq!(skills[0].0.name, "real-skill");
     }
 
     #[test]

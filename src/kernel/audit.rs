@@ -33,6 +33,8 @@ pub enum AuditEventType {
     SystemStartup,
     /// System shutdown (spec 9, feature-persistence-recovery).
     SystemShutdown,
+    /// A local skill was loaded at startup (feature-self-extending-skills, spec 14).
+    SkillLoaded,
 }
 
 /// A single structured audit log entry (spec 6.7).
@@ -142,6 +144,24 @@ impl AuditLogger {
             "",
             serde_json::json!({
                 "pending_tasks": pending_tasks,
+            }),
+        )
+    }
+
+    /// Log local skill loaded at startup (feature-self-extending-skills, spec 14).
+    pub fn log_skill_loaded(
+        &self,
+        skill_name: &str,
+        skill_path: &str,
+        tool_count: usize,
+    ) -> anyhow::Result<()> {
+        self.write_entry(
+            AuditEventType::SkillLoaded,
+            "",
+            serde_json::json!({
+                "skill": skill_name,
+                "path": skill_path,
+                "tools_registered": tool_count,
             }),
         )
     }
