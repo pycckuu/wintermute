@@ -31,7 +31,10 @@ fn is_alnum_or_hyphen(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-'
 }
 
-/// Known credential patterns (session-amnesia F1, spec 8.5).
+/// Known credential patterns (session-amnesia F1).
+///
+/// Order matters: more specific prefixes must come before less specific ones
+/// (e.g. `sk-ant-` before `sk-`) so the first match wins correctly.
 const KNOWN_PATTERNS: &[CredentialPattern] = &[
     CredentialPattern {
         service: "notion",
@@ -53,6 +56,15 @@ const KNOWN_PATTERNS: &[CredentialPattern] = &[
         min_len: 40,
         vault_ref: "vault:github_api_token",
         validator: is_alnum,
+    },
+    // Anthropic MUST come before OpenAI — both start with `sk-` but
+    // Anthropic keys use the longer `sk-ant-` prefix (spec 11.2).
+    CredentialPattern {
+        service: "anthropic",
+        prefix: "sk-ant-",
+        min_len: 50,
+        vault_ref: "vault:anthropic_api_key",
+        validator: is_alnum_or_hyphen,
     },
     CredentialPattern {
         service: "openai",
@@ -77,9 +89,9 @@ pub fn detect_credential(text: &str) -> Option<(&'static str, &'static str)> {
     for pattern in KNOWN_PATTERNS {
         if trimmed.len() >= pattern.min_len
             && trimmed.starts_with(pattern.prefix)
-            && trimmed[pattern.prefix.len()..]
-                .chars()
-                .all(pattern.validator)
+            && trimmed
+                .get(pattern.prefix.len()..)
+                .is_some_and(|suffix| suffix.chars().all(pattern.validator))
         {
             return Some((pattern.service, pattern.vault_ref));
         }
@@ -131,6 +143,28 @@ mod tests {
         assert!(result.is_some(), "should detect openai credential");
         let (service, _) = result.expect("checked");
         assert_eq!(service, "openai");
+    }
+
+    #[test]
+    fn test_detect_anthropic_credential() {
+        // sk-ant- prefix distinguishes Anthropic from OpenAI.
+        let token = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLM";
+        let result = detect_credential(token);
+        assert!(result.is_some(), "should detect anthropic credential");
+        let (service, vault_ref) = result.expect("checked");
+        assert_eq!(service, "anthropic");
+        assert_eq!(vault_ref, "vault:anthropic_api_key");
+    }
+
+    #[test]
+    fn test_anthropic_before_openai_priority() {
+        // An Anthropic key must NOT be detected as OpenAI.
+        let anthropic_key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLM";
+        let (service, _) = detect_credential(anthropic_key).expect("should match");
+        assert_eq!(
+            service, "anthropic",
+            "sk-ant- should match anthropic, not openai"
+        );
     }
 
     #[test]

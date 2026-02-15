@@ -16,7 +16,7 @@
 - [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
 - [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
 - [x] Feature: Memory System (378 tests — 349 unit + 7 integration + 22 regression)
-- [x] Fix: Session Amnesia F3+F1 (389 tests — 360 unit + 7 integration + 22 regression)
+- [x] Fix: Session Amnesia F3+F1 (392 tests — 363 unit + 7 integration + 22 regression)
 
 ## Fix: Session Amnesia (F1, F3)
 

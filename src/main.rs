@@ -253,7 +253,8 @@ async fn run_telegram_loop(
                             .to_string();
 
                         // Cold credential detection (session-amnesia F1).
-                        // Must run BEFORE pipeline to prevent tokens reaching the Synthesizer.
+                        // CRITICAL: Must run BEFORE pipeline entry to prevent raw
+                        // tokens from reaching the Synthesizer via fast path.
                         // Only check owner messages — third parties should not be storing creds.
                         if matches!(event.source.principal, pfar::types::Principal::Owner) {
                             if let Some(raw_text) = &event.payload.text {
@@ -261,20 +262,34 @@ async fn run_telegram_loop(
                                     pfar::kernel::credential::detect_credential(raw_text)
                                 {
                                     info!(service, "cold credential detected, storing in vault");
-                                    if let Err(e) = vault.store_secret(
+                                    // Notify owner — DO NOT echo the token (Invariant B).
+                                    let notify_text = match vault.store_secret(
                                         vault_ref,
                                         pfar::kernel::vault::SecretValue::new(raw_text.trim()),
                                     ).await {
-                                        warn!(error = %e, "failed to store credential");
-                                    }
-                                    // Notify owner — DO NOT echo the token (Invariant B).
+                                        Ok(()) => {
+                                            // Audit log: credential stored (spec 6.7).
+                                            if let Err(e) = audit.log_admin_config_change(
+                                                service, "credential_stored",
+                                            ) {
+                                                warn!(error = %e, "failed to audit credential storage");
+                                            }
+                                            format!(
+                                                "{service} credential detected and stored securely. \
+                                                 Use 'connect {service}' to activate."
+                                            )
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, service, "credential storage failed");
+                                            format!(
+                                                "Failed to store {service} credential. Please try again."
+                                            )
+                                        }
+                                    };
                                     let _ = kernel_tx
                                         .send(KernelToAdapter::SendMessage {
                                             chat_id,
-                                            text: format!(
-                                                "{service} credential detected and stored securely. \
-                                                 Use 'connect {service}' to activate."
-                                            ),
+                                            text: notify_text,
                                         })
                                         .await;
                                     continue; // Skip pipeline entirely.

@@ -33,6 +33,8 @@ pub enum AuditEventType {
     SystemStartup,
     /// System shutdown (spec 9, feature-persistence-recovery).
     SystemShutdown,
+    /// Admin configuration change (spec 6.7, session-amnesia F1).
+    AdminConfigChange,
 }
 
 /// A single structured audit log entry (spec 6.7).
@@ -142,6 +144,18 @@ impl AuditLogger {
             "",
             serde_json::json!({
                 "pending_tasks": pending_tasks,
+            }),
+        )
+    }
+
+    /// Log admin configuration change (spec 6.7, session-amnesia F1).
+    pub fn log_admin_config_change(&self, service: &str, action: &str) -> anyhow::Result<()> {
+        self.write_entry(
+            AuditEventType::AdminConfigChange,
+            "",
+            serde_json::json!({
+                "service": service,
+                "action": action,
             }),
         )
     }

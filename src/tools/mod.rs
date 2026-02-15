@@ -648,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_capabilities_summary_respects_denied() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::email_tool()));
+
+        let allowed = vec!["*".to_owned()];
+        let denied = vec!["email.read".to_owned()];
+        let summary = registry.tool_capabilities_summary(&allowed, &denied);
+
+        assert_eq!(summary, "email (list)", "denied actions should be excluded");
+    }
+
+    #[test]
     fn test_is_action_allowed_exact() {
         let allowed = vec!["email.list".to_owned()];
         assert!(is_action_allowed("email.list", &allowed));
