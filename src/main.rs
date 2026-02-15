@@ -27,6 +27,7 @@ use pfar::kernel::pipeline::Pipeline;
 use pfar::kernel::policy::PolicyEngine;
 use pfar::kernel::router::EventRouter;
 use pfar::kernel::session::SessionStore;
+use pfar::kernel::sid::build_sid;
 use pfar::kernel::template::{InferenceConfig, TaskTemplate, TemplateRegistry};
 use pfar::kernel::vault::InMemoryVault;
 use pfar::tools::admin::AdminTool;
@@ -121,6 +122,10 @@ async fn main() -> Result<()> {
     // Build egress validator (spec 10.8).
     let egress = EgressValidator::new(Arc::clone(&policy), Arc::clone(&audit));
 
+    // Build System Identity Document — shared, refreshable (pfar-system-identity-document.md).
+    let sid = Arc::new(RwLock::new(String::new()));
+    rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
+
     // Build pipeline orchestrator (spec 7).
     let pipeline = Pipeline::new(
         Arc::clone(&policy),
@@ -131,6 +136,7 @@ async fn main() -> Result<()> {
         Arc::clone(&tools),
         Arc::clone(&audit),
         Some(Arc::clone(&journal)),
+        Arc::clone(&sid),
     );
 
     // Build event router (spec 6.1).
@@ -153,6 +159,8 @@ async fn main() -> Result<()> {
             Arc::clone(&journal),
             Arc::clone(&vault),
             Arc::clone(&mcp_manager),
+            Arc::clone(&tools),
+            Arc::clone(&sid),
         )
         .await
     } else {
@@ -181,6 +189,8 @@ async fn run_telegram_loop(
     journal: Arc<TaskJournal>,
     vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     mcp_manager: Arc<McpServerManager>,
+    tools: Arc<ToolRegistry>,
+    sid: Arc<RwLock<String>>,
 ) -> Result<()> {
     use pfar::kernel::flow_manager::parse_connect_command;
     let owner_chat_id = config.adapter.telegram.owner_id.clone();
@@ -283,6 +293,9 @@ async fn run_telegram_loop(
                                         })
                                         .await;
                                 }
+                                // Rebuild SID after flow state changes (MCP connect/disconnect,
+                                // credential stored) — pfar-system-identity-document.md §4.
+                                rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
                                 let _ = kernel_tx
                                     .send(KernelToAdapter::SendMessage {
                                         chat_id,
@@ -299,6 +312,9 @@ async fn run_telegram_loop(
                         let raw_text = event.payload.text.as_deref().unwrap_or("");
                         if let Some(service) = parse_connect_command(raw_text) {
                             if let Some(response) = flow_manager.start_setup(&service, &event.source.principal).await {
+                                // Rebuild SID — may have auto-connected with existing credential
+                                // (pfar-system-identity-document.md §4).
+                                rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
                                 let _ = kernel_tx
                                     .send(KernelToAdapter::SendMessage {
                                         chat_id,
@@ -547,6 +563,32 @@ fn whatsapp_scheduling_template() -> TaskTemplate {
         },
         require_approval_for_writes: false,
     }
+}
+
+/// Rebuild the System Identity Document from current state (pfar-system-identity-document.md §3-4).
+///
+/// Reads persona from journal, tool summaries from registry, and MCP server names
+/// from the manager. Writes the rendered SID into the shared `Arc<RwLock<String>>`.
+/// Called at startup and after MCP connect/disconnect or persona changes.
+async fn rebuild_sid(
+    sid: &Arc<RwLock<String>>,
+    journal: &Arc<TaskJournal>,
+    tools: &Arc<ToolRegistry>,
+    mcp_manager: &Arc<McpServerManager>,
+) {
+    let persona = journal.get_persona().unwrap_or(None);
+    // Filter out the __pending__ sentinel — not a real persona.
+    let persona = persona.filter(|p| p != "__pending__");
+
+    let tool_summaries = tools.tool_summaries();
+    let mcp_server_names = mcp_manager.list_servers().await;
+
+    let document = build_sid(persona, &tool_summaries, &mcp_server_names);
+    let rendered = document.render();
+    info!(len = rendered.len(), "SID rebuilt");
+
+    let mut lock = sid.write().await;
+    *lock = rendered;
 }
 
 /// Create tool registry with Phase 2 + Phase 3 tools (spec 6.11, 8.2, 12.2).

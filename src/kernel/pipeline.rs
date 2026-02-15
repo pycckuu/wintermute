@@ -101,6 +101,9 @@ pub struct Pipeline {
     audit: Arc<AuditLogger>,
     /// Optional task journal for crash recovery (feature spec: persistence-recovery).
     journal: Option<Arc<TaskJournal>>,
+    /// System Identity Document -- shared, refreshable from main event loop
+    /// (pfar-system-identity-document.md).
+    sid: Arc<RwLock<String>>,
 }
 
 impl Pipeline {
@@ -115,6 +118,7 @@ impl Pipeline {
         tools: Arc<ToolRegistry>,
         audit: Arc<AuditLogger>,
         journal: Option<Arc<TaskJournal>>,
+        sid: Arc<RwLock<String>>,
     ) -> Self {
         Self {
             policy,
@@ -125,6 +129,7 @@ impl Pipeline {
             tools,
             audit,
             journal,
+            sid,
         }
     }
 
@@ -247,6 +252,7 @@ impl Pipeline {
         metadata: &ExtractedMetadata,
         labeled_event: &LabeledEvent,
         memory_entries: Vec<String>,
+        sid: Option<String>,
     ) -> Result<
         (
             Vec<crate::kernel::executor::StepExecutionResult>,
@@ -260,7 +266,7 @@ impl Pipeline {
         info!(task_id = %task.task_id, pipeline_path = "full", "phase 1: planning");
 
         let planner_ctx = self
-            .build_planner_context(task, template, metadata, memory_entries)
+            .build_planner_context(task, template, metadata, memory_entries, sid)
             .await;
         let prompt = Planner::compose_prompt(&planner_ctx);
 
@@ -329,6 +335,17 @@ impl Pipeline {
         task: &mut Task,
         template: &TaskTemplate,
     ) -> Result<PipelineOutput, PipelineError> {
+        // Read System Identity Document once per request
+        // (pfar-system-identity-document.md).
+        let sid_text = {
+            let lock = self.sid.read().await;
+            if lock.is_empty() {
+                None
+            } else {
+                Some(lock.clone())
+            }
+        };
+
         // === PHASE 0: EXTRACT (spec 7, Phase 0) ===
         task.state = TaskState::Extracting;
         info!(task_id = %task.task_id, "phase 0: extracting metadata");
@@ -407,6 +424,7 @@ impl Pipeline {
                 &metadata,
                 &labeled_event,
                 memory_entries.clone(),
+                sid_text.clone(),
             )
             .await?
         } else {
@@ -458,6 +476,7 @@ impl Pipeline {
             is_onboarding,
             is_persona_just_configured,
             memory_entries,
+            sid: sid_text.clone(),
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);
@@ -528,6 +547,7 @@ impl Pipeline {
         template: &TaskTemplate,
         metadata: &ExtractedMetadata,
         memory_entries: Vec<String>,
+        sid: Option<String>,
     ) -> PlannerContext {
         let (working_memory, conversation) = self.read_session_data(&task.principal).await;
 
@@ -548,6 +568,7 @@ impl Pipeline {
             available_tools,
             principal_class,
             memory_entries,
+            sid,
         }
     }
 
@@ -932,6 +953,7 @@ mod tests {
             tools,
             audit,
             None, // No journal for basic pipeline tests.
+            Arc::new(RwLock::new(String::new())),
         );
 
         (pipeline, sessions)
@@ -977,6 +999,7 @@ mod tests {
             tools,
             audit,
             Some(journal.clone()),
+            Arc::new(RwLock::new(String::new())),
         );
 
         (pipeline, sessions, journal)
@@ -1345,7 +1368,15 @@ mod tests {
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
         let pipeline = Pipeline::new(
-            policy, inference, executor, sessions, egress, tools, audit, None,
+            policy,
+            inference,
+            executor,
+            sessions,
+            egress,
+            tools,
+            audit,
+            None,
+            Arc::new(RwLock::new(String::new())),
         );
 
         let template = make_template();
@@ -1410,7 +1441,7 @@ mod tests {
         };
 
         let ctx = pipeline
-            .build_planner_context(&task, &template, &metadata, vec![])
+            .build_planner_context(&task, &template, &metadata, vec![], None)
             .await;
 
         // The planner_task_description should be set.
@@ -1542,6 +1573,7 @@ mod tests {
             tools,
             audit,
             Some(journal),
+            Arc::new(RwLock::new(String::new())),
         );
 
         let event = make_labeled_event("Hey!", Principal::Owner);

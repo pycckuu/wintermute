@@ -24,6 +24,7 @@
 - [x] Fix: Admin plan auto-connects when credential already exists in vault (434 tests — 405 unit + 7 integration + 22 regression)
 - [x] Feature: KernelFlowManager — Integration Setup State Machine (435 tests — 406 unit + 7 integration + 22 regression)
 - [x] Fix: Known MCP server package names — Notion, Fetch (435 tests)
+- [x] Feature: System Identity Document (462 tests — 433 unit + 7 integration + 19 regression + 3 doc)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -173,6 +174,21 @@ Spec: `docs/pfar-feature-dynamic-integrations-final.md` (KernelFlowManager)
 - [x] KFM.2 Pipeline cleanup: remove vault field, build_admin_plan, check_service_credential, CredentialPromptInfo
 - [x] KFM.3 main.rs: wire FlowManager, parse_connect_command, replace CredentialGate
 - [x] KFM.4 Quality assurance (fmt, clippy, all tests green — 435 tests)
+
+## Feature: System Identity Document (SID)
+
+Goal: Dynamically assembled runtime context injected into every LLM prompt.
+Spec: `docs/pfar-system-identity-document.md`
+
+- [x] SID.1 ToolRegistry::tool_summaries() method (1 test)
+- [x] SID.2 kernel/sid.rs module: build_sid(), render(), IntegrationSummary, ToolSummary (6 tests)
+- [x] SID.3 kernel/mod.rs: add pub mod sid
+- [x] SID.4 Planner: add sid field to PlannerContext, prepend SID in compose_prompt (2 tests)
+- [x] SID.5 Synthesizer: add sid field to SynthesizerContext, prepend SID, persona dedup (1 test)
+- [x] SID.6 Pipeline: add sid field, wire through run/execute_full_pipeline/build_planner_context
+- [x] SID.7 main.rs: rebuild_sid() at startup and after MCP state changes
+- [x] SID.8 Update existing tests for new signatures (~30 test contexts updated)
+- [x] SID.9 Quality assurance (fmt, clippy, all tests green — 462 tests)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

@@ -15,6 +15,7 @@ pub mod planner;
 pub mod policy;
 pub mod router;
 pub mod session;
+pub mod sid;
 pub mod synthesizer;
 pub mod template;
 pub mod vault;

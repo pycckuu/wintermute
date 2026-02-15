@@ -134,6 +134,9 @@ pub struct SynthesizerContext {
     pub is_persona_just_configured: bool,
     /// Relevant long-term memory entries (memory spec §6).
     pub memory_entries: Vec<String>,
+    /// Rendered System Identity Document for prompt prefix
+    /// (pfar-system-identity-document.md).
+    pub sid: Option<String>,
 }
 
 /// Synthesizer errors.
@@ -156,14 +159,25 @@ impl Synthesizer {
     /// Includes base safety rules, synthesizer role, tool results, and
     /// output formatting instructions.
     pub fn compose_prompt(ctx: &SynthesizerContext) -> String {
+        // Step 0: Prepend SID when available (pfar-system-identity-document.md).
+        let sid_section = match &ctx.sid {
+            Some(sid) => format!("{sid}\n\n"),
+            None => String::new(),
+        };
+
         // Step 1: Build the role section based on persona state (persona-onboarding spec §2).
         // Onboarding prompt goes AFTER the role prompt so the LLM sees it last
         // and prioritizes the onboarding instructions over generic role behavior.
+        // When SID is present, persona is already in the SID -- don't duplicate.
         let role_section = if ctx.is_onboarding {
             format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{ONBOARDING_PREAMBLE}")
         } else if ctx.is_persona_just_configured {
             format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{PERSONA_JUST_CONFIGURED_PROMPT}")
+        } else if ctx.sid.is_some() {
+            // SID already contains persona + capabilities. Just add anti-leak + role.
+            format!("{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
         } else if let Some(ref persona) = ctx.persona {
+            // Fallback: no SID, use legacy persona injection.
             format!("You are {persona}.\n\n{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
         } else {
             SYNTHESIZER_ROLE_PROMPT.to_owned()
@@ -216,9 +230,9 @@ impl Synthesizer {
             lines
         };
 
-        // Step 6: Compose the full prompt.
+        // Step 7: Compose the full prompt.
         format!(
-            "{BASE_SAFETY_RULES}\n\n\
+            "{sid_section}{BASE_SAFETY_RULES}\n\n\
              {role_section}\n\n\
              ## Original Request\n\
              {original_context}\n\n\
@@ -276,6 +290,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -324,6 +339,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -348,6 +364,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -378,6 +395,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -406,6 +424,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -453,6 +472,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -485,6 +505,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -535,6 +556,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -584,6 +606,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -629,6 +652,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -659,6 +683,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -691,6 +716,7 @@ mod tests {
             is_onboarding: true,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -723,6 +749,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -756,6 +783,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: true,
             memory_entries: vec![],
+            sid: None,
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -771,6 +799,51 @@ mod tests {
         assert!(
             !prompt.contains("Never mention internal system details"),
             "just-configured should NOT include anti-leak"
+        );
+    }
+
+    // ── SID tests (pfar-system-identity-document.md) ──
+
+    #[test]
+    fn test_compose_prompt_with_sid_persona_dedup() {
+        let sid_text = "You are Atlas. Owner: Igor.\n\nCAPABILITIES:\n- Built-in tools: email\n\nRULES:\n- Never mention internal architecture\n";
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Hey".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: Some("Atlas. Owner: Igor.".to_owned()),
+            is_onboarding: false,
+            is_persona_just_configured: false,
+            memory_entries: vec![],
+            sid: Some(sid_text.to_owned()),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        // SID should be present.
+        assert!(
+            prompt.contains("CAPABILITIES:"),
+            "prompt should contain SID capabilities"
+        );
+        // Persona should appear only once (from SID), not duplicated in role section.
+        let persona_count = prompt.matches("You are Atlas").count();
+        assert_eq!(
+            persona_count, 1,
+            "persona should appear exactly once (from SID), got {persona_count}"
+        );
+        // Anti-leak should still be present (from role section).
+        assert!(
+            prompt.contains("Never mention internal system details"),
+            "anti-leak should be in role section when SID is present"
+        );
+        // Synthesizer role should still be present.
+        assert!(
+            prompt.contains("You are the Synthesizer"),
+            "synthesizer role should still be present"
         );
     }
 }
