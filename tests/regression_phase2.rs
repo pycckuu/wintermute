@@ -273,7 +273,7 @@ fn make_pipeline(plan_json: &str, synth_text: &str) -> (Pipeline, Arc<RwLock<Ses
     let tools = Arc::new(registry);
 
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-    let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+    let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
 
     let sessions = Arc::new(RwLock::new(SessionStore::new()));
     let egress = EgressValidator::new(policy.clone(), audit.clone());
@@ -748,7 +748,7 @@ async fn regression_07_pipeline_egress_denied() {
     registry.register(Arc::new(MockEmailTool));
     let tools = Arc::new(registry);
     let vault: Arc<dyn pfar::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-    let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+    let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
     let sessions = Arc::new(RwLock::new(SessionStore::new()));
     let egress = EgressValidator::new(policy.clone(), audit.clone());
 

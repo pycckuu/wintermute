@@ -287,24 +287,21 @@ impl AdminTool {
 
         // Check if this is a known server.
         let config = if let Some(known) = find_known_server(name) {
-            // For known servers, the command/args should be provided or defaulted.
+            // Use known server's command/args, allow override from args.
             let command = args
                 .get("command")
                 .and_then(|v| v.as_str())
-                .unwrap_or("npx")
+                .unwrap_or(known.command)
                 .to_owned();
-            let default_args = if command == "npx" {
-                vec!["-y".to_owned(), known.package.to_owned()]
-            } else {
-                args.get("args")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_owned()))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
+            let default_args = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                        .collect()
+                })
+                .unwrap_or_else(|| known.args.iter().map(|a| (*a).to_owned()).collect());
 
             let mut auth = std::collections::HashMap::new();
             for (env_name, _instructions) in known.credentials {

@@ -27,11 +27,19 @@ impl Extractor for MessageIntentExtractor {
         let entities = extract_entities(text);
         let dates = extract_dates(text);
 
+        // Extract admin context (service name, action) for admin_config
+        // intent so the pipeline can generate a deterministic plan (spec 8.1).
+        let extra = if intent.as_deref() == Some("admin_config") {
+            detect_admin_context(&lower)
+        } else {
+            serde_json::Value::Null
+        };
+
         ExtractedMetadata {
             intent,
             entities,
             dates_mentioned: dates,
-            extra: serde_json::Value::Null,
+            extra,
         }
     }
 }
@@ -40,8 +48,10 @@ impl Extractor for MessageIntentExtractor {
 ///
 /// Priority order — first match wins:
 /// 1. email_reply  2. email_send  3. email_check
-/// 4. scheduling   5. github_check  6. web_browse
-/// 7. admin_config  8. memory_save  9. None
+/// 4. admin_setup (setup/connect/add/integrate/enable keywords)
+/// 5. scheduling   6. github_check  7. web_browse
+/// 8. admin_config (general config/integration keywords)
+/// 9. memory_save  10. None
 fn detect_intent(lower: &str) -> Option<String> {
     // 1. "reply" + email-related keyword
     if lower.contains("reply") && has_email_keyword(lower) {
@@ -58,7 +68,13 @@ fn detect_intent(lower: &str) -> Option<String> {
         return Some("email_check".to_owned());
     }
 
-    // 4. Scheduling / calendar
+    // 4. Admin setup/connect — higher priority than tool-specific checks,
+    // because "connect github" is an admin action, not a github check.
+    if has_admin_setup_keyword(lower) {
+        return Some("admin_config".to_owned());
+    }
+
+    // 5. Scheduling / calendar
     if lower.contains("schedule")
         || lower.contains("meeting")
         || lower.contains("free busy")
@@ -68,27 +84,22 @@ fn detect_intent(lower: &str) -> Option<String> {
         return Some("scheduling".to_owned());
     }
 
-    // 5. GitHub
+    // 6. GitHub
     if lower.contains("github") || lower.contains("pull request") || lower.contains("pr #") {
         return Some("github_check".to_owned());
     }
 
-    // 6. Web browse
+    // 7. Web browse
     if has_browse_keyword(lower) && has_web_keyword(lower) {
         return Some("web_browse".to_owned());
     }
 
-    // 7. Admin / config
-    if lower.contains("config")
-        || lower.contains("setup")
-        || lower.contains("integrate")
-        || lower.contains("integration")
-        || lower.contains("connect")
-    {
+    // 8. General admin / config keywords
+    if lower.contains("config") || lower.contains("integration") {
         return Some("admin_config".to_owned());
     }
 
-    // 8. Memory save (memory spec §4)
+    // 9. Memory save (memory spec §4)
     if lower.contains("remember")
         || lower.contains("don't forget")
         || lower.contains("keep in mind")
@@ -100,6 +111,19 @@ fn detect_intent(lower: &str) -> Option<String> {
 
     // 9. No specific intent detected
     None
+}
+
+/// Check if text contains an admin setup keyword (spec 8.1).
+///
+/// These keywords indicate an admin configuration action and take priority
+/// over tool-specific intent detection (e.g., "connect github" is admin,
+/// not a github check).
+fn has_admin_setup_keyword(lower: &str) -> bool {
+    lower.contains("setup")
+        || lower.contains("connect")
+        || lower.contains("integrate")
+        || lower.contains("add ")
+        || lower.contains("enable ")
 }
 
 /// Check if text contains an email-related keyword.
@@ -197,6 +221,62 @@ fn extract_capitalized_word(text: &str) -> Option<String> {
         Some(word)
     } else {
         None
+    }
+}
+
+/// Detect admin sub-intent and service name for admin_config messages (spec 8.1).
+///
+/// Extracts the admin action (setup, disconnect) and target service name
+/// from the message so the pipeline can generate a deterministic plan
+/// instead of relying on the LLM planner.
+fn detect_admin_context(lower: &str) -> serde_json::Value {
+    // Setup keywords — trigger credential acquisition flow.
+    let setup_keywords: &[&str] = &["setup ", "connect ", "add ", "integrate ", "enable "];
+
+    for kw in setup_keywords {
+        if let Some(pos) = lower.find(kw) {
+            let after = &lower[pos.saturating_add(kw.len())..];
+            if let Some(service) = extract_service_word(after) {
+                return serde_json::json!({
+                    "admin_action": "setup",
+                    "admin_service": service,
+                });
+            }
+        }
+    }
+
+    serde_json::Value::Null
+}
+
+/// Extract a service name from text following an admin action keyword.
+///
+/// Skips articles ("the", "a", "an", "my") and generic words
+/// ("integration", "service", "tool") to find the actual service name.
+fn extract_service_word(text: &str) -> Option<String> {
+    let mut remaining = text.trim();
+
+    // Skip articles and possessives.
+    for skip in &["the ", "a ", "an ", "my "] {
+        if let Some(after) = remaining.strip_prefix(skip) {
+            remaining = after.trim();
+        }
+    }
+
+    // Take the first alphanumeric word.
+    let word: String = remaining
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+
+    if word.is_empty() {
+        return None;
+    }
+
+    // Filter out generic non-service words.
+    match word.as_str() {
+        "integration" | "integrations" | "service" | "services" | "tool" | "tools"
+        | "connection" => None,
+        _ => Some(word),
     }
 }
 
@@ -487,5 +567,67 @@ mod tests {
         let extractor = MessageIntentExtractor;
         let meta = extractor.extract("note that the API key needs rotating next month");
         assert_eq!(meta.intent.as_deref(), Some("memory_save"));
+    }
+
+    // -- admin context extraction --
+
+    #[test]
+    fn test_admin_context_setup_notion() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("Setup notion");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert_eq!(meta.extra["admin_action"], "setup");
+        assert_eq!(meta.extra["admin_service"], "notion");
+    }
+
+    #[test]
+    fn test_admin_context_connect_github() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("connect github");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert_eq!(meta.extra["admin_action"], "setup");
+        assert_eq!(meta.extra["admin_service"], "github");
+    }
+
+    #[test]
+    fn test_admin_context_add_with_article() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("let's add the Notion integration");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert_eq!(meta.extra["admin_action"], "setup");
+        assert_eq!(meta.extra["admin_service"], "notion");
+    }
+
+    #[test]
+    fn test_admin_context_integrate_slack() {
+        let extractor = MessageIntentExtractor;
+        let meta = extractor.extract("integrate slack");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert_eq!(meta.extra["admin_action"], "setup");
+        assert_eq!(meta.extra["admin_service"], "slack");
+    }
+
+    #[test]
+    fn test_admin_context_no_service_name() {
+        let extractor = MessageIntentExtractor;
+        // "config" triggers admin_config but has no setup keyword → no admin context.
+        let meta = extractor.extract("show config");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert!(
+            meta.extra.is_null(),
+            "no admin context without setup keyword"
+        );
+    }
+
+    #[test]
+    fn test_admin_context_generic_word_skipped() {
+        let extractor = MessageIntentExtractor;
+        // "setup integration" — "integration" is generic, not a service name.
+        let meta = extractor.extract("setup integration");
+        assert_eq!(meta.intent.as_deref(), Some("admin_config"));
+        assert!(
+            meta.extra.is_null() || meta.extra["admin_service"].is_null(),
+            "generic word 'integration' should not be treated as service name"
+        );
     }
 }

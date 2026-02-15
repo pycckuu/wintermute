@@ -62,16 +62,18 @@ pub struct McpServerCommand {
 pub struct KnownServer {
     /// Server name (e.g., "notion").
     pub name: &'static str,
-    /// npm package name (e.g., "@modelcontextprotocol/server-notion").
-    pub package: &'static str,
+    /// Command to spawn the server (e.g., "npx", "uvx").
+    pub command: &'static str,
+    /// Arguments to pass to the command (e.g., &["-y", "@notionhq/notion-mcp-server"]).
+    pub args: &'static [&'static str],
     /// Network domains the server needs.
     pub domains: &'static [&'static str],
     /// Required credentials: (env var name, setup instructions).
     pub credentials: &'static [(&'static str, &'static str)],
     /// Default security label.
     pub default_label: &'static str,
-    /// Expected token prefix for credential gate classification
-    /// (feature-credential-acquisition, spec 8.5).
+    /// Expected token prefix for credential classification
+    /// (feature-dynamic-integrations, spec 8.5).
     pub expected_prefix: Option<&'static str>,
 }
 
@@ -82,7 +84,8 @@ pub struct KnownServer {
 pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
     KnownServer {
         name: "notion",
-        package: "@modelcontextprotocol/server-notion",
+        command: "npx",
+        args: &["-y", "@notionhq/notion-mcp-server"],
         domains: &["api.notion.com"],
         credentials: &[(
             "NOTION_TOKEN",
@@ -93,7 +96,8 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
     },
     KnownServer {
         name: "github",
-        package: "@modelcontextprotocol/server-github",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-github"],
         domains: &["api.github.com"],
         credentials: &[(
             "GITHUB_PERSONAL_ACCESS_TOKEN",
@@ -104,7 +108,8 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
     },
     KnownServer {
         name: "slack",
-        package: "@modelcontextprotocol/server-slack",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-slack"],
         domains: &["slack.com", "api.slack.com"],
         credentials: &[(
             "SLACK_BOT_TOKEN",
@@ -115,7 +120,8 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
     },
     KnownServer {
         name: "filesystem",
-        package: "@modelcontextprotocol/server-filesystem",
+        command: "npx",
+        args: &["-y", "@modelcontextprotocol/server-filesystem"],
         domains: &[],
         credentials: &[],
         default_label: "internal",
@@ -123,7 +129,8 @@ pub const KNOWN_MCP_SERVERS: &[KnownServer] = &[
     },
     KnownServer {
         name: "fetch",
-        package: "@modelcontextprotocol/server-fetch",
+        command: "uvx",
+        args: &["mcp-server-fetch"],
         domains: &[], // configured per-instance
         credentials: &[],
         default_label: "public",
@@ -250,7 +257,8 @@ mod tests {
         let notion = find_known_server("notion");
         assert!(notion.is_some());
         let notion = notion.expect("already checked");
-        assert_eq!(notion.package, "@modelcontextprotocol/server-notion");
+        assert_eq!(notion.command, "npx");
+        assert_eq!(notion.args, &["-y", "@notionhq/notion-mcp-server"]);
         assert_eq!(notion.domains, &["api.notion.com"]);
         assert_eq!(notion.credentials.len(), 1);
         assert_eq!(notion.credentials[0].0, "NOTION_TOKEN");
