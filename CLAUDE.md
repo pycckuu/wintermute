@@ -46,3 +46,13 @@ Full pre-push (includes cargo-deny and typos): `.githooks/pre-push`
 - Integration tests: `tests/` directory at crate root
 - Use `#[tokio::test]` for async tests
 - 17 regression tests defined in spec section 17
+
+## Available Skills (PFAR)
+
+Use these slash commands for PFAR workflows:
+- `/plan-pfar-feature` — plan with Skeptic Review + privacy invariant gate
+- `/implement-pfar-task` — spec-driven PFAR dev lifecycle
+- `/implement-kernel-module` — kernel sub-module implementation
+- `/review-pfar-pr` — 4-agent local PFAR code review
+- `/quality-check` — fmt + clippy + full test suite
+- `/update-claude-config` — update CLAUDE.md/PRD after features
