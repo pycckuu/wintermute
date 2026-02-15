@@ -173,9 +173,12 @@ impl Synthesizer {
             format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{ONBOARDING_PREAMBLE}")
         } else if ctx.is_persona_just_configured {
             format!("{SYNTHESIZER_ROLE_PROMPT}\n\n{PERSONA_JUST_CONFIGURED_PROMPT}")
-        } else if ctx.sid.is_some() {
+        } else if ctx.sid.is_some() && ctx.persona.is_some() {
             // SID already contains persona + capabilities. Just add anti-leak + role.
             format!("{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
+        } else if ctx.sid.is_some() {
+            // SID present but no persona configured yet — still use SID for capabilities.
+            SYNTHESIZER_ROLE_PROMPT.to_owned()
         } else if let Some(ref persona) = ctx.persona {
             // Fallback: no SID, use legacy persona injection.
             format!("You are {persona}.\n\n{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
@@ -839,6 +842,46 @@ mod tests {
         assert!(
             prompt.contains("Never mention internal system details"),
             "anti-leak should be in role section when SID is present"
+        );
+        // Synthesizer role should still be present.
+        assert!(
+            prompt.contains("You are the Synthesizer"),
+            "synthesizer role should still be present"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_with_sid_no_persona() {
+        // SID present but no persona configured — should use SID for capabilities
+        // but not include anti-leak (no persona to protect).
+        let sid_text =
+            "\nCAPABILITIES:\n- Built-in tools: email\n\nRULES:\n- Never mention internal architecture\n";
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "Hey".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
+            is_persona_just_configured: false,
+            memory_entries: vec![],
+            sid: Some(sid_text.to_owned()),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        // SID should be present.
+        assert!(
+            prompt.contains("CAPABILITIES:"),
+            "prompt should contain SID capabilities"
+        );
+        // Should NOT include anti-leak (no persona to protect).
+        assert!(
+            !prompt.contains("Never mention internal system details"),
+            "no anti-leak when SID present but no persona"
         );
         // Synthesizer role should still be present.
         assert!(
