@@ -18,7 +18,7 @@ use crate::extractors::message::MessageIntentExtractor;
 use crate::extractors::{ExtractedMetadata, Extractor};
 use crate::kernel::audit::AuditLogger;
 use crate::kernel::egress::EgressValidator;
-use crate::kernel::executor::{ExecutorError, PlanExecutor, StepExecutionResult};
+use crate::kernel::executor::{ExecutorError, PlanExecutor};
 use crate::kernel::inference::InferenceProxy;
 use crate::kernel::journal::{SaveWorkingMemoryParams, TaskJournal};
 use crate::kernel::planner::{strip_reasoning_tags, Planner, PlannerContext};
@@ -74,18 +74,6 @@ pub enum PipelineError {
     ApprovalRequired(String),
 }
 
-/// Info about a credential prompt emitted during Phase 2, used by the
-/// credential gate to register a pending intercept (feature-credential-acquisition, spec 8.5).
-#[derive(Debug, Clone)]
-pub struct CredentialPromptInfo {
-    /// Service name (e.g., "notion").
-    pub service: String,
-    /// Vault reference key (e.g., "vault:notion_notion_token").
-    pub vault_key: String,
-    /// Expected token prefix for classification (e.g., "ntn_").
-    pub expected_prefix: Option<String>,
-}
-
 /// Output from a completed pipeline run (spec 7).
 #[derive(Debug, Clone)]
 pub struct PipelineOutput {
@@ -95,9 +83,6 @@ pub struct PipelineOutput {
     pub output_sinks: Vec<String>,
     /// Highest security label of data involved.
     pub data_label: SecurityLabel,
-    /// Credential prompt info if `admin.prompt_credential` was executed
-    /// (feature-credential-acquisition, spec 8.5).
-    pub credential_prompt: Option<CredentialPromptInfo>,
 }
 
 /// The Plan-Then-Execute pipeline (spec 7).
@@ -430,9 +415,6 @@ impl Pipeline {
             (vec![], labeled_event.label, "fast")
         };
 
-        // === CREDENTIAL PROMPT DETECTION (feature-credential-acquisition, spec 8.5) ===
-        let credential_prompt = extract_credential_prompt(&exec_results);
-
         // === PHASE 3: SYNTHESIZE (spec 7, Phase 3) ===
         task.state = TaskState::Synthesizing;
         info!(task_id = %task.task_id, "phase 3: synthesizing response");
@@ -514,7 +496,6 @@ impl Pipeline {
             response_text,
             output_sinks: task.output_sinks.clone(),
             data_label,
-            credential_prompt,
         })
     }
 
@@ -655,31 +636,6 @@ impl Pipeline {
         });
         self.journal_write("trim_memory", |j| j.trim_working_memory(&principal_key, 10));
     }
-}
-
-/// Scan Phase 2 execution results for `admin.prompt_credential` output with
-/// `prompt_required: true` and extract credential info for the gate
-/// (feature-credential-acquisition, spec 8.5).
-fn extract_credential_prompt(results: &[StepExecutionResult]) -> Option<CredentialPromptInfo> {
-    for result in results {
-        if result.tool == "admin.prompt_credential" && result.success {
-            let data = &result.output;
-            if data.get("prompt_required").and_then(|v| v.as_bool()) == Some(true) {
-                let service = data.get("service").and_then(|v| v.as_str())?.to_owned();
-                let vault_key = data.get("ref_id").and_then(|v| v.as_str())?.to_owned();
-                let expected_prefix = data
-                    .get("expected_prefix")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_owned());
-                return Some(CredentialPromptInfo {
-                    service,
-                    vault_key,
-                    expected_prefix,
-                });
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -961,7 +917,8 @@ mod tests {
         let tools = Arc::new(registry);
 
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let executor =
+            PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
 
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
@@ -1003,7 +960,8 @@ mod tests {
         let tools = Arc::new(registry);
 
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let executor =
+            PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
 
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
@@ -1382,7 +1340,8 @@ mod tests {
         registry.register(Arc::new(MockEmailTool));
         let tools = Arc::new(registry);
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let executor =
+            PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
         let pipeline = Pipeline::new(
@@ -1563,7 +1522,8 @@ mod tests {
         registry.register(Arc::new(MockEmailTool));
         let tools = Arc::new(registry);
         let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
-        let executor = PlanExecutor::new(policy.clone(), tools.clone(), vault, audit.clone());
+        let executor =
+            PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
         let sessions = Arc::new(RwLock::new(SessionStore::new()));
         let egress = EgressValidator::new(policy.clone(), audit.clone());
         let journal = Arc::new(TaskJournal::open_in_memory().expect("test journal"));
@@ -1630,48 +1590,6 @@ mod tests {
             stored, PERSONA_PENDING,
             "short reply should NOT overwrite pending"
         );
-    }
-
-    // -- extract_credential_prompt --
-
-    #[test]
-    fn test_extract_credential_prompt_found() {
-        use crate::kernel::executor::StepExecutionResult;
-        let results = vec![StepExecutionResult {
-            step: 1,
-            tool: "admin.prompt_credential".to_owned(),
-            output: serde_json::json!({
-                "prompt_required": true,
-                "service": "notion",
-                "credential_type": "notion_token",
-                "instructions": "Go to notion.so/profile/integrations",
-                "ref_id": "vault:notion_notion_token",
-                "expected_prefix": "ntn_",
-            }),
-            label: SecurityLabel::Sensitive,
-            success: true,
-            error: None,
-        }];
-        let info = extract_credential_prompt(&results);
-        assert!(info.is_some(), "should detect credential prompt");
-        let info = info.expect("just checked");
-        assert_eq!(info.service, "notion");
-        assert_eq!(info.vault_key, "vault:notion_notion_token");
-        assert_eq!(info.expected_prefix.as_deref(), Some("ntn_"));
-    }
-
-    #[test]
-    fn test_extract_credential_prompt_absent() {
-        use crate::kernel::executor::StepExecutionResult;
-        let results = vec![StepExecutionResult {
-            step: 1,
-            tool: "email.list".to_owned(),
-            output: serde_json::json!({"emails": []}),
-            label: SecurityLabel::Sensitive,
-            success: true,
-            error: None,
-        }];
-        assert!(extract_credential_prompt(&results).is_none());
     }
 
     /// Non-owner message with no persona → default prompt, no onboarding.

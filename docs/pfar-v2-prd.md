@@ -20,6 +20,10 @@
 - [x] Fix: Admin tool descriptions for MCP integration discovery (401 tests — 372 unit + 7 integration + 22 regression)
 - [x] Fix: Admin tool label ceilings — Secret→Sensitive for non-secret actions (401 tests)
 - [x] Feature: Credential Acquisition — In-Chat Paste with Kernel Intercept (423 tests — 394 unit + 7 integration + 22 regression)
+- [x] Fix: Deterministic admin plan for setup flow — bypasses LLM planner for credential acquisition (433 tests — 404 unit + 7 integration + 22 regression)
+- [x] Fix: Admin plan auto-connects when credential already exists in vault (434 tests — 405 unit + 7 integration + 22 regression)
+- [x] Feature: KernelFlowManager — Integration Setup State Machine (435 tests — 406 unit + 7 integration + 22 regression)
+- [x] Fix: Known MCP server package names — Notion, Fetch (435 tests)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -145,19 +149,30 @@ Spec: `docs/pfar-feature-dynamic-integrations.md`
 - [x] MCP.8 SecurityLabel::FromStr + Display (5 tests)
 - [x] MCP.9 Quality assurance (fmt, clippy, all tests green)
 
-## Feature: Credential Acquisition (In-Chat Paste)
+## Feature: Credential Acquisition (In-Chat Paste) — SUPERSEDED by KernelFlowManager
 
 Goal: Intercept credential messages before the LLM pipeline (Invariant B).
 Spec: `docs/pfar-credential-acquisition.md` (Method 3 only)
+**Note**: CredentialGate and deterministic admin plan replaced by KernelFlowManager (see below).
 
-- [x] CG.1 Journal: pending_credential_prompts + pending_message_deletions tables (5 tests)
-- [x] CG.2 Telegram adapter: DeleteMessage variant + delete_message API call (1 test)
-- [x] CG.3 CredentialGate module: classify, intercept, looks_like_token (13 tests)
-- [x] CG.4 Pipeline: CredentialPromptInfo in PipelineOutput (2 tests)
-- [x] CG.5 KnownServer: expected_prefix field + prompt_credential output update
-- [x] CG.6 main.rs: wire gate into event loop + startup recovery
-- [x] CG.7 Fix store_credential label ceiling Secret→Sensitive
-- [x] CG.8 Quality assurance (fmt, clippy, all tests green)
+- [x] CG.1 Journal: pending_credential_prompts + pending_message_deletions tables (5 tests) — kept, used by FlowManager
+- [x] CG.2 Telegram adapter: DeleteMessage variant + delete_message API call (1 test) — kept
+- [x] ~~CG.3 CredentialGate module~~ — absorbed into KernelFlowManager
+- [x] ~~CG.4 Pipeline: CredentialPromptInfo in PipelineOutput~~ — removed, FlowManager bypasses pipeline
+- [x] CG.5 KnownServer: expected_prefix field + prompt_credential output update — kept
+- [x] ~~CG.6 main.rs: wire gate into event loop~~ — replaced by FlowManager wiring
+- [x] CG.7 Fix store_credential label ceiling Secret→Sensitive — kept
+- [x] ~~CG.8 Quality assurance~~ — superseded by KFM.4
+
+## Feature: KernelFlowManager (Integration Setup State Machine)
+
+Goal: Replace CredentialGate + deterministic admin plan with auto-continuing state machine.
+Spec: `docs/pfar-feature-dynamic-integrations-final.md` (KernelFlowManager)
+
+- [x] KFM.1 KernelFlowManager module: FlowState, KernelFlow, start_setup, intercept, advance (15 tests)
+- [x] KFM.2 Pipeline cleanup: remove vault field, build_admin_plan, check_service_credential, CredentialPromptInfo
+- [x] KFM.3 main.rs: wire FlowManager, parse_connect_command, replace CredentialGate
+- [x] KFM.4 Quality assurance (fmt, clippy, all tests green — 435 tests)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 

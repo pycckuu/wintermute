@@ -18,9 +18,9 @@ use pfar::adapters::telegram::{AdapterToKernel, KernelToAdapter, TelegramAdapter
 use pfar::config::{LlmConfig, PfarConfig};
 use pfar::kernel::approval::ApprovalQueue;
 use pfar::kernel::audit::AuditLogger;
-use pfar::kernel::credential_gate::{CredentialGate, InterceptResult, PendingCredentialPrompt};
 use pfar::kernel::egress::EgressValidator;
 use pfar::kernel::executor::PlanExecutor;
+use pfar::kernel::flow_manager::{FlowIntercept, KernelFlowManager};
 use pfar::kernel::inference::InferenceProxy;
 use pfar::kernel::journal::TaskJournal;
 use pfar::kernel::pipeline::Pipeline;
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
             audit,
             Arc::clone(&journal),
             Arc::clone(&vault),
-            mcp_manager,
+            Arc::clone(&mcp_manager),
         )
         .await
     } else {
@@ -182,6 +182,7 @@ async fn run_telegram_loop(
     vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     mcp_manager: Arc<McpServerManager>,
 ) -> Result<()> {
+    use pfar::kernel::flow_manager::parse_connect_command;
     let owner_chat_id = config.adapter.telegram.owner_id.clone();
 
     let tg_config = TelegramConfig {
@@ -208,8 +209,13 @@ async fn run_telegram_loop(
         }
     });
 
-    // Initialize credential gate (feature-credential-acquisition, spec 8.5, Invariant B).
-    let mut credential_gate = CredentialGate::new(Arc::clone(&vault), Some(Arc::clone(&journal)));
+    // Initialize flow manager — replaces CredentialGate with auto-continuing
+    // state machine (feature-dynamic-integrations, spec 5.1, 8.5, Invariant B).
+    let mut flow_manager = KernelFlowManager::new(
+        Arc::clone(&vault),
+        Arc::clone(&mcp_manager),
+        Some(Arc::clone(&journal)),
+    );
 
     // Retry pending message deletions from previous session (crash recovery).
     match journal.load_all_pending_deletions() {
@@ -265,65 +271,53 @@ async fn run_telegram_loop(
                             .unwrap_or("unknown")
                             .to_string();
 
-                        // Credential gate: intercept before pipeline (Invariant B, spec 8.5).
-                        match credential_gate.intercept(&event).await {
-                            InterceptResult::Intercepted {
-                                service,
-                                chat_id: cid,
-                                message_id,
-                                ..
-                            } => {
-                                let _ = kernel_tx
-                                    .send(KernelToAdapter::DeleteMessage {
-                                        chat_id: cid.clone(),
-                                        message_id,
-                                    })
-                                    .await;
+                        // 1. Flow manager intercept: active setup flow consumes
+                        // credential pastes and cancels (Invariant B, spec 8.5).
+                        match flow_manager.intercept(&event).await {
+                            FlowIntercept::Consumed { response, delete_message } => {
+                                if let Some((cid, mid)) = delete_message {
+                                    let _ = kernel_tx
+                                        .send(KernelToAdapter::DeleteMessage {
+                                            chat_id: cid,
+                                            message_id: mid,
+                                        })
+                                        .await;
+                                }
                                 let _ = kernel_tx
                                     .send(KernelToAdapter::SendMessage {
-                                        chat_id: cid,
-                                        text: format!("{service} credential stored securely."),
+                                        chat_id,
+                                        text: response,
                                     })
                                     .await;
                                 continue;
                             }
-                            InterceptResult::Cancelled { service, chat_id: cid } => {
-                                let _ = kernel_tx
-                                    .send(KernelToAdapter::SendMessage {
-                                        chat_id: cid,
-                                        text: format!("{service} setup cancelled."),
-                                    })
-                                    .await;
-                                continue;
-                            }
-                            InterceptResult::NotIntercepted => { /* normal flow */ }
+                            FlowIntercept::NotConsumed => { /* normal flow */ }
                         }
 
-                        // Route event through kernel (spec 6.1).
+                        // 2. Flow-starting command: "connect/setup/add X" bypasses
+                        // pipeline entirely (feature-dynamic-integrations, spec 5.1).
+                        let raw_text = event.payload.text.as_deref().unwrap_or("");
+                        if let Some(service) = parse_connect_command(raw_text) {
+                            if let Some(response) = flow_manager.start_setup(&service, &event.source.principal).await {
+                                let _ = kernel_tx
+                                    .send(KernelToAdapter::SendMessage {
+                                        chat_id,
+                                        text: response,
+                                    })
+                                    .await;
+                            }
+                            continue;
+                        }
+
+                        // 3. Normal pipeline (spec 7).
                         match router.route_event(*event) {
                             Ok((labeled_event, mut task)) => {
                                 let template = templates.get(&task.template_id);
 
                                 if let Some(tmpl) = template {
                                     active_tasks.fetch_add(1, Ordering::Relaxed);
-                                    // Run full pipeline (spec 7).
                                     match pipeline.run(labeled_event, &mut task, tmpl).await {
                                         Ok(output) => {
-                                            // Register credential prompt for gate intercept
-                                            // (feature-credential-acquisition, spec 8.5).
-                                            if let Some(cred_info) = output.credential_prompt {
-                                                credential_gate.register_pending(
-                                                    &task.principal,
-                                                    PendingCredentialPrompt {
-                                                        service: cred_info.service,
-                                                        vault_key: cred_info.vault_key,
-                                                        expected_prefix: cred_info.expected_prefix,
-                                                        prompted_at: std::time::Instant::now(),
-                                                        ttl: Duration::from_secs(600),
-                                                    },
-                                                );
-                                            }
-
                                             let _ = kernel_tx
                                                 .send(KernelToAdapter::SendMessage {
                                                     chat_id,
