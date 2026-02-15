@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod manager;
+pub mod skills;
 pub mod tool;
 
 use std::collections::HashMap;
@@ -171,6 +172,10 @@ pub struct McpConfig {
     /// Auto-start MCP servers on PFAR startup.
     #[serde(default = "default_true")]
     pub auto_start: bool,
+    /// Directory containing self-created skill directories
+    /// (feature-self-extending-skills, spec 3, 14).
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: String,
 }
 
 impl Default for McpConfig {
@@ -178,6 +183,7 @@ impl Default for McpConfig {
         Self {
             config_dir: default_mcp_config_dir(),
             auto_start: true,
+            skills_dir: default_skills_dir(),
         }
     }
 }
@@ -188,6 +194,10 @@ fn default_mcp_config_dir() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_skills_dir() -> String {
+    "~/.pfar/skills".to_owned()
 }
 
 #[cfg(test)]
@@ -332,6 +342,7 @@ mod tests {
     fn test_mcp_config_defaults() {
         let config = McpConfig::default();
         assert_eq!(config.config_dir, "~/.pfar/mcp");
+        assert_eq!(config.skills_dir, "~/.pfar/skills");
         assert!(config.auto_start);
     }
 }

@@ -93,7 +93,24 @@ async fn main() -> Result<()> {
         Arc::clone(&templates),
         Arc::clone(&journal),
         Arc::clone(&audit),
+        config.mcp.skills_dir.clone(),
     );
+
+    // Load local skills at startup (feature-self-extending-skills, spec 14).
+    if config.mcp.auto_start {
+        let skills = pfar::tools::mcp::skills::find_local_skills(&config.mcp.skills_dir);
+        for (skill_config, skill_dir) in &skills {
+            let mcp_config = skill_config.to_mcp_config(skill_dir);
+            match mcp_manager.spawn_server(&mcp_config).await {
+                Ok(action_ids) => {
+                    info!(skill = %skill_config.name, tools = action_ids.len(), "local skill loaded");
+                }
+                Err(e) => {
+                    warn!(skill = %skill_config.name, error = %e, "failed to load local skill");
+                }
+            }
+        }
+    }
 
     // Load persisted session data from journal (spec 9.1, 9.2).
     let sessions = {
@@ -607,6 +624,7 @@ fn create_tool_registry(
     templates: Arc<TemplateRegistry>,
     journal: Arc<TaskJournal>,
     audit: Arc<AuditLogger>,
+    skills_dir: String,
 ) -> (Arc<ToolRegistry>, Arc<McpServerManager>) {
     // Phase 1: Base tools (email, calendar, memory) — snapshot for AdminTool listing.
     let base_registry = ToolRegistry::new();
@@ -629,9 +647,10 @@ fn create_tool_registry(
         audit,
     ));
 
-    // Phase 4: AdminTool gets refs to base tools for listing + MCP manager.
-    let admin =
-        AdminTool::new(vault, base_tools, templates).with_mcp_manager(Arc::clone(&mcp_manager));
+    // Phase 4: AdminTool gets refs to base tools for listing + MCP manager + skills dir.
+    let admin = AdminTool::new(vault, base_tools, templates)
+        .with_mcp_manager(Arc::clone(&mcp_manager))
+        .with_skills_dir(skills_dir);
     registry.register(Arc::new(admin));
 
     (registry, mcp_manager)

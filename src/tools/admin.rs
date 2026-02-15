@@ -36,6 +36,9 @@ pub struct AdminTool {
     tools: Arc<ToolRegistry>,
     templates: Arc<TemplateRegistry>,
     mcp_manager: Option<Arc<McpServerManager>>,
+    /// Skills directory path for listing local skills
+    /// (feature-self-extending-skills, spec 14).
+    skills_dir: Option<String>,
 }
 
 impl AdminTool {
@@ -50,6 +53,7 @@ impl AdminTool {
             tools,
             templates,
             mcp_manager: None,
+            skills_dir: None,
         }
     }
 
@@ -57,6 +61,13 @@ impl AdminTool {
     /// (feature-dynamic-integrations).
     pub fn with_mcp_manager(mut self, manager: Arc<McpServerManager>) -> Self {
         self.mcp_manager = Some(manager);
+        self
+    }
+
+    /// Set the skills directory for listing local skills
+    /// (feature-self-extending-skills, spec 14).
+    pub fn with_skills_dir(mut self, dir: String) -> Self {
+        self.skills_dir = Some(dir);
         self
     }
 
@@ -418,6 +429,38 @@ impl AdminTool {
         })
     }
 
+    /// List locally deployed skills (feature-self-extending-skills, spec 14).
+    fn list_skills(&self) -> Result<ToolOutput, ToolError> {
+        let dir = self
+            .skills_dir
+            .as_deref()
+            .ok_or_else(|| ToolError::ExecutionFailed("skills directory not configured".into()))?;
+
+        let skills = crate::tools::mcp::skills::find_local_skills(dir);
+
+        let skill_list: Vec<serde_json::Value> = skills
+            .iter()
+            .map(|(config, path)| {
+                json!({
+                    "name": config.name,
+                    "description": config.description,
+                    "version": config.version,
+                    "label": config.label,
+                    "created_by": config.created_by,
+                    "path": path.display().to_string(),
+                })
+            })
+            .collect();
+
+        Ok(ToolOutput {
+            data: json!({
+                "skills": skill_list,
+                "count": skill_list.len(),
+            }),
+            has_free_text: false,
+        })
+    }
+
     /// Store a credential in the vault (spec 8.5).
     ///
     /// Write action — stores the provided value in the vault under the
@@ -552,6 +595,13 @@ impl Tool for AdminTool {
                     label_ceiling: SecurityLabel::Sensitive,
                     args_schema: json!({"name": "string (service name, e.g. 'notion')"}),
                 },
+                ToolAction {
+                    id: "admin.list_skills".to_owned(),
+                    description: "List all locally deployed skills".to_owned(),
+                    semantics: ActionSemantics::Read,
+                    label_ceiling: SecurityLabel::Sensitive,
+                    args_schema: json!({}),
+                },
             ],
             network_allowlist: vec![], // Admin tool doesn't need network (spec 8.2).
         }
@@ -576,6 +626,7 @@ impl Tool for AdminTool {
             "admin.list_mcp_servers" => self.list_mcp_servers().await,
             "admin.connect_mcp_server" => self.connect_mcp_server(args).await,
             "admin.disconnect_mcp_server" => self.disconnect_mcp_server(args).await,
+            "admin.list_skills" => self.list_skills(),
             _ => Err(ToolError::ActionNotFound(action.to_owned())),
         }
     }
