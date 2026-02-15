@@ -430,13 +430,20 @@ impl AdminTool {
     }
 
     /// List locally deployed skills (feature-self-extending-skills, spec 14).
-    fn list_skills(&self) -> Result<ToolOutput, ToolError> {
+    ///
+    /// Uses `spawn_blocking` since `find_local_skills` performs synchronous
+    /// filesystem I/O (directory scanning).
+    async fn list_skills(&self) -> Result<ToolOutput, ToolError> {
         let dir = self
             .skills_dir
             .as_deref()
-            .ok_or_else(|| ToolError::ExecutionFailed("skills directory not configured".into()))?;
+            .ok_or_else(|| ToolError::ExecutionFailed("skills directory not configured".into()))?
+            .to_owned();
 
-        let skills = crate::tools::mcp::skills::find_local_skills(dir);
+        let skills =
+            tokio::task::spawn_blocking(move || crate::tools::mcp::skills::find_local_skills(&dir))
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("skill scan failed: {e}")))?;
 
         let skill_list: Vec<serde_json::Value> = skills
             .iter()
@@ -448,6 +455,7 @@ impl AdminTool {
                     "label": config.label,
                     "created_by": config.created_by,
                     "path": path.display().to_string(),
+                    "status": "on_disk",
                 })
             })
             .collect();
@@ -626,7 +634,7 @@ impl Tool for AdminTool {
             "admin.list_mcp_servers" => self.list_mcp_servers().await,
             "admin.connect_mcp_server" => self.connect_mcp_server(args).await,
             "admin.disconnect_mcp_server" => self.disconnect_mcp_server(args).await,
-            "admin.list_skills" => self.list_skills(),
+            "admin.list_skills" => self.list_skills().await,
             _ => Err(ToolError::ActionNotFound(action.to_owned())),
         }
     }
@@ -1002,6 +1010,65 @@ mod tests {
             .execute(&cap, &creds, &http, "admin.check_integration", json!({}))
             .await;
         assert!(matches!(result, Err(ToolError::InvalidArguments(_))));
+    }
+
+    #[tokio::test]
+    async fn test_list_skills_not_configured() {
+        let admin = make_admin_tool(); // skills_dir is None
+        let cap = make_cap("admin.list_skills");
+        let creds = InjectedCredentials::new();
+        let http = make_http();
+
+        let result = admin
+            .execute(&cap, &creds, &http, "admin.list_skills", json!({}))
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::ExecutionFailed(_))),
+            "should fail when skills_dir is not configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_skills_with_tempdir() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+
+        // Create a valid skill.
+        let skill_dir = tmp.path().join("my-skill");
+        std::fs::create_dir(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            r#"
+name = "my-skill"
+description = "Test skill"
+label = "public"
+
+[server]
+command = "python3"
+"#,
+        )
+        .expect("write");
+
+        let vault: Arc<dyn SecretStore> = Arc::new(InMemoryVault::new());
+        let tools = Arc::new(ToolRegistry::new());
+        let templates = Arc::new(TemplateRegistry::new());
+        let admin = AdminTool::new(vault, tools, templates)
+            .with_skills_dir(tmp.path().to_str().expect("path").to_owned());
+
+        let cap = make_cap("admin.list_skills");
+        let creds = InjectedCredentials::new();
+        let http = make_http();
+
+        let result = admin
+            .execute(&cap, &creds, &http, "admin.list_skills", json!({}))
+            .await;
+        assert!(result.is_ok(), "list_skills should succeed");
+
+        let output = result.expect("checked");
+        assert_eq!(output.data["count"], json!(1));
+        let skills = output.data["skills"].as_array().expect("array");
+        assert_eq!(skills[0]["name"], json!("my-skill"));
+        assert_eq!(skills[0]["status"], json!("on_disk"));
+        assert!(!output.has_free_text);
     }
 
     #[tokio::test]

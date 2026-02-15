@@ -104,6 +104,14 @@ async fn main() -> Result<()> {
             match mcp_manager.spawn_server(&mcp_config).await {
                 Ok(action_ids) => {
                     info!(skill = %skill_config.name, tools = action_ids.len(), "local skill loaded");
+                    // Audit log for skill loading (spec 6.7).
+                    if let Err(e) = audit.log_skill_loaded(
+                        &skill_config.name,
+                        &skill_dir.display().to_string(),
+                        action_ids.len(),
+                    ) {
+                        warn!(error = %e, "failed to log skill loaded audit event");
+                    }
                 }
                 Err(e) => {
                     warn!(skill = %skill_config.name, error = %e, "failed to load local skill");
