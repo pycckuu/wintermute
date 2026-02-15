@@ -334,6 +334,11 @@ async fn run_telegram_loop(
                                     active_tasks.fetch_add(1, Ordering::Relaxed);
                                     match pipeline.run(labeled_event, &mut task, tmpl).await {
                                         Ok(output) => {
+                                            // Rebuild SID if persona was configured this turn
+                                            // (pfar-system-identity-document.md §4).
+                                            if output.persona_changed {
+                                                rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
+                                            }
                                             let _ = kernel_tx
                                                 .send(KernelToAdapter::SendMessage {
                                                     chat_id,

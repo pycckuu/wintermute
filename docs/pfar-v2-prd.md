@@ -24,7 +24,7 @@
 - [x] Fix: Admin plan auto-connects when credential already exists in vault (434 tests — 405 unit + 7 integration + 22 regression)
 - [x] Feature: KernelFlowManager — Integration Setup State Machine (435 tests — 406 unit + 7 integration + 22 regression)
 - [x] Fix: Known MCP server package names — Notion, Fetch (435 tests)
-- [x] Feature: System Identity Document (462 tests — 433 unit + 7 integration + 19 regression + 3 doc)
+- [x] Feature: System Identity Document (466 tests — 437 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 

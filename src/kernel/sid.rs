@@ -259,6 +259,45 @@ mod tests {
     }
 
     #[test]
+    fn test_render_integrations_only() {
+        let sid = SystemIdentityDocument {
+            persona: Some("Atlas".to_owned()),
+            integrations: vec![IntegrationSummary {
+                name: "notion".to_owned(),
+                tool_count: 22,
+            }],
+            builtin_tools: vec![],
+        };
+
+        let rendered = sid.render();
+        assert!(rendered.contains("You are Atlas."));
+        assert!(rendered.contains("Integrations: notion (22 tools)"));
+        assert!(
+            !rendered.contains("Built-in tools:"),
+            "should not render built-in section when empty"
+        );
+        assert!(
+            !rendered.contains("No tools configured yet"),
+            "should not show 'no tools' when integrations exist"
+        );
+    }
+
+    #[test]
+    fn test_build_sid_filters_pending_persona() {
+        // The __pending__ sentinel should be treated as None by callers.
+        // build_sid itself doesn't filter — the caller (rebuild_sid in main.rs)
+        // passes None. Verify that passing None produces no persona in output.
+        let sid = build_sid(None, &[("email".to_owned(), 3)], &[]);
+        let rendered = sid.render();
+        assert!(
+            !rendered.starts_with("You are"),
+            "SID should not start with persona when None (filtered __pending__)"
+        );
+        assert!(sid.persona.is_none(), "persona field should be None");
+        assert!(rendered.contains("email"));
+    }
+
+    #[test]
     fn test_render_omits_admin_tool() {
         let tool_summaries = vec![("admin".to_owned(), 10), ("email".to_owned(), 3)];
         let sid = build_sid(None, &tool_summaries, &[]);

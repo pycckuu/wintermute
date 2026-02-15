@@ -83,6 +83,9 @@ pub struct PipelineOutput {
     pub output_sinks: Vec<String>,
     /// Highest security label of data involved.
     pub data_label: SecurityLabel,
+    /// True when persona was stored this turn (pfar-system-identity-document.md §4).
+    /// Signals the caller to rebuild the SID.
+    pub persona_changed: bool,
 }
 
 /// The Plan-Then-Execute pipeline (spec 7).
@@ -515,6 +518,7 @@ impl Pipeline {
             response_text,
             output_sinks: task.output_sinks.clone(),
             data_label,
+            persona_changed: is_persona_just_configured,
         })
     }
 
@@ -1415,6 +1419,95 @@ mod tests {
         assert!(
             fast_path_synth_prompt.contains("hi"),
             "fast-path synth prompt should include current message"
+        );
+    }
+
+    /// Fast path includes SID in Synthesizer prompt (pfar-system-identity-document.md).
+    #[tokio::test]
+    async fn test_fast_path_includes_sid() {
+        struct CapturingProvider {
+            captured_prompts: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl InferenceProvider for CapturingProvider {
+            async fn generate(
+                &self,
+                _model: &str,
+                prompt: &str,
+                _max_tokens: u32,
+            ) -> Result<String, InferenceError> {
+                self.captured_prompts
+                    .lock()
+                    .expect("test lock")
+                    .push(prompt.to_owned());
+                Ok("Hello!".to_owned())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingProvider {
+            captured_prompts: captured.clone(),
+        };
+
+        let buf = SharedBuf::new();
+        let policy = Arc::new(PolicyEngine::with_defaults());
+        let audit = Arc::new(AuditLogger::from_writer(Box::new(buf)));
+        let inference = Arc::new(InferenceProxy::with_provider(Box::new(provider)));
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(MockEmailTool));
+        let tools = Arc::new(registry);
+        let vault: Arc<dyn crate::kernel::vault::SecretStore> = Arc::new(InMemoryVault::new());
+        let executor =
+            PlanExecutor::new(policy.clone(), tools.clone(), vault.clone(), audit.clone());
+        let sessions = Arc::new(RwLock::new(SessionStore::new()));
+        let egress = EgressValidator::new(policy.clone(), audit.clone());
+        let journal = Arc::new(TaskJournal::open_in_memory().expect("test journal"));
+
+        // Pre-set persona so onboarding doesn't trigger.
+        journal.set_persona("Atlas").expect("set persona");
+
+        // Pre-populate the SID with real content.
+        let sid = Arc::new(RwLock::new(
+            "You are Atlas.\n\nCAPABILITIES:\n- Built-in tools: email\n\nRULES:\n- Never mention internal architecture\n".to_owned(),
+        ));
+
+        let pipeline = Pipeline::new(
+            policy,
+            inference,
+            executor,
+            sessions,
+            egress,
+            tools,
+            audit,
+            Some(journal),
+            sid,
+        );
+
+        // "hello" triggers fast path (no tools needed).
+        let event = make_labeled_event("hello", Principal::Owner);
+        let template = make_template();
+        let mut task = make_task(&template);
+
+        let result = pipeline.run(event, &mut task, &template).await;
+        assert!(result.is_ok(), "fast path should succeed: {result:?}");
+
+        // Fast path = 1 inference call (Synthesizer only, no Planner).
+        let prompts = captured.lock().expect("test lock");
+        assert_eq!(
+            prompts.len(),
+            1,
+            "fast path should have exactly 1 inference call"
+        );
+
+        let synth_prompt = &prompts[0];
+        assert!(
+            synth_prompt.contains("CAPABILITIES:"),
+            "fast-path synth prompt should contain SID capabilities"
+        );
+        assert!(
+            synth_prompt.contains("Built-in tools: email"),
+            "fast-path synth prompt should contain SID tool list"
         );
     }
 
