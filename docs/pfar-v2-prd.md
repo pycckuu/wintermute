@@ -16,6 +16,28 @@
 - [x] Fix: Inference Routing Diagnostics + Rename `default_model` → `model` (349 tests)
 - [x] Feature: Agent Persona & Onboarding (359 tests — 330 unit + 7 integration + 22 regression)
 - [x] Feature: Memory System (378 tests — 349 unit + 7 integration + 22 regression)
+- [x] Fix: Session Amnesia F3+F1 (389 tests — 360 unit + 7 integration + 22 regression)
+
+## Fix: Session Amnesia (F1, F3)
+
+Goal: Stop session amnesia across restarts by fixing credential interception (F1)
+and system state awareness (F3).
+Ref: `docs/pfar-session-amnesia-analysis.md`
+
+- [x] SA.1 F3: ToolRegistry.tool_capabilities_summary() method (2 tests)
+- [x] SA.2 F3: SynthesizerContext.system_capabilities field + prompt injection (2 tests)
+- [x] SA.3 F3: Pipeline builds and passes capabilities to Synthesizer
+- [x] SA.4 F3: Informative restart notification with tool summary
+- [x] SA.5 F1: credential.rs — detect_credential() with pattern table (7 tests)
+- [x] SA.6 F1: main.rs credential intercept before pipeline
+
+Deferred (requires MCP infrastructure):
+- [ ] SA.7 F2: MCP server lifecycle management
+- [ ] SA.8 F2: McpBridgeTool implements Tool trait
+- [ ] SA.9 F2: journal.rs mcp_servers persistence
+- [ ] SA.10 F2: Startup respawn + admin tool integration
+- [ ] SA.11 F4: Description overrides for known MCP services
+- [ ] SA.12 F4: Intent keywords for notion/integrations
 
 ## Phase 1: Kernel Core (weeks 1-3)
 

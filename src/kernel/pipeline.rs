@@ -431,6 +431,11 @@ impl Pipeline {
         let default_sink = "sink:default".to_owned();
         let first_sink = task.output_sinks.first().unwrap_or(&default_sink);
 
+        // Build system capabilities summary (session-amnesia F3, spec 10.7).
+        let system_capabilities = self
+            .tools
+            .tool_capabilities_summary(&task.allowed_tools, &task.denied_tools);
+
         // Read session data for synthesizer context (spec 9.3).
         // On the fast path (no tools), omit conversation history and working memory —
         // they add no value without tool results and cause the LLM to summarize them
@@ -458,6 +463,7 @@ impl Pipeline {
             is_onboarding,
             is_persona_just_configured,
             memory_entries,
+            system_capabilities,
         };
 
         let synth_prompt = Synthesizer::compose_prompt(&synth_ctx);

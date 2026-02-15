@@ -13,7 +13,7 @@ pub mod email;
 pub mod memory;
 pub mod scoped_http;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -273,6 +273,29 @@ impl ToolRegistry {
         }
 
         result
+    }
+
+    /// Compact summary of available tools grouped by module (spec 10.7, session-amnesia F3).
+    ///
+    /// Returns a string like `"email (list, read), calendar (freebusy), memory (save)"`
+    /// suitable for injection into the Synthesizer prompt so it knows what
+    /// capabilities are available. Uses `BTreeMap` for deterministic ordering.
+    pub fn tool_capabilities_summary(&self, allowed: &[String], denied: &[String]) -> String {
+        let actions = self.available_actions(allowed, denied);
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for action in &actions {
+            if let Some((tool, act)) = action.id.split_once('.') {
+                groups
+                    .entry(tool.to_owned())
+                    .or_default()
+                    .push(act.to_owned());
+            }
+        }
+        groups
+            .iter()
+            .map(|(tool, acts)| format!("{tool} ({})", acts.join(", ")))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -593,6 +616,36 @@ mod tests {
     }
 
     // ── Action matching helper tests ──
+
+    #[test]
+    fn test_tool_capabilities_summary_with_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool::email_tool()));
+        registry.register(Box::new(MockTool::admin_tool()));
+
+        let allowed = vec!["*".to_owned()];
+        let denied: Vec<String> = vec![];
+        let summary = registry.tool_capabilities_summary(&allowed, &denied);
+
+        // BTreeMap gives deterministic alphabetical order.
+        assert_eq!(
+            summary,
+            "admin (list_integrations, activate_tool), email (list, read)"
+        );
+    }
+
+    #[test]
+    fn test_tool_capabilities_summary_empty() {
+        let registry = ToolRegistry::new();
+        let allowed = vec!["*".to_owned()];
+        let denied: Vec<String> = vec![];
+        let summary = registry.tool_capabilities_summary(&allowed, &denied);
+
+        assert!(
+            summary.is_empty(),
+            "empty registry should produce empty string"
+        );
+    }
 
     #[test]
     fn test_is_action_allowed_exact() {

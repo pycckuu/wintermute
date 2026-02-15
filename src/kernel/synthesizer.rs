@@ -134,6 +134,11 @@ pub struct SynthesizerContext {
     pub is_persona_just_configured: bool,
     /// Relevant long-term memory entries (memory spec §6).
     pub memory_entries: Vec<String>,
+    /// Compact summary of available tool capabilities (session-amnesia F3, spec 10.7).
+    ///
+    /// E.g. `"email (list, read), calendar (freebusy)"`. Empty string means
+    /// no capabilities section is injected into the prompt.
+    pub system_capabilities: String,
 }
 
 /// Synthesizer errors.
@@ -167,6 +172,16 @@ impl Synthesizer {
             format!("You are {persona}.\n\n{PERSONA_ANTI_LEAK}\n\n{SYNTHESIZER_ROLE_PROMPT}")
         } else {
             SYNTHESIZER_ROLE_PROMPT.to_owned()
+        };
+
+        // Step 1b: System capabilities section (session-amnesia F3, spec 10.7).
+        let capabilities_section = if ctx.system_capabilities.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\n## System Capabilities\nYou have access to: {}",
+                ctx.system_capabilities
+            )
         };
 
         // Step 2: Serialize tool results.
@@ -219,7 +234,8 @@ impl Synthesizer {
         // Step 6: Compose the full prompt.
         format!(
             "{BASE_SAFETY_RULES}\n\n\
-             {role_section}\n\n\
+             {role_section}\
+             {capabilities_section}\n\n\
              ## Original Request\n\
              {original_context}\n\n\
              ## Tool Results\n\
@@ -276,6 +292,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -324,6 +341,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -348,6 +366,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -378,6 +397,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -406,6 +426,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -453,6 +474,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -485,6 +507,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -535,6 +558,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -584,6 +608,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -629,6 +654,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -640,6 +666,62 @@ mod tests {
         assert!(
             !prompt.contains("## Conversation History"),
             "empty history should not produce section header"
+        );
+    }
+
+    // ── System capabilities tests (session-amnesia F3) ──────────
+
+    #[test]
+    fn test_compose_prompt_with_capabilities() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "hello".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
+            is_persona_just_configured: false,
+            memory_entries: vec![],
+            system_capabilities: "email (list, read), calendar (freebusy)".to_owned(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            prompt.contains("## System Capabilities"),
+            "prompt should include capabilities section header"
+        );
+        assert!(
+            prompt.contains("email (list, read), calendar (freebusy)"),
+            "prompt should include the capabilities string"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_empty_capabilities_no_section() {
+        let ctx = SynthesizerContext {
+            task_id: Uuid::nil(),
+            original_context: "hello".to_owned(),
+            raw_content_ref: None,
+            tool_results: vec![],
+            output_instructions: make_output_instructions(),
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            persona: None,
+            is_onboarding: false,
+            is_persona_just_configured: false,
+            memory_entries: vec![],
+            system_capabilities: String::new(),
+        };
+
+        let prompt = Synthesizer::compose_prompt(&ctx);
+
+        assert!(
+            !prompt.contains("## System Capabilities"),
+            "empty capabilities should not produce section header"
         );
     }
 
@@ -659,6 +741,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -691,6 +774,7 @@ mod tests {
             is_onboarding: true,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -723,6 +807,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: false,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);
@@ -756,6 +841,7 @@ mod tests {
             is_onboarding: false,
             is_persona_just_configured: true,
             memory_entries: vec![],
+            system_capabilities: String::new(),
         };
 
         let prompt = Synthesizer::compose_prompt(&ctx);

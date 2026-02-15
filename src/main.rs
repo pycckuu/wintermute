@@ -146,6 +146,8 @@ async fn main() -> Result<()> {
             router,
             pipeline,
             templates,
+            Arc::clone(&tools),
+            Arc::clone(&vault),
             audit,
             Arc::clone(&journal),
         )
@@ -171,6 +173,8 @@ async fn run_telegram_loop(
     router: EventRouter,
     pipeline: Pipeline,
     templates: Arc<TemplateRegistry>,
+    tools: Arc<ToolRegistry>,
+    vault: Arc<dyn pfar::kernel::vault::SecretStore>,
     audit: Arc<AuditLogger>,
     journal: Arc<TaskJournal>,
 ) -> Result<()> {
@@ -202,11 +206,24 @@ async fn run_telegram_loop(
 
     info!("PFAR v2 ready -- listening for events");
 
-    // Notify owner of restart (persistence-recovery spec §8).
+    // Notify owner of restart with capabilities summary (session-amnesia F3, spec §8).
+    let restart_msg = {
+        // Use the owner template's allowed/denied tools to show relevant capabilities.
+        let owner_template = templates.get("owner_telegram_general");
+        let summary = match owner_template {
+            Some(t) => tools.tool_capabilities_summary(&t.allowed_tools, &t.denied_tools),
+            None => tools.tool_capabilities_summary(&["*".to_owned()], &[]),
+        };
+        if summary.is_empty() {
+            "System restarted. If you were waiting on something, just ask again.".to_owned()
+        } else {
+            format!("System restarted. Available: {summary}. If you were waiting on something, just ask again.")
+        }
+    };
     let _ = kernel_tx
         .send(KernelToAdapter::SendMessage {
             chat_id: owner_chat_id,
-            text: "System restarted. If you were waiting on something, just ask again.".to_owned(),
+            text: restart_msg,
         })
         .await;
 
@@ -234,6 +251,36 @@ async fn run_telegram_loop(
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
+
+                        // Cold credential detection (session-amnesia F1).
+                        // Must run BEFORE pipeline to prevent tokens reaching the Synthesizer.
+                        // Only check owner messages — third parties should not be storing creds.
+                        if matches!(event.source.principal, pfar::types::Principal::Owner) {
+                            if let Some(raw_text) = &event.payload.text {
+                                if let Some((service, vault_ref)) =
+                                    pfar::kernel::credential::detect_credential(raw_text)
+                                {
+                                    info!(service, "cold credential detected, storing in vault");
+                                    if let Err(e) = vault.store_secret(
+                                        vault_ref,
+                                        pfar::kernel::vault::SecretValue::new(raw_text.trim()),
+                                    ).await {
+                                        warn!(error = %e, "failed to store credential");
+                                    }
+                                    // Notify owner — DO NOT echo the token (Invariant B).
+                                    let _ = kernel_tx
+                                        .send(KernelToAdapter::SendMessage {
+                                            chat_id,
+                                            text: format!(
+                                                "{service} credential detected and stored securely. \
+                                                 Use 'connect {service}' to activate."
+                                            ),
+                                        })
+                                        .await;
+                                    continue; // Skip pipeline entirely.
+                                }
+                            }
+                        }
 
                         // Route event through kernel (spec 6.1).
                         match router.route_event(*event) {

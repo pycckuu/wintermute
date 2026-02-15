@@ -931,6 +931,7 @@ fn regression_09_synthesizer_prompt_denies_tool_access() {
         is_onboarding: false,
         is_persona_just_configured: false,
         memory_entries: vec![],
+        system_capabilities: String::new(),
     };
 
     let prompt = Synthesizer::compose_prompt(&ctx);
