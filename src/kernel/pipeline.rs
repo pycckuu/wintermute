@@ -32,7 +32,7 @@ use crate::types::{LabeledEvent, Principal, SecurityLabel, TaintLevel, Task, Tas
 use chrono::Utc;
 
 /// Maximum characters stored in request/response summaries for session memory.
-const SUMMARY_MAX_CHARS: usize = 100;
+const SUMMARY_MAX_CHARS: usize = 300;
 
 /// Sentinel value stored in journal when persona onboarding is in progress
 /// (persona-onboarding spec §3).
@@ -453,15 +453,9 @@ impl Pipeline {
         let first_sink = task.output_sinks.first().unwrap_or(&default_sink);
 
         // Read session data for synthesizer context (spec 9.3).
-        // On the fast path (no tools), omit conversation history and working memory —
-        // they add no value without tool results and cause the LLM to summarize them
-        // instead of responding naturally (spec 13.5: prompts are not enforcement).
+        // Always provided — the Synthesizer prompt includes anti-summarization
+        // instructions (spec 13.4, rule 4) to prevent history recap.
         let (working_memory, conversation) = self.read_session_data(&task.principal).await;
-        let (working_memory, conversation) = if pipeline_path == "fast" {
-            (vec![], vec![])
-        } else {
-            (working_memory, conversation)
-        };
 
         let synth_ctx = SynthesizerContext {
             task_id: task.task_id,
@@ -1313,7 +1307,7 @@ mod tests {
     /// turn must NOT include conversation history or working memory in the
     /// synthesizer prompt — otherwise the LLM summarizes them.
     #[tokio::test]
-    async fn test_fast_path_omits_session_context() {
+    async fn test_fast_path_includes_session_context() {
         // A prompt-capturing provider: records each prompt it receives.
         struct CapturingProvider {
             responses: Vec<String>,
@@ -1391,7 +1385,7 @@ mod tests {
         let result1 = pipeline.run(event1, &mut task1, &template).await;
         assert!(result1.is_ok(), "turn 1 should succeed: {result1:?}");
 
-        // Turn 2: fast path — "hi" should NOT include session context.
+        // Turn 2: fast path — "hi" MUST still include session context (spec 9.3).
         let event2 = make_labeled_event("hi", Principal::Owner);
         let mut task2 = make_task(&template);
         let result2 = pipeline.run(event2, &mut task2, &template).await;
@@ -1406,14 +1400,12 @@ mod tests {
         );
         let fast_path_synth_prompt = &prompts[2];
 
-        // Fast-path prompt must NOT contain session context.
+        // Fast-path prompt MUST contain session context so the LLM has
+        // continuity across turns (spec 9.3). Anti-summarization is handled
+        // by the Synthesizer prompt (spec 13.4, rule 4), not by data withholding.
         assert!(
-            !fast_path_synth_prompt.contains("## Session Working Memory"),
-            "fast-path synth prompt should NOT include working memory"
-        );
-        assert!(
-            !fast_path_synth_prompt.contains("## Conversation History"),
-            "fast-path synth prompt should NOT include conversation history"
+            fast_path_synth_prompt.contains("## Conversation History"),
+            "fast-path synth prompt MUST include conversation history"
         );
         // Sanity: it should still contain the user's current message.
         assert!(

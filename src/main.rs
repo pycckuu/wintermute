@@ -26,7 +26,7 @@ use pfar::kernel::journal::TaskJournal;
 use pfar::kernel::pipeline::Pipeline;
 use pfar::kernel::policy::PolicyEngine;
 use pfar::kernel::router::EventRouter;
-use pfar::kernel::session::SessionStore;
+use pfar::kernel::session::{ConversationTurn, SessionStore};
 use pfar::kernel::sid::build_sid;
 use pfar::kernel::template::{InferenceConfig, TaskTemplate, TemplateRegistry};
 use pfar::kernel::vault::InMemoryVault;
@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
             Arc::clone(&mcp_manager),
             Arc::clone(&tools),
             Arc::clone(&sid),
+            Arc::clone(&sessions),
         )
         .await
     } else {
@@ -216,6 +217,7 @@ async fn run_telegram_loop(
     mcp_manager: Arc<McpServerManager>,
     tools: Arc<ToolRegistry>,
     sid: Arc<RwLock<String>>,
+    sessions: Arc<RwLock<pfar::kernel::session::SessionStore>>,
 ) -> Result<()> {
     use pfar::kernel::flow_manager::parse_connect_command;
     let owner_chat_id = config.adapter.telegram.owner_id.clone();
@@ -310,6 +312,28 @@ async fn run_telegram_loop(
                         // credential pastes and cancels (Invariant B, spec 8.5).
                         match flow_manager.intercept(&event).await {
                             FlowIntercept::Consumed { response, delete_message } => {
+                                // Store flow turn in session to prevent history gaps.
+                                // Credential pastes stored as redacted text (Invariant B).
+                                let user_summary = if delete_message.is_some() {
+                                    "[credential pasted]".to_string()
+                                } else {
+                                    event.payload.text.as_deref().unwrap_or("").chars().take(300).collect()
+                                };
+                                {
+                                    let now = chrono::Utc::now();
+                                    let mut sess = sessions.write().await;
+                                    let session = sess.get_or_create(&event.source.principal);
+                                    session.push_turn(ConversationTurn {
+                                        role: "user".to_owned(),
+                                        summary: user_summary,
+                                        timestamp: now,
+                                    });
+                                    session.push_turn(ConversationTurn {
+                                        role: "assistant".to_owned(),
+                                        summary: response.chars().take(300).collect(),
+                                        timestamp: now,
+                                    });
+                                }
                                 if let Some((cid, mid)) = delete_message {
                                     let _ = kernel_tx
                                         .send(KernelToAdapter::DeleteMessage {
@@ -337,6 +361,22 @@ async fn run_telegram_loop(
                         let raw_text = event.payload.text.as_deref().unwrap_or("");
                         if let Some(service) = parse_connect_command(raw_text) {
                             if let Some(response) = flow_manager.start_setup(&service, &event.source.principal).await {
+                                // Store setup turn in session to prevent history gaps.
+                                {
+                                    let now = chrono::Utc::now();
+                                    let mut sess = sessions.write().await;
+                                    let session = sess.get_or_create(&event.source.principal);
+                                    session.push_turn(ConversationTurn {
+                                        role: "user".to_owned(),
+                                        summary: raw_text.chars().take(300).collect(),
+                                        timestamp: now,
+                                    });
+                                    session.push_turn(ConversationTurn {
+                                        role: "assistant".to_owned(),
+                                        summary: response.chars().take(300).collect(),
+                                        timestamp: now,
+                                    });
+                                }
                                 // Rebuild SID — may have auto-connected with existing credential
                                 // (pfar-system-identity-document.md §4).
                                 rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
@@ -351,6 +391,8 @@ async fn run_telegram_loop(
                         }
 
                         // 3. Normal pipeline (spec 7).
+                        // Capture raw text before route_event consumes the event.
+                        let raw_text_for_error = event.payload.text.clone().unwrap_or_default();
                         match router.route_event(*event) {
                             Ok((labeled_event, mut task)) => {
                                 let template = templates.get(&task.template_id);
@@ -373,10 +415,27 @@ async fn run_telegram_loop(
                                         }
                                         Err(e) => {
                                             warn!(task_id = %task.task_id, error = %e, "pipeline error");
+                                            let error_msg = "Sorry, I encountered an error processing your request.";
+                                            // Store failed turn in session to prevent history gaps.
+                                            {
+                                                let now = chrono::Utc::now();
+                                                let mut sess = sessions.write().await;
+                                                let session = sess.get_or_create(&task.principal);
+                                                session.push_turn(ConversationTurn {
+                                                    role: "user".to_owned(),
+                                                    summary: raw_text_for_error.chars().take(300).collect(),
+                                                    timestamp: now,
+                                                });
+                                                session.push_turn(ConversationTurn {
+                                                    role: "assistant".to_owned(),
+                                                    summary: format!("[error] {e}").chars().take(300).collect(),
+                                                    timestamp: now,
+                                                });
+                                            }
                                             let _ = kernel_tx
                                                 .send(KernelToAdapter::SendMessage {
                                                     chat_id,
-                                                    text: "Sorry, I encountered an error processing your request.".to_owned(),
+                                                    text: error_msg.to_owned(),
                                                 })
                                                 .await;
                                         }
@@ -525,13 +584,10 @@ fn owner_telegram_template(inference: &InferenceConfig) -> TaskTemplate {
         principal_class: PrincipalClass::Owner,
         description: "General assistant for owner via Telegram".to_string(),
         planner_task_description: None,
-        allowed_tools: vec![
-            "email.list".to_string(),
-            "email.read".to_string(),
-            "calendar.freebusy".to_string(),
-            "memory.save".to_string(),
-            "admin.*".to_string(),
-        ],
+        // Owner has "All tools" (spec 4.1). Wildcard allows dynamically
+        // registered MCP tools. Security enforced by label ceilings, taint
+        // rules, and data ceiling — not by restricting the owner's tool list.
+        allowed_tools: vec!["*".to_string()],
         denied_tools: vec![],
         max_tool_calls: 15,
         max_tokens_plan: 4000,
@@ -550,13 +606,8 @@ fn owner_cli_template(inference: &InferenceConfig) -> TaskTemplate {
         principal_class: PrincipalClass::Owner,
         description: "General assistant for owner via CLI".to_string(),
         planner_task_description: None,
-        allowed_tools: vec![
-            "email.list".to_string(),
-            "email.read".to_string(),
-            "calendar.freebusy".to_string(),
-            "memory.save".to_string(),
-            "admin.*".to_string(),
-        ],
+        // Owner has "All tools" (spec 4.1). See owner_telegram_template.
+        allowed_tools: vec!["*".to_string()],
         denied_tools: vec![],
         max_tool_calls: 15,
         max_tokens_plan: 4000,
