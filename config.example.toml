@@ -59,6 +59,14 @@ model = "llama3"
 # base_url = "http://localhost:1234"
 # model = "deepseek-r1"
 
+# ── MCP / Skills ─────────────────────────────────────────────────
+
+# [mcp]
+# Directory containing self-created skills
+# skills_dir = "~/.pfar/skills"
+# Auto-start MCP servers and skills on startup
+# auto_start = true
+
 # ── Adapters ─────────────────────────────────────────────────────
 
 [adapter.telegram]

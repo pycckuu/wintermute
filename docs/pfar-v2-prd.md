@@ -25,6 +25,7 @@
 - [x] Feature: KernelFlowManager — Integration Setup State Machine (435 tests — 406 unit + 7 integration + 22 regression)
 - [x] Fix: Known MCP server package names — Notion, Fetch (435 tests)
 - [x] Feature: System Identity Document (466 tests — 437 unit + 7 integration + 22 regression)
+- [x] Feature: Find Local Skills — scan skills directory at startup, parse skill.toml, spawn as MCP (469 tests — 440 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 
@@ -189,6 +190,17 @@ Spec: `docs/pfar-system-identity-document.md`
 - [x] SID.7 main.rs: rebuild_sid() at startup and after MCP state changes
 - [x] SID.8 Update existing tests for new signatures (~30 test contexts updated)
 - [x] SID.9 Quality assurance (fmt, clippy, all tests green — 462 tests)
+
+## Feature: Find Local Skills
+
+Goal: Scan skills directory at startup, parse skill.toml manifests, spawn as MCP servers.
+Spec: `docs/pfar-feature-self-extending-skills.md` §3, §14
+
+- [x] SK.1 SkillConfig struct + find_local_skills() in src/tools/mcp/skills.rs (10 tests)
+- [x] SK.2 skills_dir config field in McpConfig
+- [x] SK.3 Startup wiring: scan + spawn skills in main.rs
+- [x] SK.4 admin.list_skills action in AdminTool
+- [x] SK.5 Quality assurance (fmt, clippy, all tests green — 469 tests)
 
 ## Phase 3: Admin Tool + More Tools + Browser (weeks 6-7)
 
