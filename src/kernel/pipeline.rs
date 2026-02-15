@@ -234,15 +234,15 @@ impl Pipeline {
 
     /// Check if this task needs the full pipeline with tool execution (spec 7, fast path).
     ///
-    /// Returns `true` if the extracted metadata suggests tools could be useful
-    /// AND the template allows relevant tools. Returns `false` for greetings,
-    /// casual chat, or when no matching tools are available.
+    /// Returns `false` only for greetings and casual chat (short social messages).
+    /// All other messages go through the Planner so the LLM can decide whether
+    /// tools are needed — more reliable than keyword-based intent matching.
     fn should_use_full_pipeline(
         &self,
         metadata: &ExtractedMetadata,
-        template: &TaskTemplate,
+        _template: &TaskTemplate,
     ) -> bool {
-        metadata.intent.is_some() && template.allowed_tools.iter().any(|t| metadata.could_use(t))
+        !metadata.is_greeting
     }
 
     /// Execute Phases 1-2: Plan and Execute (spec 7, Phases 1-2).
@@ -1239,24 +1239,21 @@ mod tests {
         assert_eq!(output.response_text, synth_text);
     }
 
-    /// Fast path: template with no allowed tools always skips planner.
+    /// Empty template tools: Planner is called but returns empty plan,
+    /// pipeline proceeds to synthesize without tool execution.
     #[tokio::test]
-    async fn test_fast_path_no_tools_in_template() {
+    async fn test_empty_template_tools_planner_returns_empty_plan() {
+        let empty_plan = r#"{"plan":[],"explanation":"no tools available"}"#;
         let synth_text = "I can help with that!";
-        let (pipeline, _sessions) = make_pipeline(synth_text, "ERROR: second call unexpected");
+        let (pipeline, _sessions) = make_pipeline(empty_plan, synth_text);
 
-        // Even with an intent that normally needs tools, if the template
-        // has no allowed tools, the fast path should engage.
         let event = make_labeled_event("check my email", Principal::Owner);
         let mut template = make_template();
         template.allowed_tools = vec![]; // No tools available.
         let mut task = make_task(&template);
 
         let result = pipeline.run(event, &mut task, &template).await;
-        assert!(
-            result.is_ok(),
-            "no-tools fast path should succeed: {result:?}"
-        );
+        assert!(result.is_ok(), "empty-plan path should succeed: {result:?}");
 
         let output = result.expect("checked");
         assert_eq!(output.response_text, synth_text);
@@ -1523,6 +1520,7 @@ mod tests {
             entities: vec![],
             dates_mentioned: vec!["next Tuesday".to_owned()],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
 
         let ctx = pipeline
@@ -1747,6 +1745,7 @@ mod tests {
             entities: vec![],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
 
         let results = pipeline.search_memory(&metadata, SecurityLabel::Sensitive);
@@ -1779,6 +1778,7 @@ mod tests {
             }],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
 
         let results = pipeline.search_memory(&metadata, SecurityLabel::Sensitive);
@@ -1815,6 +1815,7 @@ mod tests {
             }],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
 
         let results = pipeline.search_memory(&metadata, SecurityLabel::Internal);
@@ -1836,6 +1837,7 @@ mod tests {
             }],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
 
         // Pipeline without journal should return empty gracefully.

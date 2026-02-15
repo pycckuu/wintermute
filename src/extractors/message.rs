@@ -26,6 +26,7 @@ impl Extractor for MessageIntentExtractor {
         let intent = detect_intent(&lower);
         let entities = extract_entities(text);
         let dates = extract_dates(text);
+        let is_greeting = is_greeting_or_casual(&lower);
 
         // Extract admin context (service name, action) for admin_config
         // intent so the pipeline can generate a deterministic plan (spec 8.1).
@@ -40,6 +41,7 @@ impl Extractor for MessageIntentExtractor {
             entities,
             dates_mentioned: dates,
             extra,
+            is_greeting,
         }
     }
 }
@@ -111,6 +113,56 @@ fn detect_intent(lower: &str) -> Option<String> {
 
     // 9. No specific intent detected
     None
+}
+
+/// Detect greetings and casual chat that need no tool execution (spec 7, fast path).
+///
+/// Returns `true` for short social messages (greetings, thanks, acknowledgments).
+/// When `true`, the pipeline skips the Planner and goes directly to the Synthesizer.
+/// All other messages go through the full pipeline so the Planner (LLM) can decide
+/// whether tools are needed — this is more reliable than keyword matching.
+fn is_greeting_or_casual(lower: &str) -> bool {
+    let trimmed = lower
+        .trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation());
+
+    // Very short messages (1-2 words) that are purely social.
+    let greetings = [
+        "hi",
+        "hello",
+        "hey",
+        "hola",
+        "yo",
+        "sup",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "good night",
+        "gm",
+        "morning",
+        "thanks",
+        "thank you",
+        "thx",
+        "ok",
+        "okay",
+        "sure",
+        "got it",
+        "yes",
+        "no",
+        "yep",
+        "nope",
+        "cool",
+        "nice",
+        "great",
+        "awesome",
+        "bye",
+        "goodbye",
+        "see you",
+        "lol",
+        "haha",
+        "lmao",
+    ];
+    greetings.contains(&trimmed)
 }
 
 /// Check if text contains an admin setup keyword (spec 8.1).
@@ -489,6 +541,7 @@ mod tests {
             }],
             dates_mentioned: vec!["tomorrow".to_owned()],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         };
         let json = serde_json::to_string(&meta).expect("should serialize");
         let deserialized: ExtractedMetadata =

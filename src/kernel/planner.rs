@@ -407,6 +407,7 @@ mod tests {
             }],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         }
     }
 
@@ -520,6 +521,7 @@ mod tests {
                 entities: vec![],
                 dates_mentioned: vec!["next Tuesday".to_owned()],
                 extra: serde_json::Value::Null,
+                is_greeting: false,
             },
             session_working_memory: vec![],
             conversation_history: vec![],
@@ -568,6 +570,7 @@ mod tests {
                 entities: vec![],
                 dates_mentioned: vec![],
                 extra: serde_json::Value::Null,
+                is_greeting: false,
             },
             session_working_memory: vec![],
             conversation_history: vec![],
@@ -793,6 +796,7 @@ mod tests {
                 entities: vec![],
                 dates_mentioned: vec![],
                 extra: serde_json::Value::Null,
+                is_greeting: false,
             },
             session_working_memory: vec![],
             conversation_history: vec![],

@@ -20,6 +20,10 @@ pub struct ExtractedMetadata {
     /// Additional structured fields.
     #[serde(default)]
     pub extra: serde_json::Value,
+    /// True for greetings and casual chat that need no tool execution (spec 7, fast path).
+    /// When false, the Planner decides whether tools are needed.
+    #[serde(default)]
+    pub is_greeting: bool,
 }
 
 /// A typed entity extracted from message content (spec 6.10).
@@ -85,6 +89,7 @@ mod tests {
             entities: vec![],
             dates_mentioned: vec![],
             extra: serde_json::Value::Null,
+            is_greeting: false,
         }
     }
 
