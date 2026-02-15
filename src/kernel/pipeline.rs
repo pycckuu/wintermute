@@ -27,7 +27,9 @@ use crate::kernel::session::{ConversationTurn, SessionStore, StructuredToolOutpu
 use crate::kernel::synthesizer::{OutputInstructions, StepResult, Synthesizer, SynthesizerContext};
 use crate::kernel::template::TaskTemplate;
 use crate::tools::ToolRegistry;
-use crate::types::{LabeledEvent, Principal, SecurityLabel, TaintLevel, Task, TaskState};
+use crate::types::{
+    LabeledEvent, Principal, PrincipalClass, SecurityLabel, TaintLevel, Task, TaskState,
+};
 
 use chrono::Utc;
 
@@ -86,6 +88,25 @@ pub struct PipelineOutput {
     /// True when persona was stored this turn (pfar-system-identity-document.md §4).
     /// Signals the caller to rebuild the SID.
     pub persona_changed: bool,
+    /// Set when `admin.prompt_credential` was executed in the pipeline (spec 8.5).
+    /// Signals the caller to register a FlowManager flow so the next message
+    /// (credential paste) is intercepted instead of going through the pipeline.
+    pub credential_prompt: Option<CredentialPromptInfo>,
+}
+
+/// Info about a credential prompt issued during pipeline execution (spec 8.5).
+///
+/// When the Planner calls `admin.prompt_credential` through the pipeline
+/// (instead of via `parse_connect_command` → FlowManager), main.rs needs
+/// this info to register a FlowManager flow for credential interception.
+#[derive(Debug, Clone)]
+pub struct CredentialPromptInfo {
+    /// Service being set up (e.g. "notion").
+    pub service: String,
+    /// Vault key for storing the credential (e.g. "vault:notion_integration_token").
+    pub vault_key: String,
+    /// Expected token prefix for credential classification (e.g. "ntn_").
+    pub expected_prefix: Option<String>,
 }
 
 /// The Plan-Then-Execute pipeline (spec 7).
@@ -248,6 +269,7 @@ impl Pipeline {
     /// Execute Phases 1-2: Plan and Execute (spec 7, Phases 1-2).
     ///
     /// Returns tool execution results, final data label, and pipeline path indicator.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_full_pipeline(
         &self,
         task: &mut Task,
@@ -256,6 +278,7 @@ impl Pipeline {
         labeled_event: &LabeledEvent,
         memory_entries: Vec<String>,
         sid: Option<String>,
+        raw_text: &str,
     ) -> Result<
         (
             Vec<crate::kernel::executor::StepExecutionResult>,
@@ -269,7 +292,7 @@ impl Pipeline {
         info!(task_id = %task.task_id, pipeline_path = "full", "phase 1: planning");
 
         let planner_ctx = self
-            .build_planner_context(task, template, metadata, memory_entries, sid)
+            .build_planner_context(task, template, metadata, memory_entries, sid, raw_text)
             .await;
         let prompt = Planner::compose_prompt(&planner_ctx);
 
@@ -428,6 +451,7 @@ impl Pipeline {
                 &labeled_event,
                 memory_entries.clone(),
                 sid_text.clone(),
+                &raw_text,
             )
             .await?
         } else {
@@ -503,6 +527,33 @@ impl Pipeline {
         self.store_session_results(task, &raw_text, &exec_results, &response_text, data_label)
             .await;
 
+        // Check if admin.prompt_credential was executed — signal to main.rs
+        // to register a FlowManager flow for credential interception (spec 8.5).
+        let credential_prompt = exec_results.iter().find_map(|r| {
+            if r.tool == "admin.prompt_credential" {
+                let data = &r.output;
+                if data.get("prompt_required").and_then(|v| v.as_bool()) == Some(true) {
+                    return Some(CredentialPromptInfo {
+                        service: data
+                            .get("service")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        vault_key: data
+                            .get("ref_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        expected_prefix: data
+                            .get("expected_prefix")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_owned()),
+                    });
+                }
+            }
+            None
+        });
+
         // Mark task complete.
         task.state = TaskState::Completed;
 
@@ -513,6 +564,7 @@ impl Pipeline {
             output_sinks: task.output_sinks.clone(),
             data_label,
             persona_changed: is_persona_just_configured,
+            credential_prompt,
         })
     }
 
@@ -539,6 +591,8 @@ impl Pipeline {
     ///
     /// For third-party triggers, uses `planner_task_description` instead of
     /// the template description (Invariant E, regression test 13).
+    /// For owner triggers, includes `raw_text` so the Planner knows what
+    /// the user actually asked (spec 7, trust root).
     async fn build_planner_context(
         &self,
         task: &Task,
@@ -546,6 +600,7 @@ impl Pipeline {
         metadata: &ExtractedMetadata,
         memory_entries: Vec<String>,
         sid: Option<String>,
+        raw_text: &str,
     ) -> PlannerContext {
         let (working_memory, conversation) = self.read_session_data(&task.principal).await;
 
@@ -567,6 +622,15 @@ impl Pipeline {
             principal_class,
             memory_entries,
             sid,
+            // Only pass raw message to Planner for trusted principals (spec 7).
+            // Owner is the trust root — no injection risk. ThirdParty/Webhook
+            // messages are never exposed to the Planner (Invariant E).
+            user_message: match principal_class {
+                PrincipalClass::Owner | PrincipalClass::Cron | PrincipalClass::Paired => {
+                    Some(raw_text.to_owned())
+                }
+                PrincipalClass::ThirdParty | PrincipalClass::WebhookSource => None,
+            },
         }
     }
 
@@ -1524,7 +1588,14 @@ mod tests {
         };
 
         let ctx = pipeline
-            .build_planner_context(&task, &template, &metadata, vec![], None)
+            .build_planner_context(
+                &task,
+                &template,
+                &metadata,
+                vec![],
+                None,
+                "schedule meeting",
+            )
             .await;
 
         // The planner_task_description should be set.
@@ -1534,6 +1605,11 @@ mod tests {
         );
         // The principal class should be ThirdParty.
         assert_eq!(ctx.principal_class, PrincipalClass::ThirdParty);
+        // ThirdParty should NOT get user_message (Invariant E).
+        assert!(
+            ctx.user_message.is_none(),
+            "third-party context must not include user_message"
+        );
         // The prompt should use planner_task_description, not template_description.
         let prompt = Planner::compose_prompt(&ctx);
         assert!(

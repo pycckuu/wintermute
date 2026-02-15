@@ -406,6 +406,18 @@ async fn run_telegram_loop(
                                             if output.persona_changed {
                                                 rebuild_sid(&sid, &journal, &tools, &mcp_manager).await;
                                             }
+                                            // Register FlowManager flow if pipeline issued a
+                                            // credential prompt (spec 8.5). This bridges the gap
+                                            // when "set up notion" goes through Planner instead
+                                            // of parse_connect_command.
+                                            if let Some(ref cred) = output.credential_prompt {
+                                                flow_manager.register_credential_flow(
+                                                    &task.principal,
+                                                    &cred.service,
+                                                    &cred.vault_key,
+                                                    cred.expected_prefix.clone(),
+                                                );
+                                            }
                                             let _ = kernel_tx
                                                 .send(KernelToAdapter::SendMessage {
                                                     chat_id,

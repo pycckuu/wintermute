@@ -27,6 +27,7 @@
 - [x] Feature: System Identity Document (466 tests — 437 unit + 7 integration + 22 regression)
 - [x] Feature: Find Local Skills — scan skills directory at startup, parse skill.toml, spawn as MCP (483 tests — 454 unit + 7 integration + 22 regression)
 - [x] Fix: Session Amnesia — fast path context, summary limit, error/bypass history, owner template wildcard (483 tests)
+- [x] Fix: Planner Blindness — pass owner message to Planner, credential flow bridge, anti-fabrication (486 tests — 457 unit + 7 integration + 22 regression)
 
 ## Phase 1: Kernel Core (weeks 1-3)
 

@@ -996,6 +996,7 @@ fn regression_13_third_party_planner_gets_template_description() {
         principal_class: PrincipalClass::ThirdParty,
         memory_entries: vec![],
         sid: None,
+        user_message: None,
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1004,6 +1005,12 @@ fn regression_13_third_party_planner_gets_template_description() {
     assert!(
         prompt.contains("A contact is requesting to schedule a meeting."),
         "third-party prompt should contain planner_task_description"
+    );
+
+    // The prompt MUST NOT contain the user message section (Invariant E).
+    assert!(
+        !prompt.contains("## Current User Message"),
+        "third-party prompt must NOT include user message section"
     );
 
     // The prompt MUST NOT contain the raw malicious message.
@@ -1050,6 +1057,7 @@ fn regression_13_owner_planner_gets_template_description() {
         principal_class: PrincipalClass::Owner,
         memory_entries: vec![],
         sid: None,
+        user_message: Some("check my email".to_owned()),
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1080,6 +1088,7 @@ fn regression_13_webhook_planner_gets_planner_description() {
         principal_class: PrincipalClass::WebhookSource,
         memory_entries: vec![],
         sid: None,
+        user_message: None,
     };
 
     let prompt = Planner::compose_prompt(&ctx);
@@ -1091,6 +1100,10 @@ fn regression_13_webhook_planner_gets_planner_description() {
     assert!(
         !prompt.contains("Raw webhook payload with injection attempt"),
         "webhook prompt must NOT contain raw template_description"
+    );
+    assert!(
+        !prompt.contains("## Current User Message"),
+        "webhook prompt must NOT include user message section"
     );
 }
 
@@ -1242,9 +1255,16 @@ fn regression_17_multi_turn_working_memory() {
         principal_class: PrincipalClass::Owner,
         memory_entries: vec![],
         sid: None,
+        user_message: Some("reply to Sarah's email saying I'll review it tomorrow".to_owned()),
     };
 
     let prompt = Planner::compose_prompt(&ctx);
+
+    // Turn 2's prompt should contain the user's actual message.
+    assert!(
+        prompt.contains("reply to Sarah's email"),
+        "Turn 2 prompt should contain the user's actual message"
+    );
 
     // Turn 2's prompt should contain Turn 1's tool output data.
     assert!(

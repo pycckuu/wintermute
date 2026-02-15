@@ -204,6 +204,59 @@ impl KernelFlowManager {
         ))
     }
 
+    /// Register a credential flow from pipeline execution of `admin.prompt_credential`
+    /// (spec 8.5).
+    ///
+    /// When the Planner calls `admin.prompt_credential` through the pipeline
+    /// (instead of the user saying "connect X"), we still need the FlowManager
+    /// to intercept the next message (credential paste). This method registers
+    /// that flow so `intercept()` can catch it.
+    pub fn register_credential_flow(
+        &mut self,
+        principal: &Principal,
+        service: &str,
+        vault_key: &str,
+        expected_prefix: Option<String>,
+    ) {
+        let principal_key = serde_json::to_string(principal).unwrap_or_default();
+
+        // Remove "vault:" prefix if present — FlowManager stores raw vault keys.
+        let raw_vault_key = vault_key.strip_prefix("vault:").unwrap_or(vault_key);
+
+        // Remove any existing flow for this principal.
+        if self.active_flows.contains_key(&principal_key) {
+            self.remove_flow(&principal_key);
+        }
+
+        let flow = KernelFlow {
+            service: service.to_owned(),
+            state: FlowState::AwaitingCredential {
+                prompted_at: Instant::now(),
+                ttl: Duration::from_secs(FLOW_TTL_SECS),
+            },
+            expected_prefix: expected_prefix.clone(),
+            vault_key: raw_vault_key.to_owned(),
+        };
+
+        // Persist to journal for crash recovery.
+        if let Some(ref j) = self.journal {
+            if let Err(e) = j.save_pending_credential_prompt(
+                &principal_key,
+                service,
+                raw_vault_key,
+                expected_prefix.as_deref(),
+            ) {
+                warn!(error = %e, "failed to persist pipeline credential flow to journal");
+            }
+        }
+
+        self.active_flows.insert(principal_key, flow);
+        info!(
+            service = %service,
+            "flow registered from pipeline: awaiting credential"
+        );
+    }
+
     /// Try to intercept an inbound event as part of an active setup flow
     /// (feature-dynamic-integrations, spec 8.5, Invariant B).
     ///
@@ -849,5 +902,66 @@ mod tests {
             fm.active_flows.contains_key(&principal_key),
             "active flow should not be removed"
         );
+    }
+
+    // -- register_credential_flow (pipeline bridge) --
+
+    #[tokio::test]
+    async fn register_credential_flow_enables_intercept() {
+        let (mut fm, vault) = make_flow_manager();
+
+        // No flow registered yet — credential paste should NOT be consumed.
+        let event = make_event("ntn_265011509509ABCdefGHIjkl", Principal::Owner);
+        let result = fm.intercept(&event).await;
+        assert!(matches!(result, FlowIntercept::NotConsumed));
+
+        // Register flow from pipeline (simulating admin.prompt_credential execution).
+        fm.register_credential_flow(
+            &Principal::Owner,
+            "notion",
+            "vault:notion_notion_token",
+            Some("ntn_".to_owned()),
+        );
+
+        // Now the credential paste SHOULD be consumed.
+        let event2 = make_event("ntn_265011509509ABCdefGHIjkl", Principal::Owner);
+        let result2 = fm.intercept(&event2).await;
+        match result2 {
+            FlowIntercept::Consumed { delete_message, .. } => {
+                // Credential should be stored in vault.
+                let stored = vault.get_secret("notion_notion_token").await;
+                assert!(stored.is_ok(), "credential should be stored in vault");
+                // Message should be deleted (Invariant B).
+                assert!(delete_message.is_some(), "should request message deletion");
+            }
+            FlowIntercept::NotConsumed => {
+                panic!("expected Consumed after register_credential_flow")
+            }
+        }
+    }
+
+    #[test]
+    fn register_credential_flow_strips_vault_prefix() {
+        let (manager, vault) = make_manager_and_vault();
+        let mut fm = KernelFlowManager::new(vault, manager, None);
+
+        fm.register_credential_flow(
+            &Principal::Owner,
+            "notion",
+            "vault:notion_notion_token",
+            Some("ntn_".to_owned()),
+        );
+
+        let principal_key = serde_json::to_string(&Principal::Owner).unwrap_or_default();
+        let flow = fm
+            .active_flows
+            .get(&principal_key)
+            .expect("flow should exist");
+        assert_eq!(
+            flow.vault_key, "notion_notion_token",
+            "vault: prefix should be stripped"
+        );
+        assert_eq!(flow.service, "notion");
+        assert_eq!(flow.expected_prefix.as_deref(), Some("ntn_"));
     }
 }

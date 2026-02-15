@@ -40,7 +40,7 @@ You receive:
 - Conversation history summaries
 
 You do NOT receive:
-- Raw external content (emails, web pages, messages)
+- Raw external content from untrusted sources (third-party messages, webhooks, emails)
 - Tool outputs from the current task (it hasn't executed yet)
 
 Produce a JSON plan: an ordered list of tool calls with arguments.
@@ -109,6 +109,13 @@ pub struct PlannerContext {
     /// Rendered System Identity Document for prompt prefix
     /// (pfar-system-identity-document.md).
     pub sid: Option<String>,
+    /// Owner's raw message text for trusted principals (spec 7).
+    ///
+    /// Set for Owner, Cron, and Paired principals so the Planner can
+    /// understand what the user actually asked. Always `None` for
+    /// ThirdParty and WebhookSource to prevent indirect prompt
+    /// injection (Invariant E).
+    pub user_message: Option<String>,
 }
 
 /// Planner errors.
@@ -191,12 +198,20 @@ impl Planner {
             None => String::new(),
         };
 
-        // Step 8: Compose the full prompt.
+        // Step 8: Include owner's raw message for trusted principals (spec 7).
+        // ThirdParty/WebhookSource never get this (Invariant E).
+        let user_message_section = match &ctx.user_message {
+            Some(msg) => format!("\n\n## Current User Message\n{msg}"),
+            None => String::new(),
+        };
+
+        // Step 9: Compose the full prompt.
         format!(
             "{sid_section}{BASE_SAFETY_RULES}\n\n\
              {PLANNER_ROLE_PROMPT}\n\n\
              ## Task\n\
              Description: {task_description}\
+             {user_message_section}\
              {long_term_memory_section}\n\n\
              ## Extracted Metadata\n\
              {metadata_json}\n\n\
@@ -453,6 +468,7 @@ mod tests {
             principal_class: PrincipalClass::Owner,
             memory_entries: vec![],
             sid: None,
+            user_message: Some("check my email".to_owned()),
         }
     }
 
@@ -504,6 +520,45 @@ mod tests {
             prompt.contains("You are the Planner"),
             "prompt should include planner role prompt"
         );
+
+        // Owner prompt should include the user's actual message.
+        assert!(
+            prompt.contains("## Current User Message"),
+            "owner prompt should include user message section header"
+        );
+        assert!(
+            prompt.contains("check my email"),
+            "owner prompt should include the actual user message text"
+        );
+    }
+
+    #[test]
+    fn test_compose_prompt_third_party_excludes_user_message() {
+        // Third-party prompt must NOT include user message (Invariant E).
+        let ctx = PlannerContext {
+            task_id: Uuid::nil(),
+            template_description: "Attacker message".to_owned(),
+            planner_task_description: Some("Handle scheduling request.".to_owned()),
+            extracted_metadata: ExtractedMetadata {
+                intent: Some("scheduling".to_owned()),
+                entities: vec![],
+                dates_mentioned: vec![],
+                extra: serde_json::Value::Null,
+                is_greeting: false,
+            },
+            session_working_memory: vec![],
+            conversation_history: vec![],
+            available_tools: vec![],
+            principal_class: PrincipalClass::ThirdParty,
+            memory_entries: vec![],
+            sid: None,
+            user_message: None,
+        };
+        let prompt = Planner::compose_prompt(&ctx);
+        assert!(
+            !prompt.contains("## Current User Message"),
+            "third-party prompt must NOT include user message section"
+        );
     }
 
     #[test]
@@ -532,6 +587,7 @@ mod tests {
             principal_class: PrincipalClass::ThirdParty,
             memory_entries: vec![],
             sid: None,
+            user_message: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -578,6 +634,7 @@ mod tests {
             principal_class: PrincipalClass::Owner,
             memory_entries: vec![],
             sid: None,
+            user_message: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
@@ -804,6 +861,7 @@ mod tests {
             principal_class: PrincipalClass::WebhookSource,
             memory_entries: vec![],
             sid: None,
+            user_message: None,
         };
 
         let prompt = Planner::compose_prompt(&ctx);
