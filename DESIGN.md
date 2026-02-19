@@ -1189,13 +1189,15 @@ Files: executor/*, Dockerfile.sandbox
 
 ### Phase 2: Core Loop (weeks 4-6)
 
-**Task 4: Memory**
+**Task 4: Memory** ✅
 Files: memory/*, migrations/
 - SQLite schema + FTS5 + triggers
 - Write actor (mpsc channel)
 - FTS5 search
 - Optional: sqlite-vec + OllamaEmbedder + RRF merge
 - Embedder trait + OllamaEmbedder implementation
+- TrustSource typed enum (config/user), content size limits, WAL mode + pragmas
+- 29 tests
 
 **Task 5: Telegram**
 Files: telegram/*

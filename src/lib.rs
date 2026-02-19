@@ -12,12 +12,12 @@ pub mod config;
 pub mod credentials;
 pub mod executor;
 pub mod logging;
+pub mod memory;
 pub mod providers;
 
 // Future modules — uncomment as implemented:
 // pub mod tools;
 // pub mod agent;
-// pub mod memory;
 // pub mod telegram;
 // pub mod observer;
 // pub mod heartbeat;
