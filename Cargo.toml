@@ -1,27 +1,67 @@
-# TODO(template) update for your crate name
 [package]
-name = "mycrate" # Choose a placeholder name
+name = "wintermute"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <you@example.com>"] # Add placeholder authors
-description = "A description of your crate" # Add placeholder description
-# TODO(template) update for your repository
-repository = "https://github.com/IgraLabs/rust-template"
-license = "Apache-2.0" # TODO(template) update license if needed
+authors = ["Igor Markelov <pycckuu@gmail.com>"]
+description = "Self-coding AI agent with Telegram interface and sandboxed Docker execution"
+repository = "https://github.com/pycckuu/wintermute"
+license = "Apache-2.0"
 
+[lib]
+name = "wintermute"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wintermute"
+path = "src/main.rs"
 
 [dependencies]
-# Add dependencies here, for example:
-# log = "0.4"
-thiserror = {version = "1.0", default-features = false }
+# Async runtime
+tokio = { version = "1", features = ["full"] }
 
-# Moved lints from [workspace.lints.*] to [lints.*]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Telegram
+teloxide = { version = "0.13", features = ["macros"] }
+
+# Docker
+bollard = "0.18"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+dotenvy = "0.15"
+regex = "1"
+url = "2"
+rand = "0.8"
+notify = "7"
+cron = "0.13"
+directories = "5"
+
 [lints.rust]
 missing_docs = "deny"
-# TODO(template) if you use any unsafe code, then running miri in CI is a must
-# if for a crate in the workspace you need an unsafe code
-# prefer to preserve forbid for the workspace
-# and allowing only at a specific crate level
 unsafe_code = "forbid"
 
 [lints.clippy]

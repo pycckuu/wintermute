@@ -29,8 +29,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          headerPattern: '^\[ENG-\d+\] (\w+!?)(?:\(([\w$.\-*/ ]*)\))?: (.*)$'
-          headerPatternCorrespondence: type, scope, subject
           types: |
             feat
             fix
@@ -43,6 +41,16 @@ jobs:
             ci
             revert
             deps
+          scopes: |
+            providers
+            executor
+            tools
+            agent
+            memory
+            telegram
+            observer
+            heartbeat
+            config
         continue-on-error: true
 
       - name: Add PR comment for invalid title
@@ -55,23 +63,20 @@ jobs:
 
             Your PR title doesn't follow the required format.
 
-            **Required format:** `[ENG-N] type(scope): title`
+            **Required format:** `type(scope): title`
 
             **Examples of valid titles:**
-            - `[ENG-700] ci: add ARM64 Docker build support`
-            - `[ENG-696] feat(atan): add new API endpoint`
-            - `[ENG-123] fix: correct memory leak`
-            - `[ENG-456] refactor(igra): improve error handling`
+            - `ci: add GitHub Actions workflows`
+            - `feat(telegram): add inline keyboard support`
+            - `fix(executor): correct timeout handling`
+            - `refactor(memory): improve FTS5 search`
 
             **Components:**
-            - `[ENG-N]` - Required task ID (e.g., `[ENG-123]`)
             - `type` - One of: `feat`, `fix`, `chore`, `test`, `bench`, `perf`, `refactor`, `docs`, `ci`, `revert`, `deps`
-            - `(scope)` - Optional scope (e.g., `(atan)`, `(igra)`)
+            - `(scope)` - Optional scope: `providers`, `executor`, `tools`, `agent`, `memory`, `telegram`, `observer`, `heartbeat`, `config`
             - `title` - Brief description
 
-            **Breaking Changes:** Use `!` for breaking changes (e.g., `[ENG-100] feat!: changed the API`)
-
-            **Documentation:** [IGRA Coding Standards & Git Workflow](https://www.notion.so/IGRA-Coding-Standards-Git-Workflow-1dde2b1f1b7d80529604e4f6bcca55cc)
+            **Breaking Changes:** Use `!` for breaking changes (e.g., `feat!: changed the API`)
 
       - name: Remove comment for valid title
         if: steps.lint_pr_title.outcome == 'success'

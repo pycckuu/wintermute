@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git jq bc timeout coreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash wintermute
+USER wintermute
+WORKDIR /workspace
+
+# Agent installs packages at runtime via pip install --user
+# Persists in ~/.local until container reset
+# requirements.txt auto-installed on container creation

@@ -14,3 +14,9 @@ target/
 
 # OS specific
 .DS_Store
+
+# Conductor workspace context
+.context/
+
+# Runtime
+.env

@@ -1,0 +1,37 @@
+[models]
+default = "anthropic/claude-sonnet-4-5-20250929"
+
+[models.roles]
+observer = "ollama/qwen3:8b"
+# embedding = "ollama/nomic-embed-text"   # uncomment to enable vector search
+
+# [models.skills]
+# deploy_check = "anthropic/claude-haiku-4-5-20251001"
+
+[channels.telegram]
+bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
+allowed_users = [123456789]
+
+[sandbox]
+memory_mb = 2048
+cpu_cores = 2.0
+# runtime = "runsc"  # optional: gVisor for stronger isolation
+
+[budget]
+max_tokens_per_session = 500_000
+max_tokens_per_day = 5_000_000
+max_tool_calls_per_turn = 20
+max_dynamic_tools_per_turn = 20
+
+[egress]
+allowed_domains = ["github.com", "api.github.com", "pypi.org",
+                   "registry.npmjs.org", "docs.rs", "crates.io",
+                   "en.wikipedia.org"]
+fetch_rate_limit = 30
+request_rate_limit = 10
+
+[privacy]
+# Domains that are NEVER auto-trusted, always require approval
+always_approve_domains = []
+# Block outbound requests to these domains entirely
+blocked_domains = []
