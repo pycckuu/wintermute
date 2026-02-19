@@ -1,0 +1,10 @@
+//! Integration tests for `src/tools/`.
+
+#[path = "tools/core_test.rs"]
+mod core_test;
+#[path = "tools/create_tool_test.rs"]
+mod create_tool_test;
+#[path = "tools/registry_test.rs"]
+mod registry_test;
+#[path = "tools/tool_router_test.rs"]
+mod tool_router_test;

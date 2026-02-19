@@ -103,8 +103,8 @@ Execute in order (**all mandatory**):
 2. **Security Review**: Deep Wintermute-aware analysis.
    - **Skill**: `/review-wintermute-pr`
    - This runs 4 parallel agents: Security Invariant Auditor, Architecture Compliance, Rust Quality & Code Rules, Regression & Test Coverage Guardian.
-   - **Action**: Address ALL CRITICAL and HIGH findings.
-   - If findings are fixed, run review again to confirm no unresolved CRITICAL/HIGH issues remain.
+   - **Action**: Address ALL CRITICAL, HIGH, and MEDIUM findings.
+   - If findings are fixed, run review again to confirm no unresolved CRITICAL/HIGH/MEDIUM issues remain.
 
 3. **Lint**: Final style and safety check.
    - **Agent**: `/code-linter`

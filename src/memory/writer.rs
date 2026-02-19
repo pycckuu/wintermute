@@ -1,7 +1,7 @@
 //! Single-writer actor for serialized SQLite writes.
 //!
 //! All database mutations flow through this actor via an
-//! [`mpsc`](tokio::sync::mpsc) channel. This prevents SQLite write contention
+//! [`mpsc`] channel. This prevents SQLite write contention
 //! while allowing concurrent reads through the connection pool.
 
 use sqlx::SqlitePool;
