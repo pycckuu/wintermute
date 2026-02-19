@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::Context;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Connection;
 use tracing::{info, warn};
 
@@ -23,9 +23,11 @@ use wintermute::executor::docker::DockerExecutor;
 use wintermute::executor::redactor::Redactor;
 use wintermute::executor::Executor;
 use wintermute::logging;
+use wintermute::memory::{MemoryEngine, TrustSource};
 use wintermute::providers::router::ModelRouter;
 
 const BOOTSTRAP_MIGRATION: &str = "001_schema.sql";
+const MEMORY_MIGRATION: &str = "002_memory.sql";
 
 /// Wintermute — a self-coding AI agent.
 #[derive(Parser)]
@@ -151,11 +153,42 @@ async fn handle_start() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("docker executor unhealthy: {health:?}"));
     }
 
+    // Create connection pool and run migrations for the memory engine.
+    // WAL mode enables concurrent reads while the writer actor holds a write lock.
+    // trusted_schema=OFF prevents untrusted SQL functions in schema definitions.
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(&paths.memory_db)
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .pragma("trusted_schema", "OFF")
+                .pragma("foreign_keys", "ON"),
+        )
+        .await
+        .context("failed to create sqlite pool for memory engine")?;
+    apply_memory_migration(&pool).await?;
+
+    let memory = MemoryEngine::new(pool, None)
+        .await
+        .context("failed to initialise memory engine")?;
+
+    // Seed trust ledger with pre-approved domains from config.
+    for domain in &config.egress.allowed_domains {
+        memory
+            .trust_domain(domain, TrustSource::Config)
+            .await
+            .context("failed to seed trust ledger")?;
+    }
+
     info!(
         default_model = %config.models.default,
         provider_count = router.provider_count(),
-        "startup checks complete; core loop wiring will be added in phase 2"
+        "startup checks complete; agent loop wiring will be added in phase 2c"
     );
+
+    memory.shutdown().await;
     Ok(())
 }
 
@@ -349,7 +382,7 @@ async fn apply_bootstrap_migration(paths: &RuntimePaths) -> anyhow::Result<()> {
         .with_context(|| format!("failed to connect sqlite at {}", paths.memory_db.display()))?;
 
     let script = include_str!("../migrations/001_schema.sql");
-    sqlx::query(script)
+    sqlx::raw_sql(script)
         .execute(&mut connection)
         .await
         .context("failed to apply bootstrap migration")?;
@@ -359,6 +392,52 @@ async fn apply_bootstrap_migration(paths: &RuntimePaths) -> anyhow::Result<()> {
         .execute(&mut connection)
         .await
         .context("failed to persist migration marker")?;
+
+    // Apply memory migration (002) if not yet applied.
+    let applied: Option<(String,)> = sqlx::query_as("SELECT name FROM migrations WHERE name = ?1")
+        .bind(MEMORY_MIGRATION)
+        .fetch_optional(&mut connection)
+        .await
+        .context("failed to check memory migration")?;
+
+    if applied.is_none() {
+        let memory_script = include_str!("../migrations/002_memory.sql");
+        sqlx::raw_sql(memory_script)
+            .execute(&mut connection)
+            .await
+            .context("failed to apply memory migration")?;
+
+        sqlx::query("INSERT OR IGNORE INTO migrations(name) VALUES (?1)")
+            .bind(MEMORY_MIGRATION)
+            .execute(&mut connection)
+            .await
+            .context("failed to persist memory migration marker")?;
+    }
+
+    Ok(())
+}
+
+/// Apply memory migration to an existing pool (for startup after init).
+async fn apply_memory_migration(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
+    let applied: Option<(String,)> = sqlx::query_as("SELECT name FROM migrations WHERE name = ?1")
+        .bind(MEMORY_MIGRATION)
+        .fetch_optional(pool)
+        .await
+        .context("failed to check memory migration")?;
+
+    if applied.is_none() {
+        let memory_script = include_str!("../migrations/002_memory.sql");
+        sqlx::raw_sql(memory_script)
+            .execute(pool)
+            .await
+            .context("failed to apply memory migration")?;
+
+        sqlx::query("INSERT OR IGNORE INTO migrations(name) VALUES (?1)")
+            .bind(MEMORY_MIGRATION)
+            .execute(pool)
+            .await
+            .context("failed to persist memory migration marker")?;
+    }
 
     Ok(())
 }
