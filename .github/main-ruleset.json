@@ -3,7 +3,7 @@
   "name": "Main protection",
   "target": "branch",
   "source_type": "Repository",
-  "source": "IgraLabs/rust-template",
+  "source": "pycckuu/wintermute",
   "enforcement": "active",
   "conditions": {
     "ref_name": {

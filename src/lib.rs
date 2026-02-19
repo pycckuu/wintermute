@@ -1,55 +1,21 @@
-// TODO(template) additional documentation files
-#![doc = include_str!("../doc/mainpage-doc.md")]
+//! Wintermute — a self-coding AI agent.
+//!
+//! Single Rust binary. Talks to you via Telegram. Writes tools to extend itself.
+//! Privacy boundary: your data never leaves without your consent.
+//!
+//! See `DESIGN.md` for full architecture documentation.
 
-// TODO(template) - remove/change the code below
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-use thiserror::Error;
+pub mod config;
 
-/// Parameter error
-#[derive(Debug, Error, PartialEq)]
-pub enum ParameterError {
-    /// One of the arguments is greater than the `UPPER_BOUND`
-    #[error("the integer {0} is too large")]
-    TooLarge(u8),
-}
-
-/// For constants prefer to provide
-/// a reference to a paper section
-/// where the constant is defined
-/// or justify the value logically
-pub const UPPER_BOUND: u8 = 2u8.pow(7);
-
-/// Adds two small integers together.
-pub fn add_small_integers(a: u8, b: u8) -> Result<u8, ParameterError> {
-    if a.max(b) >= UPPER_BOUND {
-        return Err(ParameterError::TooLarge(a.max(b)));
-    }
-    Ok(a.checked_add(b)
-        .expect("the upper bound ensures non-overflow"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn addition_of_bounded() {
-        assert_eq!(Ok(8), add_small_integers(3, 5));
-    }
-
-    #[test]
-    fn addition_bound_check() {
-        assert_eq!(
-            Err(ParameterError::TooLarge(200)),
-            add_small_integers(200, 5)
-        );
-    }
-
-    #[test]
-    fn addition_edge_case() {
-        assert_eq!(
-            Ok(254),
-            add_small_integers(UPPER_BOUND - 1, UPPER_BOUND - 1)
-        );
-    }
-}
+// Future modules — uncomment as implemented:
+// pub mod providers;
+// pub mod executor;
+// pub mod tools;
+// pub mod agent;
+// pub mod memory;
+// pub mod telegram;
+// pub mod observer;
+// pub mod heartbeat;
