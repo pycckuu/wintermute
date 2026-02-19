@@ -2,7 +2,7 @@
 //!
 //! The [`MemoryEngine`] is the sole gateway to `memory.db`. All reads go through
 //! [`MemoryEngine::search`] (concurrent). All writes go through a single-writer
-//! actor backed by an [`mpsc`](tokio::sync::mpsc) channel to prevent SQLite
+//! actor backed by an [`mpsc`] channel to prevent SQLite
 //! write contention.
 //!
 //! Embedding-based vector search is optional — when no embedding model is
@@ -274,7 +274,7 @@ pub const MAX_CONTENT_SIZE: usize = 64 * 1024;
 /// Central memory engine managing persistence, search, and write serialization.
 ///
 /// All reads go directly through the connection pool (concurrent).
-/// All writes go through a single-writer actor via [`mpsc`](tokio::sync::mpsc).
+/// All writes go through a single-writer actor via [`mpsc`].
 pub struct MemoryEngine {
     /// Connection pool for reads.
     db: SqlitePool,

@@ -5,26 +5,36 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Context;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Connection;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use wintermute::agent::approval::ApprovalManager;
+use wintermute::agent::budget::DailyBudget;
+use wintermute::agent::policy::{PolicyContext, RateLimiter};
+use wintermute::agent::{SessionRouter, TelegramOutbound};
 use wintermute::config::{
     load_default_agent_config, load_default_config, runtime_paths, RuntimePaths,
 };
 use wintermute::credentials::{
     enforce_private_file_permissions, load_default_credentials, Credentials,
 };
+use wintermute::executor::direct::DirectExecutor;
 use wintermute::executor::docker::DockerExecutor;
 use wintermute::executor::redactor::Redactor;
 use wintermute::executor::Executor;
 use wintermute::logging;
 use wintermute::memory::{MemoryEngine, TrustSource};
 use wintermute::providers::router::ModelRouter;
+use wintermute::telegram;
+use wintermute::tools::registry::DynamicToolRegistry;
+use wintermute::tools::ToolRouter;
 
 const BOOTSTRAP_MIGRATION: &str = "001_schema.sql";
 const MEMORY_MIGRATION: &str = "002_memory.sql";
@@ -125,16 +135,19 @@ async fn handle_init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Outbound channel buffer size.
+const OUTBOUND_CHANNEL_CAPACITY: usize = 256;
+
 async fn handle_start() -> anyhow::Result<()> {
     let paths = runtime_paths()?;
     let config = load_default_config()
         .with_context(|| format!("failed to load {}", paths.config_toml.display()))?;
-    let _agent_config = load_default_agent_config()
+    let agent_config = load_default_agent_config()
         .with_context(|| format!("failed to load {}", paths.agent_toml.display()))?;
     let credentials = load_default_credentials()
         .with_context(|| format!("failed to load {}", paths.env_file.display()))?;
     let token_key = &config.channels.telegram.bot_token_env;
-    let _telegram_token = credentials.require(token_key)?;
+    let telegram_token = credentials.require(token_key)?;
 
     let router = ModelRouter::from_config(&config.models, &credentials)?;
     if !router.has_model(&config.models.default) {
@@ -144,14 +157,22 @@ async fn handle_start() -> anyhow::Result<()> {
         ));
     }
 
-    ensure_docker_available_for_start(DockerExecutor::docker_available().await)?;
-
+    // Set up executor: Docker preferred, Direct as fallback
     let redactor = Redactor::new(credentials.known_secrets());
-    let executor = DockerExecutor::new(&config, &paths, redactor).await?;
-    let health = executor.health_check().await?;
-    if !health.is_healthy() {
-        return Err(anyhow::anyhow!("docker executor unhealthy: {health:?}"));
-    }
+    let executor: Arc<dyn Executor> = if DockerExecutor::docker_available().await {
+        let docker = DockerExecutor::new(&config, &paths, redactor.clone()).await?;
+        let health = docker.health_check().await?;
+        if !health.is_healthy() {
+            return Err(anyhow::anyhow!("docker executor unhealthy: {health:?}"));
+        }
+        Arc::new(docker)
+    } else {
+        warn!("docker unavailable; using direct executor (maintenance-only)");
+        Arc::new(DirectExecutor::new(
+            paths.scripts_dir.clone(),
+            paths.workspace_dir.clone(),
+        ))
+    };
 
     // Create connection pool and run migrations for the memory engine.
     // WAL mode enables concurrent reads while the writer actor holds a write lock.
@@ -170,9 +191,11 @@ async fn handle_start() -> anyhow::Result<()> {
         .context("failed to create sqlite pool for memory engine")?;
     apply_memory_migration(&pool).await?;
 
-    let memory = MemoryEngine::new(pool, None)
-        .await
-        .context("failed to initialise memory engine")?;
+    let memory = Arc::new(
+        MemoryEngine::new(pool, None)
+            .await
+            .context("failed to initialise memory engine")?,
+    );
 
     // Seed trust ledger with pre-approved domains from config.
     for domain in &config.egress.allowed_domains {
@@ -182,22 +205,69 @@ async fn handle_start() -> anyhow::Result<()> {
             .context("failed to seed trust ledger")?;
     }
 
+    // Phase 2 wiring
+    let daily_budget = Arc::new(DailyBudget::new(config.budget.max_tokens_per_day));
+    let approval_manager = Arc::new(ApprovalManager::new());
+
+    let registry = DynamicToolRegistry::new(paths.scripts_dir.clone())
+        .context("failed to create tool registry")?;
+
+    let (telegram_tx, telegram_rx) = mpsc::channel::<TelegramOutbound>(OUTBOUND_CHANNEL_CAPACITY);
+
+    let fetch_limiter = Arc::new(RateLimiter::new(60, config.egress.fetch_rate_limit));
+    let request_limiter = Arc::new(RateLimiter::new(60, config.egress.request_rate_limit));
+
+    let policy_context = PolicyContext {
+        allowed_domains: config.egress.allowed_domains.clone(),
+        blocked_domains: config.privacy.blocked_domains.clone(),
+        always_approve_domains: config.privacy.always_approve_domains.clone(),
+        executor_kind: executor.kind(),
+    };
+
+    let tool_router = Arc::new(ToolRouter::new(
+        Arc::clone(&executor),
+        redactor,
+        Arc::clone(&memory),
+        Arc::clone(&registry),
+        Some(telegram_tx.clone()),
+        fetch_limiter,
+        request_limiter,
+        policy_context.clone(),
+    ));
+
+    let config_arc = Arc::new(config);
+    let agent_config_arc = Arc::new(agent_config);
+
+    let session_router = Arc::new(SessionRouter::new(
+        Arc::new(router),
+        Arc::clone(&tool_router),
+        Arc::clone(&memory),
+        daily_budget,
+        Arc::clone(&approval_manager),
+        policy_context,
+        telegram_tx,
+        Arc::clone(&config_arc),
+        Arc::clone(&agent_config_arc),
+    ));
+
     info!(
-        default_model = %config.models.default,
-        provider_count = router.provider_count(),
-        "startup checks complete; agent loop wiring will be added in phase 2c"
+        default_model = %config_arc.models.default,
+        "starting telegram bot"
     );
 
-    memory.shutdown().await;
-    Ok(())
-}
+    telegram::run_telegram(
+        &telegram_token,
+        config_arc,
+        session_router,
+        approval_manager,
+        telegram_rx,
+        credentials.known_secrets(),
+        executor,
+        memory,
+        registry,
+    )
+    .await?;
 
-fn ensure_docker_available_for_start(is_available: bool) -> anyhow::Result<()> {
-    if !is_available {
-        return Err(anyhow::anyhow!(
-            "docker is required in strict mode; install/start Docker and retry"
-        ));
-    }
     Ok(())
 }
 

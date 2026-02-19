@@ -15,7 +15,7 @@ pub struct Redactor {
 impl Redactor {
     /// Create a redactor from known secret values.
     pub fn new(exact_secrets: Vec<String>) -> Self {
-        let patterns = default_patterns();
+        let patterns = default_credential_patterns();
         Self {
             exact_secrets,
             patterns,
@@ -50,7 +50,10 @@ impl Redactor {
     }
 }
 
-fn default_patterns() -> Vec<Regex> {
+/// Returns the default credential detection regex patterns.
+///
+/// Shared by the redactor and the Telegram input guard.
+pub fn default_credential_patterns() -> Vec<Regex> {
     let patterns = [
         r"sk-ant-[A-Za-z0-9_\-]{10,}",
         r"sk-[A-Za-z0-9]{32,}",

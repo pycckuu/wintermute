@@ -1,6 +1,6 @@
 //! FTS5 full-text search with optional vector similarity and RRF merging.
 //!
-//! When no [`Embedder`](super::embedder::Embedder) is configured, search uses
+//! When no [`Embedder`] is configured, search uses
 //! SQLite FTS5 only. When an embedder is available, results from FTS5 and
 //! vector similarity are merged using Reciprocal Rank Fusion (RRF).
 

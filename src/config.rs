@@ -135,7 +135,7 @@ impl Default for SandboxConfig {
 }
 
 /// Budget limits for token usage and tool calls.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BudgetConfig {
     /// Maximum tokens per agent session.
     #[serde(default = "default_session_tokens")]
