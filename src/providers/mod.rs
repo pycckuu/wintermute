@@ -193,6 +193,25 @@ pub enum ProviderError {
     Unavailable(String),
 }
 
+impl ProviderError {
+    /// Returns true if this error indicates context window overflow.
+    ///
+    /// Used by the agent loop to trigger aggressive trimming and retry.
+    pub fn is_context_overflow(&self) -> bool {
+        match self {
+            Self::HttpStatus { body, .. } => {
+                let lower = body.to_lowercase();
+                lower.contains("context_length_exceeded")
+                    || lower.contains("context length exceeded")
+                    || lower.contains("input is too long")
+                    || lower.contains("input_length")
+                    || lower.contains("maximum context length")
+            }
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers (useful for all providers)
 // ---------------------------------------------------------------------------

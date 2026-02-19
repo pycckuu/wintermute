@@ -160,11 +160,13 @@ fn check_browser_policy(
 ) -> PolicyDecision {
     let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
-    if action != "navigate" {
-        return PolicyDecision::Allow;
+    if action == "navigate" {
+        return check_domain_policy(input, ctx, is_domain_trusted);
     }
-
-    check_domain_policy(input, ctx, is_domain_trusted)
+    if action == "evaluate" {
+        return PolicyDecision::RequireApproval;
+    }
+    PolicyDecision::Allow
 }
 
 /// Core domain evaluation logic shared by web_request and browser navigate.

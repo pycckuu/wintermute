@@ -7,11 +7,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 
-use wintermute::agent::policy::{PolicyContext, RateLimiter};
+use wintermute::agent::policy::RateLimiter;
 use wintermute::executor::redactor::Redactor;
 use wintermute::executor::{
     ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, HealthStatus,
 };
+use wintermute::tools::browser::BrowserBridge;
 use wintermute::tools::registry::DynamicToolRegistry;
 use wintermute::tools::ToolRouter;
 
@@ -84,12 +85,7 @@ async fn build_router(executor: Arc<dyn Executor>, redactor: Redactor) -> ToolRo
 
     let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
     let request_limiter = Arc::new(RateLimiter::new(60, 10));
-    let policy_context = PolicyContext {
-        allowed_domains: Vec::new(),
-        blocked_domains: Vec::new(),
-        always_approve_domains: Vec::new(),
-        executor_kind: ExecutorKind::Direct,
-    };
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
 
     ToolRouter::new(
         executor,
@@ -99,7 +95,8 @@ async fn build_router(executor: Arc<dyn Executor>, redactor: Redactor) -> ToolRo
         None,
         fetch_limiter,
         request_limiter,
-        policy_context,
+        browser_limiter,
+        None,
     )
 }
 
@@ -148,6 +145,26 @@ async fn unknown_tool_returns_error_result() {
     assert!(
         result.content.contains("Unknown tool"),
         "error should mention unknown tool, got: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn browser_tool_returns_unavailable_without_bridge() {
+    let executor = Arc::new(RouterMockExecutor::new());
+    let redactor = Redactor::new(Vec::new());
+    let router = build_router(executor, redactor).await;
+
+    let input = json!({"action": "navigate", "url": "https://example.com"});
+    let result = router.execute("browser", &input).await;
+
+    assert!(
+        result.is_error,
+        "browser without bridge should return error"
+    );
+    assert!(
+        result.content.contains("unavailable") || result.content.contains("no runtime bridge"),
+        "error should indicate bridge unavailable: {}",
         result.content
     );
 }
@@ -256,6 +273,44 @@ async fn output_is_redacted_for_memory_search_path() {
     );
 }
 
+struct SecretBrowserBridge;
+
+#[async_trait]
+impl BrowserBridge for SecretBrowserBridge {
+    async fn execute(&self, _action: &str, _input: &serde_json::Value) -> Result<String, String> {
+        Ok("bridge leaked SECRET_BROWSER_TOKEN".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn browser_output_is_redacted_when_bridge_is_configured() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let registry =
+        DynamicToolRegistry::new_without_watcher(dir.path().to_path_buf()).expect("registry");
+    let executor: Arc<dyn Executor> = Arc::new(RouterMockExecutor::new());
+    let redactor = Redactor::new(vec!["SECRET_BROWSER_TOKEN".to_owned()]);
+    let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
+    let request_limiter = Arc::new(RateLimiter::new(60, 10));
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
+    let router = ToolRouter::new(
+        executor,
+        redactor,
+        create_dummy_memory_engine().await,
+        registry,
+        None,
+        fetch_limiter,
+        request_limiter,
+        browser_limiter,
+        Some(Arc::new(SecretBrowserBridge)),
+    );
+
+    let input = json!({"action": "close"});
+    let result = router.execute("browser", &input).await;
+    assert!(!result.is_error, "bridge execution should succeed");
+    assert!(!result.content.contains("SECRET_BROWSER_TOKEN"));
+    assert!(result.content.contains("[REDACTED]"));
+}
+
 #[tokio::test]
 async fn tool_definitions_returns_core_plus_dynamic() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -280,12 +335,7 @@ async fn tool_definitions_returns_core_plus_dynamic() {
     let redactor = Redactor::new(Vec::new());
     let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
     let request_limiter = Arc::new(RateLimiter::new(60, 10));
-    let policy_context = PolicyContext {
-        allowed_domains: Vec::new(),
-        blocked_domains: Vec::new(),
-        always_approve_domains: Vec::new(),
-        executor_kind: ExecutorKind::Direct,
-    };
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
 
     let router = ToolRouter::new(
         executor,
@@ -295,12 +345,13 @@ async fn tool_definitions_returns_core_plus_dynamic() {
         None,
         fetch_limiter,
         request_limiter,
-        policy_context,
+        browser_limiter,
+        None,
     );
 
-    let defs = router.tool_definitions(10);
+    let defs = router.tool_definitions(10, None);
 
-    // Should have 7 core + 1 dynamic.
+    // Browser is hidden without a configured bridge: 7 visible core + 1 dynamic.
     assert_eq!(defs.len(), 8, "should have 7 core + 1 dynamic tool");
 
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -311,6 +362,10 @@ async fn tool_definitions_returns_core_plus_dynamic() {
     assert!(
         names.contains(&"execute_command"),
         "should include core tools"
+    );
+    assert!(
+        !names.contains(&"browser"),
+        "browser should be hidden when no bridge is configured"
     );
 }
 
@@ -340,12 +395,7 @@ async fn tool_definitions_respects_max_dynamic_limit() {
     let redactor = Redactor::new(Vec::new());
     let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
     let request_limiter = Arc::new(RateLimiter::new(60, 10));
-    let policy_context = PolicyContext {
-        allowed_domains: Vec::new(),
-        blocked_domains: Vec::new(),
-        always_approve_domains: Vec::new(),
-        executor_kind: ExecutorKind::Direct,
-    };
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
 
     let router = ToolRouter::new(
         executor,
@@ -355,15 +405,98 @@ async fn tool_definitions_respects_max_dynamic_limit() {
         None,
         fetch_limiter,
         request_limiter,
-        policy_context,
+        browser_limiter,
+        None,
     );
 
-    // max_dynamic = 1, so total should be 7 core + 1 dynamic = 8.
-    let defs = router.tool_definitions(1);
+    // max_dynamic = 1, so total should be 7 visible core + 1 dynamic = 8.
+    let defs = router.tool_definitions(1, None);
     assert_eq!(
         defs.len(),
         8,
         "should have 7 core + at most 1 dynamic, got {}",
         defs.len()
+    );
+}
+
+#[tokio::test]
+async fn tool_definitions_with_query_prefers_relevant_dynamic_tool() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().to_path_buf();
+
+    let weather_schema = json!({
+        "name": "weather_tool",
+        "description": "Get weather forecast and temperature for cities",
+        "parameters": { "type": "object" }
+    });
+    std::fs::write(
+        path.join("weather_tool.json"),
+        serde_json::to_string_pretty(&weather_schema).expect("serialize"),
+    )
+    .expect("write");
+
+    let db_schema = json!({
+        "name": "db_tool",
+        "description": "Run SQL migrations and inspect database schema",
+        "parameters": { "type": "object" }
+    });
+    std::fs::write(
+        path.join("db_tool.json"),
+        serde_json::to_string_pretty(&db_schema).expect("serialize"),
+    )
+    .expect("write");
+
+    let registry = DynamicToolRegistry::new_without_watcher(path).expect("registry");
+    let executor: Arc<dyn Executor> = Arc::new(RouterMockExecutor::new());
+    let redactor = Redactor::new(Vec::new());
+    let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
+    let request_limiter = Arc::new(RateLimiter::new(60, 10));
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
+    let router = ToolRouter::new(
+        executor,
+        redactor,
+        create_dummy_memory_engine().await,
+        registry,
+        None,
+        fetch_limiter,
+        request_limiter,
+        browser_limiter,
+        None,
+    );
+
+    let defs = router.tool_definitions(1, Some("weather forecast"));
+    assert_eq!(defs.len(), 8, "should have 7 core + 1 dynamic");
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"weather_tool"));
+    assert!(!names.contains(&"db_tool"));
+}
+
+#[tokio::test]
+async fn tool_definitions_include_browser_when_bridge_is_configured() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().to_path_buf();
+    let registry = DynamicToolRegistry::new_without_watcher(path).expect("registry");
+    let executor: Arc<dyn Executor> = Arc::new(RouterMockExecutor::new());
+    let redactor = Redactor::new(Vec::new());
+    let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
+    let request_limiter = Arc::new(RateLimiter::new(60, 10));
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
+    let router = ToolRouter::new(
+        executor,
+        redactor,
+        create_dummy_memory_engine().await,
+        registry,
+        None,
+        fetch_limiter,
+        request_limiter,
+        browser_limiter,
+        Some(Arc::new(SecretBrowserBridge)),
+    );
+
+    let defs = router.tool_definitions(0, None);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"browser"),
+        "browser should be visible when bridge is configured"
     );
 }

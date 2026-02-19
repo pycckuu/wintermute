@@ -216,6 +216,7 @@ async fn handle_start() -> anyhow::Result<()> {
 
     let fetch_limiter = Arc::new(RateLimiter::new(60, config.egress.fetch_rate_limit));
     let request_limiter = Arc::new(RateLimiter::new(60, config.egress.request_rate_limit));
+    let browser_limiter = Arc::new(RateLimiter::new(60, config.egress.browser_rate_limit));
 
     let policy_context = PolicyContext {
         allowed_domains: config.egress.allowed_domains.clone(),
@@ -232,7 +233,8 @@ async fn handle_start() -> anyhow::Result<()> {
         Some(telegram_tx.clone()),
         fetch_limiter,
         request_limiter,
-        policy_context.clone(),
+        browser_limiter,
+        None, // No browser bridge configured; tool returns unavailable when called
     ));
 
     let config_arc = Arc::new(config);

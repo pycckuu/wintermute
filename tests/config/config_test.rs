@@ -65,6 +65,7 @@ fn default_egress_values() {
     assert!(egress.allowed_domains.is_empty());
     assert_eq!(egress.fetch_rate_limit, 30);
     assert_eq!(egress.request_rate_limit, 10);
+    assert_eq!(egress.browser_rate_limit, 60);
 }
 
 #[test]
@@ -203,6 +204,28 @@ blocked_domains = ["blocked.example"]
     let config: Config = toml::from_str(toml_str).expect("privacy config should parse");
     assert_eq!(config.privacy.always_approve_domains, vec!["example.com"]);
     assert_eq!(config.privacy.blocked_domains, vec!["blocked.example"]);
+}
+
+#[test]
+fn parse_config_with_browser_rate_limit() {
+    let toml_str = r#"
+[models]
+default = "anthropic/claude-sonnet-4-5-20250929"
+
+[channels.telegram]
+bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
+allowed_users = [123456789]
+
+[egress]
+allowed_domains = ["example.com"]
+fetch_rate_limit = 31
+request_rate_limit = 11
+browser_rate_limit = 61
+"#;
+    let config: Config = toml::from_str(toml_str).expect("egress config should parse");
+    assert_eq!(config.egress.fetch_rate_limit, 31);
+    assert_eq!(config.egress.request_rate_limit, 11);
+    assert_eq!(config.egress.browser_rate_limit, 61);
 }
 
 #[test]

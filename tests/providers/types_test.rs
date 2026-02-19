@@ -1,7 +1,7 @@
 //! Tests for provider types and utility functions.
 
 use wintermute::providers::{
-    parse_provider_string, ContentPart, Message, MessageContent, Role, UsageStats,
+    parse_provider_string, ContentPart, Message, MessageContent, ProviderError, Role, UsageStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -110,4 +110,44 @@ fn message_with_text_content() {
     };
     assert_eq!(msg.content.text(), "test");
     assert_eq!(msg.role, Role::User);
+}
+
+// ---------------------------------------------------------------------------
+// ProviderError::is_context_overflow
+// ---------------------------------------------------------------------------
+
+#[test]
+fn provider_error_context_overflow_detects_anthropic_style() {
+    let err = ProviderError::HttpStatus {
+        status: 400,
+        body: "input_length and max_tokens exceed context limit: 199211+20000 > 2000000".to_owned(),
+    };
+    assert!(err.is_context_overflow());
+}
+
+#[test]
+fn provider_error_context_overflow_detects_context_length_exceeded() {
+    let err = ProviderError::HttpStatus {
+        status: 400,
+        body: "context_length_exceeded: input too long".to_owned(),
+    };
+    assert!(err.is_context_overflow());
+}
+
+#[test]
+fn provider_error_context_overflow_detects_input_too_long() {
+    let err = ProviderError::HttpStatus {
+        status: 400,
+        body: "Input is too long for requested model.".to_owned(),
+    };
+    assert!(err.is_context_overflow());
+}
+
+#[test]
+fn provider_error_context_overflow_rejects_non_overflow() {
+    let err = ProviderError::HttpStatus {
+        status: 429,
+        body: "Rate limit exceeded".to_owned(),
+    };
+    assert!(!err.is_context_overflow());
 }

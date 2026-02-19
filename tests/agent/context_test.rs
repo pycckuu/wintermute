@@ -1,6 +1,8 @@
 //! Tests for context assembly and conversation trimming.
 
-use wintermute::agent::context::{assemble_system_prompt, trim_messages};
+use wintermute::agent::context::{
+    assemble_system_prompt, trim_messages, trim_messages_to_fraction,
+};
 use wintermute::executor::ExecutorKind;
 use wintermute::memory::{Memory, MemoryKind, MemorySource, MemoryStatus};
 use wintermute::providers::{Message, MessageContent, Role};
@@ -252,4 +254,35 @@ fn trim_messages_prefers_recent_messages() {
         // With budget pressure, recent should be preferred over old
         assert!(has_recent || !has_old, "should prefer recent over old");
     }
+}
+
+// ---------------------------------------------------------------------------
+// trim_messages_to_fraction tests (overflow retry)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn trim_messages_to_fraction_reduces_budget() {
+    let messages = vec![
+        make_message(Role::User, "First"),
+        make_message(Role::Assistant, "Middle content"),
+        make_message(Role::User, "Last"),
+    ];
+
+    let trimmed = trim_messages_to_fraction(&messages, 1000, 0.5);
+    assert!(trimmed.len() <= 3);
+    assert_eq!(trimmed[0].content.text(), "First");
+    assert_eq!(
+        trimmed[trimmed.len().saturating_sub(1)].content.text(),
+        "Last"
+    );
+}
+
+#[test]
+fn trim_messages_to_fraction_enforces_minimum_budget() {
+    let messages = vec![
+        make_message(Role::User, "First"),
+        make_message(Role::User, "Last"),
+    ];
+    let trimmed = trim_messages_to_fraction(&messages, 50, 0.1);
+    assert!(!trimmed.is_empty());
 }

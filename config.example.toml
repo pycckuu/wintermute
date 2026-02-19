@@ -29,6 +29,7 @@ allowed_domains = ["github.com", "api.github.com", "pypi.org",
                    "en.wikipedia.org"]
 fetch_rate_limit = 30
 request_rate_limit = 10
+browser_rate_limit = 60
 
 [privacy]
 # Domains that are NEVER auto-trusted, always require approval

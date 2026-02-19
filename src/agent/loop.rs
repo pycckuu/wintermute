@@ -8,14 +8,17 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+use url::Url;
 
 use crate::agent::approval::ApprovalResult;
 use crate::agent::budget::SessionBudget;
-use crate::agent::context::{assemble_system_prompt, estimate_messages_tokens, trim_messages};
+use crate::agent::context::{
+    assemble_system_prompt, estimate_messages_tokens, trim_messages, trim_messages_to_fraction,
+};
 use crate::agent::policy::{check_policy, PolicyContext, PolicyDecision};
 use crate::agent::TelegramOutbound;
 use crate::config::{AgentConfig, Config};
-use crate::memory::{ConversationEntry, MemoryEngine};
+use crate::memory::{ConversationEntry, MemoryEngine, TrustSource};
 use crate::providers::router::ModelRouter;
 use crate::providers::{CompletionRequest, ContentPart, Message, MessageContent, Role, StopReason};
 use crate::tools::ToolRouter;
@@ -136,6 +139,12 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
 /// Maximum tokens to request from the LLM per call.
 const DEFAULT_MAX_RESPONSE_TOKENS: u32 = 4096;
 
+/// Maximum retry attempts on context overflow before giving up.
+const MAX_OVERFLOW_RETRIES: u32 = 3;
+
+/// Fraction of context to keep when retrying after overflow (aggressive trim).
+const OVERFLOW_TRIM_FRACTION: f64 = 0.5;
+
 /// Execute one full agent reasoning turn (may involve multiple LLM calls).
 ///
 /// The inner loop continues as long as the LLM returns `StopReason::ToolUse`,
@@ -159,30 +168,23 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string();
 
-        let tools = cfg
-            .tool_router
-            .tool_definitions(cfg.config.budget.max_dynamic_tools_per_turn);
+        let last_query = last_user_text(conversation);
+        let tools = cfg.tool_router.tool_definitions(
+            cfg.config.budget.max_dynamic_tools_per_turn,
+            Some(&last_query),
+        );
+        let core_tool_count = crate::tools::core::core_tool_definitions().len();
 
         let system_prompt = assemble_system_prompt(
             &cfg.agent_config.personality.soul,
             cfg.policy_context.executor_kind,
-            tools.len().saturating_sub(7), // subtract core tool count
+            tools.len().saturating_sub(core_tool_count),
             &memories,
             pending_approvals,
             &current_time,
         );
 
-        // Step 3: Trim conversation for context window
-        let trimmed = trim_messages(conversation, cfg.config.budget.max_tokens_per_session);
-
-        // Step 4: Budget check before LLM call
-        let estimated = estimate_messages_tokens(&trimmed);
-        if let Err(e) = cfg.budget.check_budget(estimated) {
-            send_text(cfg, &format!("Budget exceeded: {e}")).await;
-            break;
-        }
-
-        // Step 5: Resolve provider and make LLM call
+        // Step 3: Resolve provider
         let provider = match cfg.router.resolve(None, None) {
             Ok(p) => p,
             Err(e) => {
@@ -192,20 +194,46 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
             }
         };
 
-        let request = CompletionRequest {
-            messages: trimmed,
-            system: Some(system_prompt),
-            tools,
-            max_tokens: Some(DEFAULT_MAX_RESPONSE_TOKENS),
-            stop_sequences: vec![],
-        };
+        // Step 4–5: Trim, budget check, LLM call — with overflow retry
+        let mut trimmed = trim_messages(conversation, cfg.config.budget.max_tokens_per_session);
+        let mut overflow_retries: u32 = 0;
 
-        let response = match provider.complete(request).await {
-            Ok(r) => r,
-            Err(e) => {
-                error!(error = %e, "LLM completion failed");
-                send_text(cfg, &format!("LLM error: {e}")).await;
-                break;
+        let response = loop {
+            let estimated = estimate_messages_tokens(&trimmed);
+            if let Err(e) = cfg.budget.check_budget(estimated) {
+                send_text(cfg, &format!("Budget exceeded: {e}")).await;
+                return;
+            }
+
+            let request = CompletionRequest {
+                messages: trimmed.clone(),
+                system: Some(system_prompt.clone()),
+                tools: tools.clone(),
+                max_tokens: Some(DEFAULT_MAX_RESPONSE_TOKENS),
+                stop_sequences: vec![],
+            };
+
+            match provider.complete(request).await {
+                Ok(r) => break r,
+                Err(e) if e.is_context_overflow() && overflow_retries < MAX_OVERFLOW_RETRIES => {
+                    overflow_retries = overflow_retries.saturating_add(1);
+                    let fraction =
+                        OVERFLOW_TRIM_FRACTION.powi(i32::try_from(overflow_retries).unwrap_or(3));
+                    warn!(
+                        retry = overflow_retries,
+                        fraction, "context overflow, trimming more aggressively"
+                    );
+                    trimmed = trim_messages_to_fraction(
+                        conversation,
+                        cfg.config.budget.max_tokens_per_session,
+                        fraction,
+                    );
+                }
+                Err(e) => {
+                    error!(error = %e, "LLM completion failed");
+                    send_text(cfg, &format!("LLM error: {e}")).await;
+                    return;
+                }
             }
         };
 
@@ -239,15 +267,17 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
                     }
 
                     // Policy gate
+                    let trusted_domain = trusted_domain_for_tool(&cfg.memory, name, input).await;
                     let decision = check_policy(name, input, &cfg.policy_context, &|domain| {
-                        cfg.policy_context
-                            .allowed_domains
-                            .iter()
-                            .any(|d| d == domain)
+                        trusted_domain.as_deref() == Some(domain)
                     });
 
                     let result = match decision {
-                        PolicyDecision::Allow => cfg.tool_router.execute(name, input).await,
+                        PolicyDecision::Allow => {
+                            cfg.tool_router
+                                .execute_for_user(name, input, Some(cfg.user_id))
+                                .await
+                        }
                         PolicyDecision::RequireApproval => {
                             let approval_id = cfg.approval_manager.request(
                                 name.clone(),
@@ -290,15 +320,7 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
         });
 
         // Step 9: Persist assistant text to conversation log
-        let assistant_text: String = response
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let assistant_text = extract_assistant_text(&response.content);
 
         if !assistant_text.is_empty() {
             let total_tokens = response
@@ -367,7 +389,16 @@ async fn handle_approval_resolved(
                 }
             };
 
-            let tool_result = cfg.tool_router.execute(&tool_name, &input).await;
+            if let Some(domain) = tool_domain(&tool_name, &input) {
+                if let Err(e) = cfg.memory.trust_domain(&domain, TrustSource::User).await {
+                    warn!(error = %e, domain, "failed to persist approved trusted domain");
+                }
+            }
+
+            let tool_result = cfg
+                .tool_router
+                .execute_for_user(&tool_name, &input, Some(cfg.user_id))
+                .await;
             send_text(cfg, &format!("Approved tool <b>{tool_name}</b> executed.")).await;
 
             // Add the tool result to conversation and trigger another turn
@@ -409,6 +440,18 @@ async fn handle_approval_resolved(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Extract plain text from assistant response content parts.
+fn extract_assistant_text(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Send a text message to the user via the Telegram outbound channel.
 async fn send_text(cfg: &SessionConfig, text: &str) {
     let msg = TelegramOutbound {
@@ -430,4 +473,41 @@ fn last_user_text(conversation: &[Message]) -> String {
         .find(|m| m.role == Role::User)
         .map(|m| m.content.text())
         .unwrap_or_default()
+}
+
+/// Resolve trusted domain from trust ledger for domain-sensitive tools.
+async fn trusted_domain_for_tool(
+    memory: &MemoryEngine,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<String> {
+    let domain = tool_domain(tool_name, input)?;
+    match memory.is_domain_trusted(&domain).await {
+        Ok(true) => Some(domain),
+        Ok(false) => None,
+        Err(e) => {
+            warn!(error = %e, "failed to read trust ledger");
+            None
+        }
+    }
+}
+
+/// Extract URL domain for tools that require domain policy evaluation.
+fn tool_domain(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    let domain_sensitive = match tool_name {
+        "web_request" => true,
+        "browser" => input.get("action").and_then(|v| v.as_str()) == Some("navigate"),
+        _ => false,
+    };
+    if !domain_sensitive {
+        return None;
+    }
+    let url_str = input.get("url").and_then(|v| v.as_str())?;
+    let parsed = Url::parse(url_str).ok()?;
+    let host = parsed.host_str()?.to_owned();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }

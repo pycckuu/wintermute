@@ -29,6 +29,10 @@ const MAX_REDIRECT_HOPS: usize = 10;
 
 /// Default command timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// Maximum allowed command timeout in seconds.
+const MAX_TIMEOUT_SECS: u64 = 3600;
+/// Maximum allowed web_request body size.
+const MAX_REQUEST_BODY_BYTES: usize = 100 * 1024;
 
 // ---------------------------------------------------------------------------
 // execute_command
@@ -55,6 +59,11 @@ pub async fn execute_command(
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    if timeout_secs > MAX_TIMEOUT_SECS {
+        return Err(ToolError::InvalidInput(format!(
+            "timeout_secs exceeds maximum of {MAX_TIMEOUT_SECS}"
+        )));
+    }
 
     let opts = ExecOptions {
         timeout: Duration::from_secs(timeout_secs),
@@ -213,6 +222,11 @@ pub async fn web_request(
     }
 
     if let Some(body_str) = body {
+        if body_str.len() > MAX_REQUEST_BODY_BYTES {
+            return Err(ToolError::InvalidInput(format!(
+                "request body exceeds maximum of {MAX_REQUEST_BODY_BYTES} bytes"
+            )));
+        }
         builder = builder.body(body_str.to_owned());
     }
 
@@ -405,6 +419,11 @@ pub async fn handle_create_tool(
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    if timeout_secs > MAX_TIMEOUT_SECS {
+        return Err(ToolError::InvalidInput(format!(
+            "timeout_secs exceeds maximum of {MAX_TIMEOUT_SECS}"
+        )));
+    }
 
     super::create_tool::create_tool(
         executor,
@@ -422,7 +441,7 @@ pub async fn handle_create_tool(
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-/// Return definitions for all 7 core tools.
+/// Return definitions for all 8 core tools.
 pub fn core_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -576,6 +595,7 @@ pub fn core_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["name", "description", "parameters_schema", "implementation"]
             }),
         },
+        super::browser::browser_tool_definition(),
     ]
 }
 

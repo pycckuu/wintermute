@@ -160,6 +160,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
     .expect("failed to create test registry");
     let fetch_limiter = Arc::new(RateLimiter::new(60, 30));
     let request_limiter = Arc::new(RateLimiter::new(60, 10));
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
 
     let policy_context = PolicyContext {
         allowed_domains: vec![],
@@ -176,7 +177,8 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         None,
         fetch_limiter,
         request_limiter,
-        policy_context.clone(),
+        browser_limiter,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));
