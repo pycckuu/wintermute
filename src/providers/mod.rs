@@ -1,13 +1,175 @@
-//! Model provider abstractions and shared request/response types.
+//! LLM provider abstraction layer.
+//!
+//! Defines the [`LlmProvider`] trait and the shared request/response types
+//! used by all provider implementations.
+//!
+//! Two providers are implemented:
+//! - [`anthropic::AnthropicProvider`] — Anthropic `/v1/messages` API
+//! - [`ollama::OllamaProvider`] — Ollama `/api/chat` API
+//!
+//! The [`router::ModelRouter`] resolves the correct provider for each call
+//! based on context (skill override → role override → default).
 
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub mod anthropic;
 pub mod ollama;
 pub mod router;
+
+// ---------------------------------------------------------------------------
+// Core types
+// ---------------------------------------------------------------------------
+
+/// Conversation participant role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// System message.
+    System,
+    /// Human user message.
+    User,
+    /// Assistant (LLM) message.
+    Assistant,
+    /// Tool result (used after a tool call).
+    Tool,
+}
+
+/// A message in a conversation with an LLM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    /// The role of the message author.
+    pub role: Role,
+    /// Message content — may be text or structured (tool calls/results).
+    pub content: MessageContent,
+}
+
+/// The content of a message — text or structured parts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content.
+    Text(String),
+    /// Structured content blocks (text, tool calls, tool results).
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// Extract plain text from the content, joining all text parts.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(t) => t.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A single structured content part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    /// Plain text.
+    Text {
+        /// The text content.
+        text: String,
+    },
+    /// Tool use request from the assistant.
+    ToolUse {
+        /// Unique call identifier.
+        id: String,
+        /// Tool name.
+        name: String,
+        /// Tool input as JSON.
+        input: serde_json::Value,
+    },
+    /// Result of a tool call.
+    ToolResult {
+        /// Matching call identifier.
+        tool_use_id: String,
+        /// Result content.
+        content: String,
+        /// Whether the tool reported an error.
+        is_error: bool,
+    },
+}
+
+/// JSON Schema definition for a tool the LLM can call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    /// Tool name (must match tool router registration).
+    pub name: String,
+    /// Description shown to the LLM.
+    pub description: String,
+    /// JSON Schema object for the tool's parameters.
+    pub input_schema: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// Request / Response
+// ---------------------------------------------------------------------------
+
+/// A request to an LLM provider for a completion.
+#[derive(Debug, Clone)]
+pub struct CompletionRequest {
+    /// Conversation history including the latest user message.
+    pub messages: Vec<Message>,
+    /// System prompt (injected before messages).
+    pub system: Option<String>,
+    /// Tools available to the LLM for this call.
+    pub tools: Vec<ToolDefinition>,
+    /// Maximum tokens in the response.
+    pub max_tokens: Option<u32>,
+    /// Stop sequences.
+    pub stop_sequences: Vec<String>,
+}
+
+/// The reason a completion stopped generating.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// Normal end of turn.
+    EndTurn,
+    /// The model wants to call a tool.
+    ToolUse,
+    /// Max token limit reached.
+    MaxTokens,
+    /// A stop sequence was hit.
+    StopSequence,
+    /// Provider-specific other reason.
+    Other(String),
+}
+
+/// Usage statistics for a completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct UsageStats {
+    /// Tokens used in the prompt/input.
+    pub input_tokens: u32,
+    /// Tokens generated in the response.
+    pub output_tokens: u32,
+}
+
+/// The response from an LLM provider.
+#[derive(Debug, Clone)]
+pub struct CompletionResponse {
+    /// Response content (text and/or tool calls).
+    pub content: Vec<ContentPart>,
+    /// Why the model stopped.
+    pub stop_reason: StopReason,
+    /// Token usage for budget tracking.
+    pub usage: UsageStats,
+    /// The model identifier that served this response.
+    pub model: String,
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
 
 /// Errors returned by model providers.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +192,10 @@ pub enum ProviderError {
     #[error("provider unavailable: {0}")]
     Unavailable(String),
 }
+
+// ---------------------------------------------------------------------------
+// HTTP helpers (useful for all providers)
+// ---------------------------------------------------------------------------
 
 /// Check HTTP response status and return body text or a structured error.
 ///
@@ -76,100 +242,53 @@ fn sanitize_http_error_body(raw: &str) -> String {
     sanitized
 }
 
-/// A chat message in completion context.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CompletionMessage {
-    /// Role of this message.
-    pub role: MessageRole,
-    /// Text content.
-    pub content: String,
-}
+// ---------------------------------------------------------------------------
+// Trait
+// ---------------------------------------------------------------------------
 
-/// Message role for chat-completion requests.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageRole {
-    /// A system instruction.
-    System,
-    /// A user message.
-    User,
-    /// A model response.
-    Assistant,
-    /// A tool result message.
-    Tool,
-}
-
-/// Tool schema advertised to providers that support native tool calling.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ToolDefinition {
-    /// Tool name.
-    pub name: String,
-    /// User-facing description.
-    pub description: String,
-    /// JSON schema for parameters.
-    pub parameters: Value,
-}
-
-/// A tool invocation returned by a provider.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ToolCall {
-    /// Provider-assigned call identifier.
-    pub id: Option<String>,
-    /// Tool name to invoke.
-    pub name: String,
-    /// Parsed JSON arguments for the tool call.
-    pub arguments: Value,
-}
-
-/// Token usage counters returned by providers.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct TokenUsage {
-    /// Input token count.
-    pub input_tokens: u64,
-    /// Output token count.
-    pub output_tokens: u64,
-    /// Total token count.
-    pub total_tokens: u64,
-}
-
-/// Completion request passed to providers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CompletionRequest {
-    /// Context messages in order.
-    pub messages: Vec<CompletionMessage>,
-    /// Optional tool list for native tool-calling models.
-    pub tools: Vec<ToolDefinition>,
-    /// Optional model temperature.
-    pub temperature: Option<f32>,
-    /// Optional token cap.
-    pub max_tokens: Option<u32>,
-    /// Whether streaming was requested.
-    pub stream: bool,
-}
-
-/// Completion response returned by providers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CompletionResponse {
-    /// Assistant textual response.
-    pub content: String,
-    /// Tool calls returned by the provider.
-    pub tool_calls: Vec<ToolCall>,
-    /// Optional token accounting.
-    pub usage: Option<TokenUsage>,
-}
-
-/// Unified provider interface used by model routing.
+/// Core LLM provider interface.
+///
+/// All provider implementations must be `Send + Sync` to allow use
+/// across async task boundaries in the agent loop.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Produce a completion for the given request.
+    /// Request a completion from the LLM.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] on API, network, or parse failure.
     async fn complete(
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError>;
-    /// Whether this provider supports native tool-calling.
+
+    /// Whether this provider supports native tool calling.
     fn supports_tool_calling(&self) -> bool;
+
     /// Whether this provider supports streaming responses.
     fn supports_streaming(&self) -> bool;
-    /// Returns `<provider>/<model>` identifier for this instance.
+
+    /// The model identifier string this provider is instantiated for.
     fn model_id(&self) -> &str;
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+/// Parse a provider string like `"anthropic/claude-sonnet"` into components.
+///
+/// Returns `(provider_name, model_name)`.
+///
+/// # Errors
+///
+/// Returns an error if the string does not contain exactly one `/` separator.
+pub fn parse_provider_string(s: &str) -> anyhow::Result<(&str, &str)> {
+    let (provider, model) = s.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("invalid provider string: {s:?}, expected format 'provider/model'")
+    })?;
+    if provider.is_empty() || model.is_empty() {
+        anyhow::bail!("invalid provider string: {s:?}, both provider and model must be non-empty");
+    }
+    Ok((provider, model))
 }

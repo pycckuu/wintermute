@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use wintermute::executor::direct::DirectExecutor;
-use wintermute::executor::{ExecOptions, Executor, ExecutorError, ExecutorKind};
+use wintermute::executor::{ExecOptions, Executor, ExecutorError, ExecutorKind, HealthStatus};
 
 #[tokio::test]
 async fn direct_executor_is_maintenance_only() {
@@ -28,11 +28,14 @@ async fn direct_executor_reports_kind_and_health() {
     );
     let health = executor.health_check().await;
     assert!(health.is_ok());
-    let status = match health {
-        Ok(status) => status,
-        Err(err) => panic!("health should be available: {err}"),
-    };
+    let status = health.expect("health should be available");
 
-    assert!(status.is_healthy);
-    assert_eq!(status.kind, ExecutorKind::Direct);
+    // Direct executor reports Degraded (maintenance-only, no sandbox).
+    match &status {
+        HealthStatus::Degraded { kind, .. } => {
+            assert_eq!(*kind, ExecutorKind::Direct);
+        }
+        other => panic!("expected Degraded, got: {other:?}"),
+    }
+    assert!(!status.is_healthy());
 }

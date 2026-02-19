@@ -21,6 +21,52 @@ impl DirectExecutor {
     }
 }
 
+/// Resolve a working directory relative to a base, with path traversal protection.
+///
+/// Returns `Err` if the resolved path escapes the base directory.
+///
+/// # Errors
+///
+/// Returns `ExecutorError::Forbidden` when the requested path would escape the base.
+#[doc(hidden)]
+pub fn resolve_working_dir(base: &Path, requested: &Path) -> Result<PathBuf, ExecutorError> {
+    let resolved = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        base.join(requested)
+    };
+
+    // Canonicalize would require the path to exist. Instead, check
+    // that the normalized path starts with the base.
+    let normalized = normalize_path(&resolved);
+    let base_normalized = normalize_path(base);
+
+    if !normalized.starts_with(&base_normalized) {
+        return Err(ExecutorError::Forbidden(format!(
+            "working directory '{}' escapes base '{}'",
+            requested.display(),
+            base.display()
+        )));
+    }
+
+    Ok(normalized)
+}
+
+/// Normalize a path by resolving `.` and `..` components without filesystem access.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    components.iter().collect()
+}
+
 #[async_trait::async_trait]
 impl Executor for DirectExecutor {
     async fn execute(
@@ -35,10 +81,9 @@ impl Executor for DirectExecutor {
     }
 
     async fn health_check(&self) -> Result<HealthStatus, ExecutorError> {
-        Ok(HealthStatus {
-            is_healthy: true,
+        Ok(HealthStatus::Degraded {
             kind: ExecutorKind::Direct,
-            details: "direct executor available (maintenance-only mode)".to_owned(),
+            details: "direct executor available (maintenance-only mode, no sandbox)".to_owned(),
         })
     }
 

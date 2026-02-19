@@ -134,6 +134,17 @@ impl ModelRouter {
         self.providers.contains_key(spec)
     }
 
+    /// Returns the default provider.
+    pub fn default_provider(&self) -> Arc<dyn LlmProvider> {
+        // Safe: from_config guarantees the default is present.
+        Arc::clone(&self.providers[&self.default])
+    }
+
+    /// Returns the number of loaded providers.
+    pub fn provider_count(&self) -> usize {
+        self.providers.len()
+    }
+
     /// Returns all available provider specs in sorted order.
     pub fn available_specs(&self) -> Vec<String> {
         let mut values: Vec<String> = self.providers.keys().cloned().collect();

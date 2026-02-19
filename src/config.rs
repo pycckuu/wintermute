@@ -109,7 +109,7 @@ impl Default for PersonalityConfig {
 }
 
 /// Sandbox resource limits.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SandboxConfig {
     /// Memory limit in megabytes.
     #[serde(default = "default_memory_mb")]
@@ -118,6 +118,10 @@ pub struct SandboxConfig {
     /// CPU core limit.
     #[serde(default = "default_cpu_cores")]
     pub cpu_cores: f64,
+
+    /// Optional container runtime override (e.g. `"runsc"` for gVisor).
+    #[serde(default)]
+    pub runtime: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -125,6 +129,7 @@ impl Default for SandboxConfig {
         Self {
             memory_mb: default_memory_mb(),
             cpu_cores: default_cpu_cores(),
+            runtime: None,
         }
     }
 }
@@ -219,6 +224,19 @@ impl Default for HeartbeatConfig {
     }
 }
 
+/// Promotion mode for observer extractions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromotionMode {
+    /// Auto-promote after threshold confirmations.
+    #[default]
+    Auto,
+    /// Suggest via Telegram, user approves.
+    Suggest,
+    /// No automatic promotion.
+    Off,
+}
+
 /// Learning and promotion settings.
 #[derive(Debug, Deserialize)]
 pub struct LearningConfig {
@@ -227,8 +245,8 @@ pub struct LearningConfig {
     pub enabled: bool,
 
     /// Promotion mode for pending observations.
-    #[serde(default = "default_promotion_mode")]
-    pub promotion_mode: String,
+    #[serde(default)]
+    pub promotion_mode: PromotionMode,
 
     /// Auto-promotion threshold for repeated confirmations.
     #[serde(default = "default_auto_promote_threshold")]
@@ -239,7 +257,7 @@ impl Default for LearningConfig {
     fn default() -> Self {
         Self {
             enabled: default_learning_enabled(),
-            promotion_mode: default_promotion_mode(),
+            promotion_mode: PromotionMode::default(),
             auto_promote_threshold: default_auto_promote_threshold(),
         }
     }
@@ -269,6 +287,10 @@ pub struct ScheduledTaskConfig {
     /// Whether to notify user on completion.
     #[serde(default)]
     pub notify: bool,
+
+    /// Whether this task is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Resolved runtime paths under `~/.wintermute`.
@@ -332,11 +354,11 @@ fn default_heartbeat_interval_secs() -> u64 {
 fn default_learning_enabled() -> bool {
     true
 }
-fn default_promotion_mode() -> String {
-    "auto".to_owned()
-}
 fn default_auto_promote_threshold() -> u32 {
     3
+}
+fn default_true() -> bool {
+    true
 }
 
 /// Load the human-owned config from a TOML file.

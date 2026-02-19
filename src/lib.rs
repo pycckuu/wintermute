@@ -11,6 +11,7 @@
 pub mod config;
 pub mod credentials;
 pub mod executor;
+pub mod logging;
 pub mod providers;
 
 // Future modules — uncomment as implemented:

@@ -37,6 +37,17 @@ impl Redactor {
         }
         sanitized
     }
+
+    /// Redact a [`RawExecResult`](super::docker::RawExecResult) into an [`ExecResult`](super::ExecResult).
+    pub fn redact_result(&self, raw: super::docker::RawExecResult) -> super::ExecResult {
+        super::ExecResult {
+            exit_code: raw.exit_code,
+            stdout: self.redact(&raw.stdout),
+            stderr: self.redact(&raw.stderr),
+            timed_out: raw.timed_out,
+            duration: raw.duration,
+        }
+    }
 }
 
 fn default_patterns() -> Vec<Regex> {
