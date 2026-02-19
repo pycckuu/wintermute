@@ -14,7 +14,7 @@ use bollard::models::HostConfig;
 use bollard::Docker;
 use tokio_stream::StreamExt;
 
-use crate::config::{Config, RuntimePaths};
+use crate::config::{Config, RuntimePaths, SandboxConfig};
 
 use super::redactor::Redactor;
 use super::{ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, HealthStatus};
@@ -23,6 +23,21 @@ const SANDBOX_IMAGE: &str = "wintermute-sandbox:latest";
 const SANDBOX_CONTAINER_NAME: &str = "wintermute-sandbox";
 const RESET_REQUIREMENTS_COMMAND: &str =
     "if [ -f /scripts/requirements.txt ]; then pip install --user -r /scripts/requirements.txt; fi";
+
+/// Pre-redaction execution result used internally.
+#[doc(hidden)]
+pub struct RawExecResult {
+    /// Raw exit code from the process.
+    pub exit_code: Option<i32>,
+    /// Raw stdout before redaction.
+    pub stdout: String,
+    /// Raw stderr before redaction.
+    pub stderr: String,
+    /// Whether the command timed out.
+    pub timed_out: bool,
+    /// Wall-clock execution duration.
+    pub duration: Duration,
+}
 
 /// Docker-backed executor implementation.
 #[derive(Debug, Clone)]
@@ -64,6 +79,24 @@ impl DockerExecutor {
         };
         instance.ensure_container(config).await?;
         Ok(instance)
+    }
+
+    /// Create a DockerExecutor for testing without provisioning a container.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        scripts_dir: PathBuf,
+        workspace_dir: PathBuf,
+        redactor: Redactor,
+    ) -> Result<Self, ExecutorError> {
+        let docker = Docker::connect_with_local_defaults()
+            .map_err(|e| ExecutorError::Infrastructure(e.to_string()))?;
+        Ok(Self {
+            docker,
+            container_name: format!("wintermute-test-{}", uuid::Uuid::new_v4()),
+            scripts_dir,
+            workspace_dir,
+            redactor,
+        })
     }
 
     /// Returns true if Docker daemon is available.
@@ -135,7 +168,7 @@ impl DockerExecutor {
 
     async fn create_container(&self, config: &Config) -> Result<(), ExecutorError> {
         let container_config =
-            build_container_config(&self.workspace_dir, &self.scripts_dir, config)?;
+            build_container_config(&self.workspace_dir, &self.scripts_dir, &config.sandbox)?;
 
         let options = Some(CreateContainerOptions {
             name: self.container_name.clone(),
@@ -192,10 +225,11 @@ impl DockerExecutor {
 #[async_trait::async_trait]
 impl Executor for DockerExecutor {
     async fn execute(&self, command: &str, opts: ExecOptions) -> Result<ExecResult, ExecutorError> {
+        let start = std::time::Instant::now();
         let timeout_secs = opts.timeout.as_secs().max(1);
         let wrapped_command = format!(
             "timeout --signal=TERM --kill-after=5 {timeout_secs} bash -lc {}",
-            shell_quote(command)
+            shell_escape(command)
         );
 
         let working_dir = opts
@@ -222,29 +256,36 @@ impl Executor for DockerExecutor {
         let output_result =
             tokio::time::timeout(wait_window, self.collect_exec_output(&created.id)).await;
 
-        let (stdout_raw, stderr_raw) = match output_result {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(ExecutorError::Timeout {
-                    seconds: wait_window.as_secs(),
-                });
+        let duration = start.elapsed();
+
+        let (stdout_raw, stderr_raw, timed_out) = match output_result {
+            Ok(result) => {
+                let (stdout, stderr) = result?;
+                (stdout, stderr, false)
             }
+            Err(_) => (String::new(), String::new(), true),
         };
 
-        let inspect = self
-            .docker
-            .inspect_exec(&created.id)
-            .await
-            .map_err(|e| ExecutorError::Infrastructure(e.to_string()))?;
-        let exit_code = inspect.exit_code.unwrap_or(-1);
+        let exit_code = if timed_out {
+            None
+        } else {
+            let inspect = self
+                .docker
+                .inspect_exec(&created.id)
+                .await
+                .map_err(|e| ExecutorError::Infrastructure(e.to_string()))?;
+            inspect.exit_code.and_then(|c| i32::try_from(c).ok())
+        };
 
-        let stdout = self.redactor.redact(&stdout_raw);
-        let stderr = self.redactor.redact(&stderr_raw);
-        Ok(ExecResult {
+        let raw = RawExecResult {
             exit_code,
-            stdout,
-            stderr,
-        })
+            stdout: stdout_raw,
+            stderr: stderr_raw,
+            timed_out,
+            duration,
+        };
+
+        Ok(self.redactor.redact_result(raw))
     }
 
     async fn health_check(&self) -> Result<HealthStatus, ExecutorError> {
@@ -263,17 +304,18 @@ impl Executor for DockerExecutor {
             .state
             .and_then(|value| value.running)
             .unwrap_or(false);
-        let details = if running {
-            "docker sandbox is running".to_owned()
-        } else {
-            "docker sandbox exists but is not running".to_owned()
-        };
 
-        Ok(HealthStatus {
-            is_healthy: running,
-            kind: ExecutorKind::Docker,
-            details,
-        })
+        if running {
+            Ok(HealthStatus::Healthy {
+                kind: ExecutorKind::Docker,
+                details: "docker sandbox is running".to_owned(),
+            })
+        } else {
+            Ok(HealthStatus::Degraded {
+                kind: ExecutorKind::Docker,
+                details: "docker sandbox exists but is not running".to_owned(),
+            })
+        }
     }
 
     fn has_network_isolation(&self) -> bool {
@@ -293,16 +335,18 @@ impl Executor for DockerExecutor {
     }
 }
 
-fn build_container_config(
+/// Build a container configuration for the sandbox.
+#[doc(hidden)]
+pub fn build_container_config(
     workspace_dir: &Path,
     scripts_dir: &Path,
-    config: &Config,
+    sandbox: &SandboxConfig,
 ) -> Result<ContainerConfig<String>, ExecutorError> {
-    let memory_limit = i64::from(config.sandbox.memory_mb)
+    let memory_limit = i64::from(sandbox.memory_mb)
         .saturating_mul(1024)
         .saturating_mul(1024);
 
-    let cpu_limit = f64_to_nano_cpu(config.sandbox.cpu_cores)?;
+    let cpu_limit = f64_to_nano_cpu(sandbox.cpu_cores)?;
 
     let mut tmpfs: HashMap<String, String> = HashMap::new();
     tmpfs.insert("/tmp".to_owned(), "rw,size=512m".to_owned());
@@ -311,9 +355,11 @@ fn build_container_config(
         network_mode: Some("none".to_owned()),
         readonly_rootfs: Some(true),
         cap_drop: Some(vec!["ALL".to_owned()]),
+        security_opt: Some(vec!["no-new-privileges:true".to_owned()]),
         pids_limit: Some(256),
         memory: Some(memory_limit),
         nano_cpus: Some(cpu_limit),
+        runtime: sandbox.runtime.clone(),
         binds: Some(vec![
             format!("{}:/workspace", workspace_dir.display()),
             format!("{}:/scripts", scripts_dir.display()),
@@ -333,7 +379,9 @@ fn build_container_config(
     })
 }
 
-fn shell_quote(raw: &str) -> String {
+/// Shell-escape a string for use in `bash -c`.
+#[doc(hidden)]
+pub fn shell_escape(raw: &str) -> String {
     let escaped = raw.replace('\'', r"'\''");
     format!("'{escaped}'")
 }

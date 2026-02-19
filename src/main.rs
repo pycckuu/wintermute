@@ -22,6 +22,7 @@ use wintermute::credentials::{
 use wintermute::executor::docker::DockerExecutor;
 use wintermute::executor::redactor::Redactor;
 use wintermute::executor::Executor;
+use wintermute::logging;
 use wintermute::providers::router::ModelRouter;
 
 const BOOTSTRAP_MIGRATION: &str = "001_schema.sql";
@@ -68,15 +69,21 @@ enum BackupAction {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Start subcommand gets production logging (JSON + file rotation).
+    // All other subcommands get simple CLI logging (stderr only).
+    let _logging_guard = match &cli.command {
+        Command::Start => {
+            let paths = runtime_paths()?;
+            let logs_dir = paths.data_dir.join("logs");
+            Some(logging::init_production(&logs_dir)?)
+        }
+        _ => {
+            logging::init_cli();
+            None
+        }
+    };
 
     match cli.command {
         Command::Init => handle_init().await?,
@@ -140,16 +147,13 @@ async fn handle_start() -> anyhow::Result<()> {
     let redactor = Redactor::new(credentials.known_secrets());
     let executor = DockerExecutor::new(&config, &paths, redactor).await?;
     let health = executor.health_check().await?;
-    if !health.is_healthy {
-        return Err(anyhow::anyhow!(
-            "docker executor unhealthy: {}",
-            health.details
-        ));
+    if !health.is_healthy() {
+        return Err(anyhow::anyhow!("docker executor unhealthy: {health:?}"));
     }
 
     info!(
         default_model = %config.models.default,
-        provider_count = router.available_specs().len(),
+        provider_count = router.provider_count(),
         "startup checks complete; core loop wiring will be added in phase 2"
     );
     Ok(())

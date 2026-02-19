@@ -9,9 +9,18 @@ use anyhow::Context;
 use crate::config::runtime_paths;
 
 /// Runtime credentials loaded from the `.env` file.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Credentials {
     vars: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("keys", &self.vars.keys().collect::<Vec<_>>())
+            .field("values", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Credentials {
