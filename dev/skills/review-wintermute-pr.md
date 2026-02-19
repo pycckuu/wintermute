@@ -13,6 +13,9 @@ You are a **Wintermute Code Review Orchestrator**. You run 4 specialized agents 
 
 1. **LOCAL REVIEW ONLY**: This skill presents findings locally for the developer to fix. It does NOT post anything to GitHub.
 2. **WINTERMUTE-SPECIFIC**: Every finding must be evaluated through Wintermute's security invariants, architecture compliance, and code rules. Generic observations should be deprioritized.
+3. **ALL 4 REVIEW AGENTS ARE MANDATORY**: Never skip any of the four agents. Run all four in parallel in one message.
+4. **NO PARTIAL REPORTS**: Do not present final findings until outputs from all four agents are collected and merged.
+5. **UNCOMMITTED CHANGES MUST BE REVIEWED**: If `main...HEAD` is empty, include staged/unstaged/untracked working-tree changes in scope.
 
 ## Prerequisites
 
@@ -30,12 +33,22 @@ You are a **Wintermute Code Review Orchestrator**. You run 4 specialized agents 
    git log main..HEAD --oneline
    ```
 
-2. **Get changed files**:
+2. **Include local working-tree changes** (MANDATORY):
+   ```bash
+   git status --short
+   git diff --name-only
+   git ls-files --others --exclude-standard
+   rg "#\\[cfg\\(test\\)\\]" src/ --type rust
+   ```
+   Treat these files as review scope even when they are not committed.
+
+3. **Get changed files**:
    ```bash
    git diff main...HEAD --stat
    ```
+   If no committed diff exists, compute stat from local diff and untracked files.
 
-3. **Classify Change Scope** (determines agent emphasis):
+4. **Classify Change Scope** (determines agent emphasis):
    - `src/executor/` changes = **container security** focus (verify no host executor, env empty, network none)
    - `src/agent/policy.rs` = **egress/SSRF** focus
    - `src/agent/loop.rs` or `src/agent/mod.rs` = **agent loop** focus (verify redactor chokepoint, budget checks)
@@ -56,6 +69,7 @@ You are a **Wintermute Code Review Orchestrator**. You run 4 specialized agents 
 **CRITICAL**: Use the `Task` tool to launch **ALL FOUR** agents in a **SINGLE MESSAGE** (parallel tool calls).
 
 Pass to each agent: branch name, base branch, changed files list, and the change scope classification from step 1.
+Pass both committed diff files and uncommitted files.
 
 ---
 
@@ -215,19 +229,20 @@ You are a Regression & Test Coverage Guardian for Wintermute. Analyze the change
 | Invariant | What to test | Expected test location |
 |-----------|-------------|----------------------|
 | 1. No host executor | Assert no std::process::Command in non-test code | tests/security_invariants.rs |
-| 2. Container env empty | Assert container env == empty map | src/executor/docker.rs (unit) |
-| 3. No network | Assert container NetworkMode::None | src/executor/docker.rs (unit) |
+| 2. Container env empty | Assert container env == empty map | tests/executor/docker_invariants_test.rs |
+| 3. No network | Assert container NetworkMode::None | tests/executor/docker_invariants_test.rs |
 | 4. Egress control | Assert web_fetch rejects POST, web_request blocks unknown domains | tests/egress_policy.rs |
-| 5. Budget atomicity | Assert LLM call fails when budget exhausted | src/agent/budget.rs (unit) |
-| 6. Credential scanning | Assert credential messages blocked/redacted | src/telegram/input_guard.rs (unit) |
+| 5. Budget atomicity | Assert LLM call fails when budget exhausted | tests/agent/budget_test.rs |
+| 6. Credential scanning | Assert credential messages blocked/redacted | tests/telegram/input_guard_test.rs |
 | 7. Redactor chokepoint | Assert all tool paths pass through redactor | tests/redaction.rs |
-| 8. Config split | Assert agent cannot write config.toml | src/config.rs (unit) |
+| 8. Config split | Assert agent cannot write config.toml | tests/config/config_test.rs |
 
 **Rules for flagging**:
 - PR touches code related to an invariant but test NOT updated: flag as HIGH
 - PR adds new public API in agent/ or executor/ without test: flag as HIGH
 - PR modifies existing security test weakening assertion: flag as CRITICAL
 - PR adds new public items without doc comments: flag as MEDIUM
+- Any `#[cfg(test)]` module added under `src/`: flag as HIGH (test placement policy violation)
 
 **OUTPUT FORMAT (JSON)**:
 ```json
@@ -304,3 +319,14 @@ Before presenting to the user, you MUST sanitize ALL findings:
    > **Suggestion**: [recommendation]
 
 5. **Ask the user** which findings they want to fix now.
+
+### 5. Review Evidence Block (MANDATORY)
+
+Before returning final review output, include:
+
+- The 4 agent IDs used for this run
+- Total findings from each agent before dedupe
+- Final deduped finding count
+- Confirmation that both committed and uncommitted changes were considered
+
+If any of the above is missing, the review is incomplete.

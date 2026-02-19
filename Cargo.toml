@@ -59,6 +59,7 @@ rand = "0.8"
 notify = "7"
 cron = "0.13"
 directories = "5"
+tokio-stream = "0.1.18"
 
 [lints.rust]
 missing_docs = "deny"

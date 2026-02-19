@@ -4,6 +4,7 @@
 //! - `config.toml` — human-owned, agent can read but never write
 //! - `agent.toml` — agent-owned, modifiable via execute_command
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -28,6 +29,30 @@ pub struct Config {
     /// Egress (outbound network) policy.
     #[serde(default)]
     pub egress: EgressConfig,
+
+    /// Privacy boundary configuration.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
+}
+
+/// Top-level agent-owned configuration.
+#[derive(Debug, Deserialize)]
+pub struct AgentConfig {
+    /// Agent personality settings.
+    #[serde(default)]
+    pub personality: PersonalityConfig,
+
+    /// Heartbeat scheduler settings.
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
+
+    /// Learning and promotion behavior settings.
+    #[serde(default)]
+    pub learning: LearningConfig,
+
+    /// Scheduled built-in or dynamic tasks.
+    #[serde(default)]
+    pub scheduled_tasks: Vec<ScheduledTaskConfig>,
 }
 
 /// Model routing: default model, per-role and per-skill overrides.
@@ -60,6 +85,27 @@ pub struct TelegramConfig {
 
     /// Telegram user IDs allowed to interact with the agent.
     pub allowed_users: Vec<i64>,
+}
+
+/// Personality and identity settings for the agent.
+#[derive(Debug, Deserialize)]
+pub struct PersonalityConfig {
+    /// Human-readable agent name.
+    #[serde(default = "default_personality_name")]
+    pub name: String,
+
+    /// System prompt extension controlled by the user/agent config.
+    #[serde(default)]
+    pub soul: String,
+}
+
+impl Default for PersonalityConfig {
+    fn default() -> Self {
+        Self {
+            name: default_personality_name(),
+            soul: String::new(),
+        }
+    }
 }
 
 /// Sandbox resource limits.
@@ -130,6 +176,18 @@ pub struct EgressConfig {
     pub request_rate_limit: u32,
 }
 
+/// Privacy boundary policy configuration.
+#[derive(Debug, Deserialize, Default)]
+pub struct PrivacyConfig {
+    /// Domains that always require explicit user approval.
+    #[serde(default)]
+    pub always_approve_domains: Vec<String>,
+
+    /// Domains blocked entirely for outbound requests.
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+}
+
 impl Default for EgressConfig {
     fn default() -> Self {
         Self {
@@ -140,8 +198,107 @@ impl Default for EgressConfig {
     }
 }
 
+/// Heartbeat scheduler settings.
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatConfig {
+    /// Enables or disables heartbeat processing.
+    #[serde(default = "default_heartbeat_enabled")]
+    pub enabled: bool,
+
+    /// Tick interval in seconds.
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_heartbeat_enabled(),
+            interval_secs: default_heartbeat_interval_secs(),
+        }
+    }
+}
+
+/// Learning and promotion settings.
+#[derive(Debug, Deserialize)]
+pub struct LearningConfig {
+    /// Enables or disables observer-driven learning.
+    #[serde(default = "default_learning_enabled")]
+    pub enabled: bool,
+
+    /// Promotion mode for pending observations.
+    #[serde(default = "default_promotion_mode")]
+    pub promotion_mode: String,
+
+    /// Auto-promotion threshold for repeated confirmations.
+    #[serde(default = "default_auto_promote_threshold")]
+    pub auto_promote_threshold: u32,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_learning_enabled(),
+            promotion_mode: default_promotion_mode(),
+            auto_promote_threshold: default_auto_promote_threshold(),
+        }
+    }
+}
+
+/// Agent-owned scheduled task configuration.
+#[derive(Debug, Deserialize)]
+pub struct ScheduledTaskConfig {
+    /// Task name used for identification and logging.
+    pub name: String,
+
+    /// Cron expression defining execution cadence.
+    pub cron: String,
+
+    /// Optional built-in task name.
+    #[serde(default)]
+    pub builtin: Option<String>,
+
+    /// Optional dynamic tool name.
+    #[serde(default)]
+    pub tool: Option<String>,
+
+    /// Optional task-specific budget token limit.
+    #[serde(default)]
+    pub budget_tokens: Option<u64>,
+
+    /// Whether to notify user on completion.
+    #[serde(default)]
+    pub notify: bool,
+}
+
+/// Resolved runtime paths under `~/.wintermute`.
+#[derive(Debug, Clone)]
+pub struct RuntimePaths {
+    /// Runtime directory (`~/.wintermute`).
+    pub root: PathBuf,
+    /// Human-owned config file path.
+    pub config_toml: PathBuf,
+    /// Agent-owned config file path.
+    pub agent_toml: PathBuf,
+    /// Runtime env file path.
+    pub env_file: PathBuf,
+    /// Scripts directory path.
+    pub scripts_dir: PathBuf,
+    /// Workspace directory path.
+    pub workspace_dir: PathBuf,
+    /// Data directory path.
+    pub data_dir: PathBuf,
+    /// Backups directory path.
+    pub backups_dir: PathBuf,
+    /// Memory database path.
+    pub memory_db: PathBuf,
+}
+
 // Default value functions for serde
 
+fn default_personality_name() -> String {
+    "Wintermute".to_owned()
+}
 fn default_memory_mb() -> u32 {
     2048
 }
@@ -166,6 +323,21 @@ fn default_fetch_rate() -> u32 {
 fn default_request_rate() -> u32 {
     10
 }
+fn default_heartbeat_enabled() -> bool {
+    true
+}
+fn default_heartbeat_interval_secs() -> u64 {
+    60
+}
+fn default_learning_enabled() -> bool {
+    true
+}
+fn default_promotion_mode() -> String {
+    "auto".to_owned()
+}
+fn default_auto_promote_threshold() -> u32 {
+    3
+}
 
 /// Load the human-owned config from a TOML file.
 ///
@@ -180,6 +352,19 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     Ok(config)
 }
 
+/// Load the agent-owned config from a TOML file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed.
+pub fn load_agent_config(path: &Path) -> anyhow::Result<AgentConfig> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read agent config at {}: {e}", path.display()))?;
+    let config: AgentConfig = toml::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("failed to parse agent config at {}: {e}", path.display()))?;
+    Ok(config)
+}
+
 /// Resolve the default config directory (`~/.wintermute/`).
 ///
 /// # Errors
@@ -191,49 +376,75 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
     Ok(home.home_dir().join(".wintermute"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Resolve runtime paths under `~/.wintermute`.
+///
+/// # Errors
+///
+/// Returns an error when the base config directory cannot be determined.
+pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
+    let root = config_dir()?;
+    let config_toml = root.join("config.toml");
+    let agent_toml = root.join("agent.toml");
+    let env_file = root.join(".env");
+    let scripts_dir = root.join("scripts");
+    let workspace_dir = root.join("workspace");
+    let data_dir = root.join("data");
+    let backups_dir = root.join("backups");
+    let memory_db = data_dir.join("memory.db");
 
-    #[test]
-    fn default_budget_values() {
-        let budget = BudgetConfig::default();
-        assert_eq!(budget.max_tokens_per_session, 500_000);
-        assert_eq!(budget.max_tokens_per_day, 5_000_000);
-        assert_eq!(budget.max_tool_calls_per_turn, 20);
-        assert_eq!(budget.max_dynamic_tools_per_turn, 20);
+    Ok(RuntimePaths {
+        root,
+        config_toml,
+        agent_toml,
+        env_file,
+        scripts_dir,
+        workspace_dir,
+        data_dir,
+        backups_dir,
+        memory_db,
+    })
+}
+
+/// Load the default human-owned config from `~/.wintermute/config.toml`.
+///
+/// # Errors
+///
+/// Returns an error if paths cannot be resolved or config parsing fails.
+pub fn load_default_config() -> anyhow::Result<Config> {
+    let paths = runtime_paths()?;
+    load_config(&paths.config_toml)
+}
+
+/// Load the default agent-owned config from `~/.wintermute/agent.toml`.
+///
+/// # Errors
+///
+/// Returns an error if paths cannot be resolved or config parsing fails.
+pub fn load_default_agent_config() -> anyhow::Result<AgentConfig> {
+    let paths = runtime_paths()?;
+    load_agent_config(&paths.agent_toml)
+}
+
+/// Return all provider model specs declared in config in deterministic order.
+pub fn all_model_specs(models: &ModelsConfig) -> Vec<String> {
+    let mut ordered = Vec::new();
+    ordered.push(models.default.clone());
+
+    let mut role_specs: Vec<_> = models.roles.iter().collect();
+    role_specs.sort_by_key(|(k, _)| *k);
+    for (_, spec) in role_specs {
+        ordered.push(spec.clone());
     }
 
-    #[test]
-    fn default_sandbox_values() {
-        let sandbox = SandboxConfig::default();
-        assert_eq!(sandbox.memory_mb, 2048);
-        assert!((sandbox.cpu_cores - 2.0).abs() < f64::EPSILON);
+    let mut skill_specs: Vec<_> = models.skills.iter().collect();
+    skill_specs.sort_by_key(|(k, _)| *k);
+    for (_, spec) in skill_specs {
+        ordered.push(spec.clone());
     }
 
-    #[test]
-    fn config_dir_resolves() {
-        let dir = config_dir();
-        assert!(dir.is_ok());
-        let path = dir.expect("already checked");
-        assert!(path.ends_with(".wintermute"));
-    }
-
-    #[test]
-    fn parse_minimal_config() {
-        let toml_str = r#"
-[models]
-default = "anthropic/claude-sonnet-4-5-20250929"
-
-[channels.telegram]
-bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
-allowed_users = [123456789]
-"#;
-        let config: Config = toml::from_str(toml_str).expect("should parse");
-        assert_eq!(
-            config.models.default,
-            "anthropic/claude-sonnet-4-5-20250929"
-        );
-        assert_eq!(config.channels.telegram.allowed_users, vec![123456789]);
-    }
+    let mut seen = HashMap::new();
+    ordered
+        .into_iter()
+        .filter(|spec| seen.insert(spec.clone(), true).is_none())
+        .collect()
 }

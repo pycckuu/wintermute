@@ -9,10 +9,11 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod credentials;
+pub mod executor;
+pub mod providers;
 
 // Future modules — uncomment as implemented:
-// pub mod providers;
-// pub mod executor;
 // pub mod tools;
 // pub mod agent;
 // pub mod memory;

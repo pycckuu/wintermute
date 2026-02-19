@@ -5,6 +5,17 @@ description: Plan a Wintermute implementation task using multi-perspective analy
 
 # Plan Wintermute Task Workflow
 
+## Execution Discipline (MANDATORY)
+
+1. Run every Phase 0 context-gathering step before proposing a final plan.
+2. Do not skip security-lens analysis for any task that touches `src/`.
+3. If information is missing or ambiguous, ask clarifying questions before finalizing the plan.
+4. Do not mark planning complete without explicit:
+   - chosen approach,
+   - ordered implementation steps with file paths,
+   - security checklist for invariants 1-8,
+   - acceptance criteria.
+
 ## PART 1: ANALYSIS
 
 ### Phase 0: Context Gathering
@@ -74,8 +85,8 @@ For each security invariant, answer explicitly:
 For each: answer YES (needs mitigation) or NO (safe). If YES, describe the mitigation.
 
 #### Maintainability Lens
-- Unit tests (`#[cfg(test)]` modules) — what needs testing?
-- Integration tests (`tests/` directory) — any new invariant tests needed?
+- Test placement plan — all tests must be in `tests/` mirrored to `src/`; no `#[cfg(test)]` in `src/`
+- Integration tests (`tests/` directory) — which invariant and behavior tests are required?
 - Documentation: `///` doc comments on all new public items, `//!` module docs
 - Does it follow the actor pattern for SQLite writes?
 - Does it use bollard (not shell-out) for Docker?
@@ -111,3 +122,20 @@ Output a single actionable plan:
 4. **Security Checklist**: Which invariants were reviewed, mitigations applied
 5. **Acceptance Criteria**: `cargo test`, `cargo clippy`, specific behaviors, invariant tests
 6. **Risks & Mitigations**
+
+### Phase 5: Plan Completeness Gate (MANDATORY)
+
+Before returning the final plan, verify all are present:
+
+- [ ] Phase 0 commands/results captured
+- [ ] Affected modules/components identified
+- [ ] Security invariants 1-8 assessed (YES/NO + mitigation where applicable)
+- [ ] 2-3 approaches compared
+- [ ] Chosen approach justified
+- [ ] Ordered file-level implementation steps
+- [ ] Test file plan mirrors `src/` under `tests/` with no in-`src` tests
+- [ ] Key type signatures listed
+- [ ] Acceptance criteria include build/test/clippy
+- [ ] Risks with mitigations included
+
+If any box is unchecked, do not finalize the plan.

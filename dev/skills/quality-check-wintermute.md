@@ -1,6 +1,6 @@
 ---
 name: quality-check-wintermute
-description: Automated quality gate for Wintermute. Runs build, tests, clippy, formatting, doc coverage, security invariant grep scans, and dependency audit. Reports pass/fail for each check with actionable fixes.
+description: Automated quality gate for Wintermute. Runs build, tests, clippy, formatting, doc coverage, security invariant grep scans, test placement policy checks, and dependency audit. Reports pass/fail for each check with actionable fixes.
 ---
 
 # Wintermute Quality Check Workflow
@@ -87,6 +87,13 @@ rg "unsafe " src/ --type rust
 ```
 - **PASS**: No matches
 - **FAIL**: List each occurrence — `#![forbid(unsafe_code)]` should prevent this
+
+**Test Placement Policy — No tests in src/:**
+```bash
+rg "#\\[cfg\\(test\\)\\]" src/ --type rust
+```
+- **PASS**: No matches
+- **FAIL**: List each occurrence — all tests must be moved to mirrored paths under `tests/`
 
 ### 7. Dependency Audit
 

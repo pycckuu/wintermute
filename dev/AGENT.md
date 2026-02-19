@@ -98,6 +98,7 @@ These MUST hold in every commit. Violation is a blocking review finding.
 9. GNU `timeout` wraps every command executed in container
 10. Derive order: `Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize`
 11. HTML formatting for Telegram — never MarkdownV2
+12. Do not place tests in `src/` (`#[cfg(test)]` modules are disallowed)
 
 ### Documentation
 
@@ -186,9 +187,10 @@ cargo doc --no-deps
 
 ## Testing
 
-- Every public function in `src/agent/` and `src/executor/` must have unit tests
+- All tests must live under `tests/`; never add `#[cfg(test)]` modules in `src/`
+- Mirror `src/` layout under `tests/` (for example, `src/providers/router.rs` -> `tests/providers/router_test.rs`)
+- Keep top-level integration entrypoints aligned with top-level `src` modules (`tests/config.rs`, `tests/providers.rs`, etc.)
 - Security invariants (1-8) must each have at least one dedicated test
-- Integration tests go in `tests/`
 - Use `#[tokio::test]` for async tests
 - Mock Docker interactions with a test trait implementation
 

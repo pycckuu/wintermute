@@ -106,6 +106,7 @@ uses sonnet). The user configures this, not the code.
 │  ├── agent.toml        (agent-owned: personality, tasks)         │
 │  ├── .env              (secrets, chmod 600)                      │
 │  ├── data/memory.db    (NOT in sandbox)                          │
+│  ├── health.json       (written by heartbeat, read by Doctor)    │
 │  ├── workspace/        (mounted rw into sandbox)                 │
 │  ├── scripts/          (git repo, mounted rw, hot-reloaded)     │
 │  │   ├── .git/                                                   │
@@ -113,7 +114,7 @@ uses sonnet). The user configures this, not the code.
 │  │   ├── news_digest.py    (agent-created tool)                  │
 │  │   ├── news_digest.json  (tool schema)                         │
 │  │   └── ...                                                     │
-│  └── logs/             (structured JSON, rotated)                │
+│  └── logs/             (structured JSONL, rotated)                │
 │                                                                   │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -863,6 +864,41 @@ Each execution:
 Built-in tasks (not agent-removable):
 - `daily_backup`: git bundle + sqlite backup. Default 3am.
 
+### Health File
+
+Heartbeat writes ~/.wintermute/health.json every cycle. This is the
+primary interface for the Doctor supervisor (v1.1) but also useful
+for manual monitoring and the /status command.
+
+```json
+{
+  "status": "running",
+  "uptime_secs": 86400,
+  "last_heartbeat": "2026-02-19T14:30:00Z",
+  "executor": "docker",
+  "container_healthy": true,
+  "active_sessions": 1,
+  "memory_db_size_mb": 12,
+  "scripts_count": 23,
+  "dynamic_tools_count": 18,
+  "budget_today": { "used": 120000, "limit": 5000000 },
+  "last_error": null
+}
+```
+
+### Structured Logging
+
+All logs are structured JSON (.jsonl) for both human debugging and
+future Doctor consumption:
+
+```json
+{"ts":"...","level":"info","event":"tool_call","tool":"news_digest","duration_ms":1200,"success":true,"session":"abc123"}
+{"ts":"...","level":"error","event":"tool_call","tool":"deploy_check","error":"timeout","session":"abc123"}
+```
+
+Event types: `tool_call`, `llm_call`, `approval`, `budget`, `session`,
+`heartbeat`, `backup`, `tool_created`, `tool_updated`.
+
 ---
 
 ## System Prompt
@@ -1057,7 +1093,7 @@ wintermute/
 │       ├── mod.rs                 # Tick loop
 │       ├── scheduler.rs           # Cron evaluation + task dispatch
 │       ├── backup.rs              # git bundle + sqlite backup
-│       └── health.rs              # Self-checks, log structured health
+│       └── health.rs              # Write health.json + self-checks
 │
 └── tests/
     ├── tool_registry_test.rs
@@ -1205,7 +1241,10 @@ Files: heartbeat/*, telegram/commands.rs
 
 ### v1.1 (post-launch)
 
-- Supervisor process (VIGIL-style: separate binary, reads logs, proposes fixes)
+- **Doctor** — supervisor process. See wintermute-doctor.md.
+  Separate binary, reads logs + health.json + git history,
+  diagnoses failures, quarantines bad tools, restarts crashed process,
+  proposes fixes via Telegram. Own LLM budget (cheap model).
 - OS-native sandboxing (bubblewrap on Linux, sandbox-exec on macOS)
 - LanceDB migration if sqlite-vec insufficient
 - VOYAGER-style skill verification (LLM critic evaluates tool output)
