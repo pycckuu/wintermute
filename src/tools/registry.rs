@@ -7,12 +7,16 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::providers::ToolDefinition;
+
+/// Upper bound for dynamic tool timeout loaded from schema files.
+const MAX_DYNAMIC_TIMEOUT_SECS: u64 = 3600;
 
 // ---------------------------------------------------------------------------
 // DynamicToolSchema
@@ -46,9 +50,13 @@ fn default_timeout() -> u64 {
 /// Supports hot-reload via a file system watcher: when a `.json` file is
 /// created, modified, or deleted in the scripts directory, the registry
 /// updates automatically.
+///
+/// Tracks last-used timestamps for ranked tool selection (relevance/recency).
 pub struct DynamicToolRegistry {
     /// Map from tool name to its schema.
     tools: RwLock<HashMap<String, DynamicToolSchema>>,
+    /// Last-used timestamp per tool name (for ranked selection).
+    last_used: RwLock<HashMap<String, Instant>>,
     /// Directory containing tool scripts and schema files.
     scripts_dir: PathBuf,
     /// File watcher handle (kept alive to maintain notifications).
@@ -57,7 +65,10 @@ pub struct DynamicToolRegistry {
 
 impl std::fmt::Debug for DynamicToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self.tools.read().map(|t| t.len()).unwrap_or(0);
+        let count = match self.tools.read() {
+            Ok(tools) => tools.len(),
+            Err(_) => 0,
+        };
         f.debug_struct("DynamicToolRegistry")
             .field("scripts_dir", &self.scripts_dir)
             .field("tool_count", &count)
@@ -94,6 +105,7 @@ impl DynamicToolRegistry {
 
         let registry = Arc::new(Self {
             tools,
+            last_used: RwLock::new(HashMap::new()),
             scripts_dir: scripts_dir.clone(),
             _watcher: Some(watcher),
         });
@@ -106,7 +118,16 @@ impl DynamicToolRegistry {
         std::thread::spawn(move || {
             while let Ok(path) = rx.recv() {
                 if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    let file_stem = match path.file_stem().and_then(|s| s.to_str()) {
+                        Some(stem) => stem,
+                        None => {
+                            warn!(
+                                path = %path.display(),
+                                "skipping dynamic tool with non-utf8 filename"
+                            );
+                            continue;
+                        }
+                    };
 
                     if path.exists() {
                         debug!(tool = file_stem, "reloading dynamic tool from watcher");
@@ -140,6 +161,7 @@ impl DynamicToolRegistry {
 
         let registry = Arc::new(Self {
             tools,
+            last_used: RwLock::new(HashMap::new()),
             scripts_dir,
             _watcher: None,
         });
@@ -151,25 +173,75 @@ impl DynamicToolRegistry {
 
     /// Get the schema for a tool by name.
     pub fn get(&self, name: &str) -> Option<DynamicToolSchema> {
-        self.tools
-            .read()
-            .ok()
-            .and_then(|map| map.get(name).cloned())
+        match self.tools.read() {
+            Ok(map) => map.get(name).cloned(),
+            Err(e) => {
+                warn!(error = %e, "dynamic tool registry lock poisoned in get");
+                None
+            }
+        }
+    }
+
+    /// Record that a dynamic tool was used (for recency-based ranking).
+    pub fn record_usage(&self, name: &str) {
+        if let Ok(mut last) = self.last_used.write() {
+            last.insert(name.to_owned(), Instant::now());
+        }
     }
 
     /// Return all registered tool schemas as [`ToolDefinition`]s.
     pub fn all_definitions(&self) -> Vec<ToolDefinition> {
         let map = match self.tools.read() {
             Ok(m) => m,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                warn!(error = %e, "dynamic tool registry lock poisoned in all_definitions");
+                return Vec::new();
+            }
         };
 
-        map.values()
-            .map(|schema| ToolDefinition {
-                name: schema.name.clone(),
-                description: schema.description.clone(),
-                input_schema: schema.parameters.clone(),
+        map.values().map(schema_to_definition).collect()
+    }
+
+    /// Return dynamic tool definitions ranked by relevance and recency.
+    ///
+    /// When `query` is provided, tools are scored by: (1) keyword overlap with
+    /// description, (2) last-used timestamp (most recent first). When `query`
+    /// is empty or None, tools are ordered by recency only.
+    pub fn ranked_definitions(&self, max_count: usize, query: Option<&str>) -> Vec<ToolDefinition> {
+        let map = match self.tools.read() {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "dynamic tool registry lock poisoned in ranked_definitions");
+                return Vec::new();
+            }
+        };
+        let last = match self.last_used.read() {
+            Ok(l) => l,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "dynamic tool registry usage lock poisoned in ranked_definitions"
+                );
+                return Vec::new();
+            }
+        };
+
+        let query_tokens: Vec<String> = tokenise_lowercase(query.unwrap_or(""));
+
+        let mut scored: Vec<(f64, ToolDefinition)> = map
+            .values()
+            .map(|schema| {
+                let def = schema_to_definition(schema);
+                let score = score_tool_for_ranking(schema, &last, &query_tokens);
+                (score, def)
             })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored
+            .into_iter()
+            .take(max_count)
+            .map(|(_, def)| def)
             .collect()
     }
 
@@ -189,11 +261,12 @@ impl DynamicToolRegistry {
             return Ok(());
         }
 
-        let content = std::fs::read_to_string(&path)?;
-        let schema: DynamicToolSchema = serde_json::from_str(&content)?;
+        let schema = load_tool_schema(&path)?;
 
         if let Ok(mut map) = self.tools.write() {
             map.insert(schema.name.clone(), schema);
+        } else {
+            warn!("dynamic tool registry lock poisoned in reload_tool");
         }
 
         debug!(tool = name, "dynamic tool reloaded");
@@ -238,6 +311,8 @@ impl DynamicToolRegistry {
 
         if let Ok(mut map) = self.tools.write() {
             *map = loaded;
+        } else {
+            warn!("dynamic tool registry lock poisoned in reload_all");
         }
 
         Ok(())
@@ -245,13 +320,70 @@ impl DynamicToolRegistry {
 
     /// Return the number of registered dynamic tools.
     pub fn count(&self) -> usize {
-        self.tools.read().map(|m| m.len()).unwrap_or(0)
+        match self.tools.read() {
+            Ok(map) => map.len(),
+            Err(e) => {
+                warn!(error = %e, "dynamic tool registry lock poisoned in count");
+                0
+            }
+        }
     }
+}
+
+/// Split text into lowercase alphanumeric tokens.
+fn tokenise_lowercase(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Convert a schema to a tool definition.
+fn schema_to_definition(schema: &DynamicToolSchema) -> ToolDefinition {
+    ToolDefinition {
+        name: schema.name.clone(),
+        description: schema.description.clone(),
+        input_schema: schema.parameters.clone(),
+    }
+}
+
+/// Score a tool for ranking: relevance (query overlap) + recency.
+fn score_tool_for_ranking(
+    schema: &DynamicToolSchema,
+    last_used: &HashMap<String, Instant>,
+    query_tokens: &[String],
+) -> f64 {
+    let recency = last_used
+        .get(&schema.name)
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(f64::MAX);
+    let recency_score = 1.0 / (1.0 + recency / 3600.0);
+
+    let relevance = if query_tokens.is_empty() {
+        0.0
+    } else {
+        let desc_tokens = tokenise_lowercase(&schema.description);
+        let matches = query_tokens
+            .iter()
+            .filter(|q| desc_tokens.iter().any(|d| d.contains(q.as_str())))
+            .count();
+        f64::from(u32::try_from(matches).unwrap_or(0))
+            / f64::from(u32::try_from(query_tokens.len()).unwrap_or(1))
+    };
+
+    relevance * 2.0 + recency_score
 }
 
 /// Load and validate a tool schema from a JSON file.
 fn load_tool_schema(path: &Path) -> anyhow::Result<DynamicToolSchema> {
     let content = std::fs::read_to_string(path)?;
     let schema: DynamicToolSchema = serde_json::from_str(&content)?;
+    if schema.timeout_secs == 0 || schema.timeout_secs > MAX_DYNAMIC_TIMEOUT_SECS {
+        anyhow::bail!(
+            "invalid timeout_secs {} in {}; expected 1..={MAX_DYNAMIC_TIMEOUT_SECS}",
+            schema.timeout_secs,
+            path.display()
+        );
+    }
     Ok(schema)
 }

@@ -1,5 +1,7 @@
 //! Integration tests for `src/tools/`.
 
+#[path = "tools/browser_test.rs"]
+mod browser_test;
 #[path = "tools/core_test.rs"]
 mod core_test;
 #[path = "tools/create_tool_test.rs"]

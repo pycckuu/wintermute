@@ -93,6 +93,19 @@ impl ModelRouter {
         })
     }
 
+    /// Create a router backed by a single provider for integration tests.
+    #[doc(hidden)]
+    pub fn for_testing(default_spec: String, provider: Arc<dyn LlmProvider>) -> Self {
+        let mut providers = HashMap::new();
+        providers.insert(default_spec.clone(), provider);
+        Self {
+            providers,
+            default: default_spec,
+            role_overrides: HashMap::new(),
+            skill_overrides: HashMap::new(),
+        }
+    }
+
     /// Resolve a provider by optional role and skill identifiers.
     ///
     /// Resolution order: `skill -> role -> default`.

@@ -62,7 +62,10 @@ fn registry_get_returns_existing_tool() {
 
     let tool = registry.get("test_tool");
     assert!(tool.is_some(), "test_tool should be found");
-    let schema = tool.expect("just checked");
+    let schema = match tool {
+        Some(schema) => schema,
+        None => panic!("test_tool should be found"),
+    };
     assert_eq!(schema.name, "test_tool");
     assert_eq!(schema.description, "A test tool");
     assert_eq!(schema.timeout_secs, 60);
@@ -197,6 +200,63 @@ fn registry_handles_nonexistent_directory() {
 }
 
 #[test]
+fn registry_ranked_definitions_orders_by_recency() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    registry.record_usage("another_tool");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    registry.record_usage("test_tool");
+
+    let defs = registry.ranked_definitions(2, None);
+    assert_eq!(defs.len(), 2);
+    assert_eq!(
+        defs[0].name, "test_tool",
+        "most recently used should be first"
+    );
+}
+
+#[test]
+fn registry_ranked_definitions_respects_query_relevance() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    let defs = registry.ranked_definitions(2, Some("test another"));
+    assert_eq!(defs.len(), 2);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"test_tool"));
+    assert!(names.contains(&"another_tool"));
+}
+
+#[test]
+fn registry_ranked_definitions_uses_recency_as_query_tiebreaker() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    // Both descriptions match "tool", so recency should break the tie.
+    registry.record_usage("test_tool");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    registry.record_usage("another_tool");
+
+    let defs = registry.ranked_definitions(1, Some("tool"));
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].name, "another_tool");
+}
+
+#[test]
+fn registry_ranked_definitions_respects_max_count() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    let defs = registry.ranked_definitions(1, None);
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
 fn registry_default_timeout_is_120() {
     let dir = TempDir::new().expect("should create temp dir");
     let path = dir.path().to_path_buf();
@@ -217,4 +277,30 @@ fn registry_default_timeout_is_120() {
         DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
     let tool = registry.get("no_timeout_tool").expect("should exist");
     assert_eq!(tool.timeout_secs, 120, "default timeout should be 120");
+}
+
+#[test]
+fn registry_rejects_invalid_timeout_values() {
+    let dir = TempDir::new().expect("should create temp dir");
+    let path = dir.path().to_path_buf();
+
+    let schema = json!({
+        "name": "bad_timeout_tool",
+        "description": "Tool with invalid timeout",
+        "parameters": { "type": "object" },
+        "timeout_secs": 999999
+    });
+    std::fs::write(
+        path.join("bad_timeout_tool.json"),
+        serde_json::to_string_pretty(&schema).expect("serialize"),
+    )
+    .expect("write");
+
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+    assert_eq!(
+        registry.count(),
+        0,
+        "invalid timeout schema should be skipped"
+    );
 }

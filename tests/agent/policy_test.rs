@@ -137,6 +137,89 @@ fn policy_allows_web_request_to_trusted_domain() {
 }
 
 #[test]
+fn policy_allows_browser_navigate_to_trusted_domain() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "navigate", "url": "https://api.example.com/page"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_allows_browser_navigate_to_ledger_trusted_domain() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "navigate", "url": "https://ledger.example.com/page"});
+    let result = check_policy("browser", &input, &ctx, &always_true);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_requires_approval_for_browser_navigate_unknown_domain() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input =
+        serde_json::json!({"action": "navigate", "url": "https://unknown.example.com/page"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::RequireApproval);
+}
+
+#[test]
+fn policy_denies_browser_navigate_to_blocked_domain() {
+    let ctx = PolicyContext {
+        allowed_domains: vec!["api.example.com".to_owned()],
+        blocked_domains: vec!["evil.example.com".to_owned()],
+        always_approve_domains: vec![],
+        executor_kind: ExecutorKind::Docker,
+    };
+    let input = serde_json::json!({"action": "navigate", "url": "https://evil.example.com/page"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert!(matches!(result, PolicyDecision::Deny(_)));
+}
+
+#[test]
+fn policy_denies_browser_navigate_invalid_url() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "navigate", "url": "not-a-url"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert!(matches!(result, PolicyDecision::Deny(_)));
+}
+
+#[test]
+fn policy_denies_browser_navigate_url_without_host() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "navigate", "url": "file:///tmp/local"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert!(matches!(result, PolicyDecision::Deny(_)));
+}
+
+#[test]
+fn policy_requires_approval_for_browser_navigate_always_approve_domain() {
+    let ctx = PolicyContext {
+        allowed_domains: vec!["api.example.com".to_owned()],
+        blocked_domains: vec![],
+        always_approve_domains: vec!["api.example.com".to_owned()],
+        executor_kind: ExecutorKind::Docker,
+    };
+    let input = serde_json::json!({"action": "navigate", "url": "https://api.example.com/page"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert!(matches!(result, PolicyDecision::RequireApproval));
+}
+
+#[test]
+fn policy_allows_browser_non_navigate_actions() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "click", "selector": "#submit"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_requires_approval_for_browser_evaluate_action() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "evaluate", "javascript": "document.title"});
+    let result = check_policy("browser", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::RequireApproval);
+}
+
+#[test]
 fn policy_allows_dynamic_tools() {
     let ctx = default_ctx(ExecutorKind::Docker);
     let input = serde_json::json!({});

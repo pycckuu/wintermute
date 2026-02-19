@@ -179,6 +179,10 @@ pub struct EgressConfig {
     /// Rate limit for web_request (POST/PUT/DELETE) calls per minute.
     #[serde(default = "default_request_rate")]
     pub request_rate_limit: u32,
+
+    /// Rate limit for browser actions per minute.
+    #[serde(default = "default_browser_rate")]
+    pub browser_rate_limit: u32,
 }
 
 /// Privacy boundary policy configuration.
@@ -199,6 +203,7 @@ impl Default for EgressConfig {
             allowed_domains: Vec::new(),
             fetch_rate_limit: default_fetch_rate(),
             request_rate_limit: default_request_rate(),
+            browser_rate_limit: default_browser_rate(),
         }
     }
 }
@@ -345,6 +350,9 @@ fn default_fetch_rate() -> u32 {
 fn default_request_rate() -> u32 {
     10
 }
+fn default_browser_rate() -> u32 {
+    60
+}
 fn default_heartbeat_enabled() -> bool {
     true
 }
@@ -406,9 +414,9 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
     let root = config_dir()?;
     let config_toml = root.join("config.toml");
-    let agent_toml = root.join("agent.toml");
-    let env_file = root.join(".env");
     let scripts_dir = root.join("scripts");
+    let agent_toml = scripts_dir.join("agent.toml");
+    let env_file = root.join(".env");
     let workspace_dir = root.join("workspace");
     let data_dir = root.join("data");
     let backups_dir = root.join("backups");
@@ -437,13 +445,24 @@ pub fn load_default_config() -> anyhow::Result<Config> {
     load_config(&paths.config_toml)
 }
 
-/// Load the default agent-owned config from `~/.wintermute/agent.toml`.
+/// Load the default agent-owned config from `~/.wintermute/scripts/agent.toml`.
+///
+/// For compatibility, falls back to `~/.wintermute/agent.toml` when present.
 ///
 /// # Errors
 ///
 /// Returns an error if paths cannot be resolved or config parsing fails.
 pub fn load_default_agent_config() -> anyhow::Result<AgentConfig> {
     let paths = runtime_paths()?;
+    if paths.agent_toml.exists() {
+        return load_agent_config(&paths.agent_toml);
+    }
+
+    let legacy_path = paths.root.join("agent.toml");
+    if legacy_path.exists() {
+        return load_agent_config(&legacy_path);
+    }
+
     load_agent_config(&paths.agent_toml)
 }
 

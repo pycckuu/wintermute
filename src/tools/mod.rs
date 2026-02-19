@@ -4,6 +4,7 @@
 //! Every tool result passes through the [`Redactor`] before being returned,
 //! ensuring no secrets leak into LLM context.
 
+pub mod browser;
 pub mod core;
 pub mod create_tool;
 pub mod registry;
@@ -19,6 +20,7 @@ use crate::executor::redactor::Redactor;
 use crate::executor::Executor;
 use crate::memory::MemoryEngine;
 use crate::providers::ToolDefinition;
+use crate::tools::browser::BrowserBridge;
 
 // ---------------------------------------------------------------------------
 // ToolResult
@@ -115,8 +117,10 @@ pub struct ToolRouter {
     fetch_limiter: Arc<RateLimiter>,
     /// Rate limiter for web_request.
     request_limiter: Arc<RateLimiter>,
-    /// Policy context for domain checks (used by agent loop before dispatch).
-    pub policy_context: crate::agent::policy::PolicyContext,
+    /// Rate limiter for browser actions.
+    browser_limiter: Arc<RateLimiter>,
+    /// Optional browser bridge; when None, browser tool returns unavailable.
+    browser_bridge: Option<Arc<dyn BrowserBridge>>,
 }
 
 impl std::fmt::Debug for ToolRouter {
@@ -138,7 +142,8 @@ impl ToolRouter {
         telegram_tx: Option<mpsc::Sender<TelegramOutbound>>,
         fetch_limiter: Arc<RateLimiter>,
         request_limiter: Arc<RateLimiter>,
-        policy_context: crate::agent::policy::PolicyContext,
+        browser_limiter: Arc<RateLimiter>,
+        browser_bridge: Option<Arc<dyn BrowserBridge>>,
     ) -> Self {
         Self {
             executor,
@@ -148,7 +153,8 @@ impl ToolRouter {
             telegram_tx,
             fetch_limiter,
             request_limiter,
-            policy_context,
+            browser_limiter,
+            browser_bridge,
         }
     }
 
@@ -157,9 +163,22 @@ impl ToolRouter {
     /// Dispatches to core tools first, then dynamic registry.
     /// All output is redacted before returning.
     pub async fn execute(&self, name: &str, input: &serde_json::Value) -> ToolResult {
+        self.execute_for_user(name, input, None).await
+    }
+
+    /// Execute a tool with optional session user context.
+    ///
+    /// When `session_user_id` is provided, it is used by tools that need an
+    /// authenticated user target (for example `send_telegram`).
+    pub async fn execute_for_user(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        session_user_id: Option<i64>,
+    ) -> ToolResult {
         debug!(tool = name, "dispatching tool call");
 
-        let raw_result = self.dispatch(name, input).await;
+        let raw_result = self.dispatch(name, input, session_user_id).await;
 
         // CRITICAL: ALL output passes through the redactor.
         let redacted_content = self.redactor.redact(&raw_result.content);
@@ -170,7 +189,12 @@ impl ToolRouter {
     }
 
     /// Dispatch to the appropriate tool implementation without redaction.
-    async fn dispatch(&self, name: &str, input: &serde_json::Value) -> ToolResult {
+    async fn dispatch(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        session_user_id: Option<i64>,
+    ) -> ToolResult {
         match name {
             "execute_command" => {
                 into_tool_result(core::execute_command(&*self.executor, input).await)
@@ -179,13 +203,23 @@ impl ToolRouter {
             "web_request" => {
                 into_tool_result(core::web_request(input, &self.request_limiter).await)
             }
+            "browser" => into_tool_result(
+                browser::run_browser(input, &self.browser_limiter, self.browser_bridge.as_deref())
+                    .await,
+            ),
             "memory_search" => into_tool_result(core::memory_search(&self.memory, input).await),
             "memory_save" => into_tool_result(core::memory_save(&self.memory, input).await),
             "send_telegram" => {
-                let user_id = input.get("user_id").and_then(|v| v.as_i64()).unwrap_or(0);
-                match &self.telegram_tx {
-                    Some(tx) => into_tool_result(core::send_telegram(tx, user_id, input).await),
-                    None => ToolResult::error("telegram not configured"),
+                let resolved_user_id =
+                    session_user_id.or_else(|| input.get("user_id").and_then(|v| v.as_i64()));
+                match (&self.telegram_tx, resolved_user_id) {
+                    (Some(tx), Some(user_id)) => {
+                        into_tool_result(core::send_telegram(tx, user_id, input).await)
+                    }
+                    (Some(_), None) => {
+                        ToolResult::error("send_telegram requires a session user context")
+                    }
+                    (None, _) => ToolResult::error("telegram not configured"),
                 }
             }
             "create_tool" => into_tool_result(
@@ -193,6 +227,7 @@ impl ToolRouter {
             ),
             _ => {
                 if let Some(schema) = self.registry.get(name) {
+                    self.registry.record_usage(name);
                     self.execute_dynamic(name, &schema, input).await
                 } else {
                     warn!(tool = name, "unknown tool requested");
@@ -242,12 +277,22 @@ fn into_tool_result(result: Result<String, ToolError>) -> ToolResult {
 }
 
 impl ToolRouter {
-    /// Return tool definitions for core tools plus up to `max_dynamic` from the registry.
-    pub fn tool_definitions(&self, max_dynamic: u32) -> Vec<ToolDefinition> {
+    /// Return tool definitions for core tools plus up to `max_dynamic` dynamic tools.
+    ///
+    /// Dynamic tools are ranked by relevance (from `query` text) and recency (last-used).
+    /// When `query` is provided, tools whose descriptions overlap with the query are
+    /// preferred; otherwise tools are ordered by most recently used first.
+    pub fn tool_definitions(&self, max_dynamic: u32, query: Option<&str>) -> Vec<ToolDefinition> {
         let mut defs = core::core_tool_definitions();
-        let dynamic = self.registry.all_definitions();
-        let limit = usize::try_from(max_dynamic).unwrap_or(usize::MAX);
-        defs.extend(dynamic.into_iter().take(limit));
+        if self.browser_bridge.is_none() {
+            defs.retain(|def| def.name != "browser");
+        }
+        let max_dynamic = match usize::try_from(max_dynamic) {
+            Ok(value) => value,
+            Err(_) => usize::MAX,
+        };
+        let dynamic = self.registry.ranked_definitions(max_dynamic, query);
+        defs.extend(dynamic);
         defs
     }
 }

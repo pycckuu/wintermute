@@ -139,6 +139,24 @@ pub fn trim_messages(messages: &[Message], max_context_tokens: u64) -> Vec<Messa
     result
 }
 
+/// Trim messages aggressively to a fraction of the original budget.
+///
+/// Used when retrying after context overflow: keep first, last, and a reduced
+/// middle section. `fraction` should be in (0.0, 1.0] (e.g. 0.5 = keep half).
+pub fn trim_messages_to_fraction(
+    messages: &[Message],
+    max_context_tokens: u64,
+    fraction: f64,
+) -> Vec<Message> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let reduced = (max_context_tokens as f64 * fraction) as u64;
+    trim_messages(messages, reduced.max(100))
+}
+
 /// Estimate tokens for a slice of messages.
 pub fn estimate_messages_tokens(messages: &[Message]) -> u64 {
     messages.iter().map(estimate_message_tokens).sum()

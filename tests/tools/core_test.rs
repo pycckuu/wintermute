@@ -7,11 +7,14 @@ use async_trait::async_trait;
 use serde_json::json;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+use wintermute::agent::policy::RateLimiter;
 use wintermute::executor::{
     ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, HealthStatus,
 };
 use wintermute::memory::{Memory, MemoryEngine, MemoryKind, MemorySource, MemoryStatus};
-use wintermute::tools::core::{core_tool_definitions, execute_command, memory_save, memory_search};
+use wintermute::tools::core::{
+    core_tool_definitions, execute_command, memory_save, memory_search, web_request,
+};
 
 // ---------------------------------------------------------------------------
 // Mock executor
@@ -104,9 +107,9 @@ async fn setup_memory_engine() -> MemoryEngine {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn core_tool_definitions_returns_seven_tools() {
+fn core_tool_definitions_returns_eight_tools() {
     let defs = core_tool_definitions();
-    assert_eq!(defs.len(), 7, "should have exactly 7 core tools");
+    assert_eq!(defs.len(), 8, "should have exactly 8 core tools");
 }
 
 #[test]
@@ -117,6 +120,7 @@ fn core_tool_definitions_have_correct_names() {
     assert!(names.contains(&"execute_command"));
     assert!(names.contains(&"web_fetch"));
     assert!(names.contains(&"web_request"));
+    assert!(names.contains(&"browser"));
     assert!(names.contains(&"memory_search"));
     assert!(names.contains(&"memory_save"));
     assert!(names.contains(&"send_telegram"));
@@ -208,6 +212,34 @@ async fn execute_command_shows_timeout() {
 
     assert!(result.contains("Timed out: true"));
     assert!(result.contains("Exit code: none"));
+}
+
+#[tokio::test]
+async fn execute_command_rejects_excessive_timeout() {
+    let exec_result = ExecResult {
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        duration: Duration::from_millis(0),
+    };
+    let executor = MockExecutor::new(exec_result);
+
+    let input = json!({"command": "echo ok", "timeout_secs": 4000});
+    let result = execute_command(&executor, &input).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn web_request_rejects_oversized_body_before_network_call() {
+    let limiter = RateLimiter::new(60, 10);
+    let input = json!({
+        "url": "https://example.com/api",
+        "method": "POST",
+        "body": "x".repeat(120_000),
+    });
+    let result = web_request(&input, &limiter).await;
+    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------

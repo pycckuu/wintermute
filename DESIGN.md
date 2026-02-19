@@ -103,13 +103,13 @@ uses sonnet). The user configures this, not the code.
 │                                                                   │
 │  ~/.wintermute/                                                   │
 │  ├── config.toml       (human-owned: security, credentials)      │
-│  ├── agent.toml        (agent-owned: personality, tasks)         │
 │  ├── .env              (secrets, chmod 600)                      │
 │  ├── data/memory.db    (NOT in sandbox)                          │
 │  ├── health.json       (written by heartbeat, read by Doctor)    │
 │  ├── workspace/        (mounted rw into sandbox)                 │
 │  ├── scripts/          (git repo, mounted rw, hot-reloaded)     │
 │  │   ├── .git/                                                   │
+│  │   ├── agent.toml       (agent-owned: personality, tasks)       │
 │  │   ├── requirements.txt  (pip deps, rebuilt on reset)          │
 │  │   ├── news_digest.py    (agent-created tool)                  │
 │  │   ├── news_digest.json  (tool schema)                         │
@@ -159,6 +159,7 @@ allowed_domains = ["github.com", "api.github.com", "pypi.org",
                    "en.wikipedia.org"]
 fetch_rate_limit = 30
 request_rate_limit = 10
+browser_rate_limit = 60
 
 [privacy]
 # Domains that are NEVER auto-trusted, always require approval
@@ -359,6 +360,9 @@ dynamic tools per LLM call. Selection strategy:
   "required": ["name", "description", "parameters_schema", "implementation"]
 }
 ```
+
+`create_tool` accepts `parameters_schema` as input and writes it to the
+on-disk schema file under the `parameters` key.
 
 When called:
 1. Validate name (alphanumeric + underscore, no path traversal)
@@ -1141,7 +1145,7 @@ cargo build --release
 
 # First time setup
 ./wintermute init
-# Creates ~/.wintermute/, config.toml, agent.toml, .env template
+# Creates ~/.wintermute/, config.toml, scripts/agent.toml, .env template
 # Initializes git repo in scripts/
 # Builds Docker image (if Docker available)
 # Runs migrations on memory.db
@@ -1207,21 +1211,23 @@ Files: telegram/*
 - Inline keyboard support (for approvals)
 - Message routing to agent sessions
 
-**Task 6: Agent Loop + Tools**
+**Task 6: Agent Loop + Tools** ✅
 Files: agent/*, tools/*
 - Session router (per-session Tokio tasks, try_send)
 - Agent loop: context assemble → LLM call → tool routing → execute → observe
-- Context assembler with trimming + retry
+- Context assembler with trimming + overflow retry (aggressive trim on context_length_exceeded)
 - Policy gate + egress rules
 - Non-blocking approval manager (short-ID callbacks)
 - Budget tracker (atomic, per-session + daily)
-- 8 core tool implementations
+- 8 core tool implementations (including browser)
 - Dynamic tool registry (watch /scripts/*.json, hot-reload)
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
-- Dynamic tool selection (top N by relevance/recency)
-- Browser bridge: Playwright subprocess, auto-detection, domain policy
-  (skip if headless — tool not registered)
+- Dynamic tool selection (ranked by relevance + recency, query passed from agent loop)
+- Browser tool: safe bridge interface, rate limiting, input validation. Returns clear
+  unavailable error when no runtime bridge configured. **Remaining:** runtime bridge
+  (Playwright subprocess or MCP) for actual automation — not implemented to avoid
+  `std::process::Command`/`tokio::process::Command` in this phase.
 
 ### Phase 3: Intelligence (weeks 7-8)
 
