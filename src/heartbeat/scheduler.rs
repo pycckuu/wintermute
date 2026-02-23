@@ -167,7 +167,7 @@ pub async fn execute_task(
             "<b>Scheduled task:</b> {}\n<b>Status:</b> {}\n<b>Output:</b> {}",
             escape_html(&outcome.name),
             status,
-            escape_html(&outcome.output[..outcome.output.len().min(500)])
+            escape_html(&outcome.output.chars().take(500).collect::<String>())
         );
         let msg = TelegramOutbound {
             user_id: deps.notify_user_id,

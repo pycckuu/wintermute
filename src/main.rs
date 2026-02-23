@@ -24,7 +24,8 @@ use wintermute::config::{
     load_default_agent_config, load_default_config, runtime_paths, RuntimePaths,
 };
 use wintermute::credentials::{
-    enforce_private_file_permissions, load_default_credentials, resolve_anthropic_auth, Credentials,
+    enforce_private_file_permissions, load_default_credentials, resolve_anthropic_auth,
+    AnthropicAuth, Credentials,
 };
 use wintermute::executor::direct::DirectExecutor;
 use wintermute::executor::docker::DockerExecutor;
@@ -161,7 +162,13 @@ async fn handle_start() -> anyhow::Result<()> {
     // Merge OAuth secrets into the redactor's exact-match list.
     let mut all_secrets = credentials.known_secrets();
     if let Some(auth) = resolve_anthropic_auth(&credentials) {
+        match &auth {
+            AnthropicAuth::OAuth { .. } => info!("anthropic auth resolved: OAuth token"),
+            AnthropicAuth::ApiKey(_) => info!("anthropic auth resolved: API key"),
+        }
         all_secrets.extend(auth.secret_values());
+    } else {
+        warn!("no Anthropic credentials found; provider will be unavailable");
     }
 
     // Set up executor: Docker preferred, Direct as fallback
@@ -198,7 +205,6 @@ async fn handle_start() -> anyhow::Result<()> {
         .context("failed to create sqlite pool for memory engine")?;
     apply_memory_migration(&pool).await?;
 
-    let memory_pool = pool.clone();
     let memory = Arc::new(
         MemoryEngine::new(pool, None)
             .await
@@ -285,13 +291,13 @@ async fn handle_start() -> anyhow::Result<()> {
     // Phase 3: Heartbeat background task
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
     if agent_config_arc.heartbeat.enabled {
-        let notify_user_id = config_arc
-            .channels
-            .telegram
-            .allowed_users
-            .first()
-            .copied()
-            .unwrap_or(0);
+        let notify_user_id = match config_arc.channels.telegram.allowed_users.first() {
+            Some(&id) => id,
+            None => {
+                warn!("no allowed_users configured; heartbeat notifications disabled");
+                0
+            }
+        };
         let heartbeat_deps = wintermute::heartbeat::HeartbeatDeps {
             config: Arc::clone(&config_arc),
             agent_config: Arc::clone(&agent_config_arc),
@@ -331,7 +337,6 @@ async fn handle_start() -> anyhow::Result<()> {
         memory,
         registry,
         paths,
-        memory_pool,
     )
     .await?;
 

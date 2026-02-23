@@ -102,12 +102,12 @@ pub async fn handle_memory_pending(memory: &MemoryEngine) -> String {
     let mut lines = vec![format!("<b>Pending memories ({}):</b>", pending.len())];
     for mem in &pending {
         let kind = mem.kind.as_str();
-        let content = escape_html(&mem.content);
-        let display = if content.len() > 120 {
-            let truncated: String = content.chars().take(120).collect();
-            format!("{truncated}...")
+        // Truncate raw content before escaping to avoid splitting HTML entities.
+        let display = if mem.content.chars().count() > 120 {
+            let truncated: String = mem.content.chars().take(120).collect();
+            format!("{}...", escape_html(&truncated))
         } else {
-            content
+            escape_html(&mem.content)
         };
         lines.push(format!("  [{kind}] {display}"));
     }
@@ -181,10 +181,10 @@ pub async fn handle_sandbox(executor: &dyn Executor) -> String {
 /// Trigger an immediate backup.
 pub async fn handle_backup_trigger(
     scripts_dir: &std::path::Path,
-    memory_pool: &sqlx::SqlitePool,
+    memory: &crate::memory::MemoryEngine,
     backups_dir: &std::path::Path,
 ) -> String {
-    match crate::heartbeat::backup::create_backup(scripts_dir, memory_pool, backups_dir).await {
+    match crate::heartbeat::backup::create_backup(scripts_dir, memory.pool(), backups_dir).await {
         Ok(result) => {
             let size_kb = result.total_size_bytes / 1024;
             format!(

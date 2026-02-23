@@ -149,7 +149,7 @@ fn validate_private_permissions(_path: &Path) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// How Wintermute authenticates with the Anthropic API.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum AnthropicAuth {
     /// OAuth Bearer token (from Claude CLI or env var).
     OAuth {
@@ -162,6 +162,20 @@ pub enum AnthropicAuth {
     },
     /// Classic API key sent as `x-api-key` header.
     ApiKey(String),
+}
+
+impl std::fmt::Debug for AnthropicAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OAuth { expires_at, .. } => f
+                .debug_struct("OAuth")
+                .field("access_token", &"[REDACTED]")
+                .field("refresh_token", &"[REDACTED]")
+                .field("expires_at", expires_at)
+                .finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+        }
+    }
 }
 
 impl AnthropicAuth {
@@ -275,16 +289,23 @@ struct ClaudeAiOauth {
     expires_at: Option<i64>,
 }
 
+/// Keychain service name used by Claude Code to store OAuth credentials.
+const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Keychain account name used by Claude Code.
+const CLAUDE_KEYCHAIN_ACCOUNT: &str = "Claude Code";
+
 /// Read Claude CLI credentials from macOS Keychain.
 #[cfg(target_os = "macos")]
 fn read_claude_cli_keychain() -> Option<AnthropicAuth> {
     use security_framework::passwords::get_generic_password;
 
-    let password_bytes = get_generic_password("Claude Code-credentials", "Claude Code")
-        .map_err(|e| {
-            debug!(error = %e, "Claude CLI keychain entry not found");
-        })
-        .ok()?;
+    let password_bytes =
+        get_generic_password(CLAUDE_KEYCHAIN_SERVICE, CLAUDE_KEYCHAIN_ACCOUNT)
+            .map_err(|e| {
+                debug!(error = %e, "Claude CLI keychain entry not found");
+            })
+            .ok()?;
 
     let json_str = std::str::from_utf8(&password_bytes)
         .map_err(|e| {
