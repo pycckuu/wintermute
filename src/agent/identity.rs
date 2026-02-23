@@ -72,14 +72,26 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
 
     // Tools
     doc.push_str("## Your Tools\n");
-    let _ = writeln!(doc, "- {} core tools (always available)", snap.core_tool_count);
-    let _ = writeln!(doc, "- {} custom tools (agent-created)", snap.dynamic_tool_count);
+    let _ = writeln!(
+        doc,
+        "- {} core tools (always available)",
+        snap.core_tool_count
+    );
+    let _ = writeln!(
+        doc,
+        "- {} custom tools (agent-created)",
+        snap.dynamic_tool_count
+    );
     doc.push('\n');
 
     // Memory
     doc.push_str("## Your Memory\n");
     let _ = writeln!(doc, "- {} active memories", snap.active_memory_count);
-    let _ = writeln!(doc, "- {} pending memories awaiting promotion", snap.pending_memory_count);
+    let _ = writeln!(
+        doc,
+        "- {} pending memories awaiting promotion",
+        snap.pending_memory_count
+    );
     if !snap.has_vector_search {
         doc.push_str(
             "- Vector search not configured. You can enable it by configuring an embedding model.\n",
@@ -89,18 +101,16 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
 
     // Budget
     doc.push_str("## Budget\n");
-    let _ = writeln!(
-        doc,
-        "- Session limit: {} tokens",
-        snap.session_budget_limit
-    );
+    let _ = writeln!(doc, "- Session limit: {} tokens", snap.session_budget_limit);
     let _ = writeln!(doc, "- Daily limit: {} tokens", snap.daily_budget_limit);
     doc.push('\n');
 
     // Privacy boundary
     doc.push_str("## Privacy Boundary\n");
     if snap.has_network_isolation {
-        doc.push_str("- Your sandbox has NO network access. Use web_fetch/web_request for internet.\n");
+        doc.push_str(
+            "- Your sandbox has NO network access. Use web_fetch/web_request for internet.\n",
+        );
     } else {
         doc.push_str("- Running in direct mode without network isolation. Be careful with outbound requests.\n");
     }
@@ -119,8 +129,12 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
 /// Returns an error if the write or rename fails.
 pub fn write_identity_file(content: &str, path: &Path) -> anyhow::Result<()> {
     let tmp_path = path.with_extension("md.tmp");
-    std::fs::write(&tmp_path, content)
-        .with_context(|| format!("failed to write identity temp file at {}", tmp_path.display()))?;
+    std::fs::write(&tmp_path, content).with_context(|| {
+        format!(
+            "failed to write identity temp file at {}",
+            tmp_path.display()
+        )
+    })?;
     std::fs::rename(&tmp_path, path)
         .with_context(|| format!("failed to rename identity file to {}", path.display()))?;
     Ok(())

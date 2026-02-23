@@ -353,11 +353,11 @@ fn compaction_plan_returns_none_for_short_conversations() {
 fn compaction_plan_splits_correctly() {
     let messages = vec![
         make_message(Role::User, "First"),       // 0: kept (first)
-        make_message(Role::Assistant, "Second"),  // 1: compacted
-        make_message(Role::User, "Third"),        // 2: compacted
-        make_message(Role::Assistant, "Fourth"),  // 3: compacted
-        make_message(Role::User, "Fifth"),        // 4: kept (last 2)
-        make_message(Role::Assistant, "Sixth"),   // 5: kept (last 2)
+        make_message(Role::Assistant, "Second"), // 1: compacted
+        make_message(Role::User, "Third"),       // 2: compacted
+        make_message(Role::Assistant, "Fourth"), // 3: compacted
+        make_message(Role::User, "Fifth"),       // 4: kept (last 2)
+        make_message(Role::Assistant, "Sixth"),  // 5: kept (last 2)
     ];
 
     let plan = build_compaction_plan(&messages, 2).expect("should produce a plan");

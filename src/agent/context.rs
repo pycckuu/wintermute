@@ -260,11 +260,10 @@ pub fn build_compaction_request(plan: &CompactionPlan, target_tokens: u64) -> Ve
         conversation_text.push_str(&format!("{role_label}: {text}\n\n"));
     }
 
-    vec![
-        Message {
-            role: Role::User,
-            content: MessageContent::Text(format!(
-                "Summarize this conversation so far, preserving:\n\
+    vec![Message {
+        role: Role::User,
+        content: MessageContent::Text(format!(
+            "Summarize this conversation so far, preserving:\n\
                  - All decisions made\n\
                  - All action items and their status\n\
                  - Current task state\n\
@@ -272,9 +271,8 @@ pub fn build_compaction_request(plan: &CompactionPlan, target_tokens: u64) -> Ve
                  Keep it under {target_tokens} tokens. Be concise but complete.\n\n\
                  ---\n\n\
                  {conversation_text}"
-            )),
-        },
-    ]
+        )),
+    }]
 }
 
 /// Apply compaction by replacing old messages with a summary.
