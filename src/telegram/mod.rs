@@ -20,6 +20,7 @@ use crate::tools::registry::DynamicToolRegistry;
 
 pub mod commands;
 pub mod input_guard;
+pub mod media;
 pub mod ui;
 
 // ---------------------------------------------------------------------------
@@ -160,9 +161,34 @@ async fn handle_message(bot: Bot, msg: Message, state: SharedState) -> ResponseR
         return Ok(());
     }
 
-    let text = match msg.text() {
-        Some(t) => t.to_owned(),
-        None => return Ok(()),
+    let text = if let Some(t) = msg.text() {
+        t.to_owned()
+    } else {
+        // Handle non-text messages: voice, photo, document.
+        let inbox_dir = state.paths.workspace_dir.join("inbox");
+        let media_result = if let Some(voice) = msg.voice() {
+            media::handle_voice(&bot, voice, &inbox_dir).await
+        } else if let Some(photos) = msg.photo() {
+            media::handle_photo(&bot, photos, &inbox_dir).await
+        } else if let Some(document) = msg.document() {
+            media::handle_document(&bot, document, &inbox_dir).await
+        } else {
+            debug!(user_id, "unsupported message type, ignoring");
+            return Ok(());
+        };
+
+        match media_result {
+            Ok(desc) => desc.text,
+            Err(e) => {
+                warn!(error = %e, "failed to handle media message");
+                bot.send_message(
+                    msg.chat.id,
+                    "Failed to download the file. Please try again.",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
     };
 
     // Handle slash commands

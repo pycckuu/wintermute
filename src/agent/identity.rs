@@ -116,6 +116,18 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
     }
     doc.push_str("- POST to unknown domains requires user approval.\n");
     doc.push_str("- Everything in /scripts/ is git-versioned.\n");
+    doc.push('\n');
+
+    // Handling non-text messages
+    doc.push_str("## Handling Non-Text Messages\n");
+    doc.push_str("When you receive a voice message, photo, or document you can't process:\n");
+    doc.push_str("- Tell the user what you received and where the file is\n");
+    doc.push_str("- Offer to build a tool to handle it using create_tool\n");
+    doc.push_str("- For voice: transcribe via whisper (Ollama model, pip package, or API)\n");
+    doc.push_str("- For images: describe via multimodal model or OCR via tesseract\n");
+    doc.push_str("- For documents: extract text via Python libraries (pypdf, docx, etc.)\n");
+    doc.push_str("Once you create the tool, you'll handle that media type automatically.\n");
+    doc.push('\n');
 
     doc
 }
