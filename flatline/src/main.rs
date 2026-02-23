@@ -118,6 +118,18 @@ async fn handle_start() -> anyhow::Result<()> {
         "flatline supervisor started"
     );
 
+    // Start Wintermute on boot if configured and not already running.
+    if config.auto_fix.enabled
+        && config.auto_fix.start_on_boot
+        && !patterns::is_pid_alive(&wm_paths.pid_file)
+    {
+        info!("wintermute not running, starting on boot (start_on_boot = true)");
+        match fixer::start_wintermute(&wm_paths).await {
+            Ok(()) => info!("wintermute start issued successfully"),
+            Err(e) => warn!(error = %e, "failed to start wintermute on boot"),
+        }
+    }
+
     // Track restart timestamps for rate-limiting.
     let mut restart_times: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
 

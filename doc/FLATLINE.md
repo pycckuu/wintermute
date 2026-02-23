@@ -591,16 +591,56 @@ cargo build --release -p wintermute
 cargo build --release -p flatline
 ```
 
-Or as a single install:
-```bash
-wintermute start            # starts the agent
-wintermute flatline start     # starts the supervisor (could be subcommand)
-```
-
 ### Process Management
 
-Both processes managed by systemd (Linux) or launchd (macOS),
-or just run in separate terminal sessions / tmux panes.
+#### Recommended: Single Command
+
+With `start_on_boot = true` (the default), Flatline starts Wintermute
+automatically if it is not already running:
+
+```bash
+flatline start
+```
+
+This is the recommended way to run the full stack. Flatline checks
+for a live Wintermute process on startup. If Wintermute isn't running,
+Flatline spawns it immediately before entering the monitoring loop.
+If Wintermute is already running, Flatline skips the start and begins
+monitoring.
+
+Set `start_on_boot = false` in `flatline.toml` for monitoring-only
+mode (Flatline watches but does not start Wintermute on boot).
+
+#### Manual: Two Processes
+
+Run both independently in separate terminal sessions or tmux panes:
+
+```bash
+wintermute start     # Terminal 1: start the agent
+flatline start       # Terminal 2: start the supervisor
+```
+
+#### Production: systemd (Linux)
+
+With `start_on_boot = true`, a single systemd unit is sufficient:
+
+```ini
+# /etc/systemd/system/flatline.service
+[Unit]
+Description=Wintermute Flatline (Supervisor + Agent Launcher)
+After=network.target docker.service
+
+[Service]
+ExecStart=/usr/local/bin/flatline start
+Restart=always
+RestartSec=5
+User=wintermute
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Alternatively, manage both as separate units for finer control:
 
 ```ini
 # /etc/systemd/system/wintermute.service
@@ -623,7 +663,6 @@ WantedBy=multi-user.target
 [Unit]
 Description=Wintermute Flatline (Supervisor)
 After=wintermute.service
-BindsTo=wintermute.service
 
 [Service]
 ExecStart=/usr/local/bin/flatline start
@@ -635,9 +674,8 @@ User=wintermute
 WantedBy=multi-user.target
 ```
 
-Flatline starts after Wintermute. If Wintermute's service is stopped
-intentionally, Flatline stops too (BindsTo). But if Wintermute crashes,
-Flatline stays running and handles the restart.
+If Wintermute crashes, Flatline detects it via the `ProcessDown` pattern
+and restarts it (when `restart_on_crash = true`).
 
 ---
 
@@ -669,6 +707,7 @@ disk_warning_gb = 5                # warn when ~/.wintermute > 5GB
 [auto_fix]
 enabled = true
 restart_on_crash = true            # auto-restart Wintermute
+start_on_boot = true              # start Wintermute when Flatline boots
 quarantine_failing_tools = true    # auto-quarantine after threshold
 disable_failing_tasks = true       # auto-disable after 3 consecutive failures
 revert_recent_changes = true       # auto-revert if correlated with failure

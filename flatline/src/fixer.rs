@@ -4,7 +4,7 @@
 //! Only `std::process::Command` usage in the entire crate lives here (aside from
 //! `patterns::is_pid_alive` and `patterns::read_git_log`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -222,7 +222,7 @@ pub async fn apply_fix(fix: &FixRecord, paths: &RuntimePaths) -> anyhow::Result<
         serde_json::from_str(action_str).context("failed to parse fix action")?;
 
     match action {
-        FixAction::RestartProcess => apply_restart_process(paths).await,
+        FixAction::RestartProcess => start_wintermute(paths).await,
         FixAction::ResetSandbox => apply_reset_sandbox().await,
         FixAction::GitRevert { commit_hash } => {
             apply_git_revert(&commit_hash, &paths.scripts_dir).await
@@ -315,41 +315,53 @@ pub fn validate_commit_hash(hash: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// -- Private action implementations --
+/// Start Wintermute, gracefully stopping any existing instance first.
+///
+/// Tolerates a missing or empty PID file (cold start): skips the SIGTERM
+/// step and proceeds directly to spawning Wintermute. Used both by the
+/// boot-time startup check and the `RestartProcess` fix action.
+///
+/// # Errors
+///
+/// Returns an error if the process cannot be spawned.
+pub async fn start_wintermute(paths: &RuntimePaths) -> anyhow::Result<()> {
+    // Step 1: Attempt graceful shutdown if a PID file exists.
+    match tokio::fs::read_to_string(&paths.pid_file).await {
+        Ok(pid_contents) => {
+            let pid_str = pid_contents.trim();
+            if !pid_str.is_empty() {
+                let pid: u32 = pid_str
+                    .parse()
+                    .with_context(|| format!("invalid PID value in pid file: {pid_str:?}"))?;
+                info!(pid, "sending SIGTERM to wintermute");
+                tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("kill")
+                        .args([&pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                })
+                .await
+                .context("kill task panicked")?
+                .ok();
 
-/// Restart the Wintermute process by sending SIGTERM and then starting it again.
-async fn apply_restart_process(paths: &RuntimePaths) -> anyhow::Result<()> {
-    // Step 1: Read PID and send SIGTERM.
-    let pid_file = paths.pid_file.clone();
-    let pid_contents = std::fs::read_to_string(&pid_file)
-        .with_context(|| format!("failed to read PID file at {}", pid_file.display()))?;
-
-    let pid_str = pid_contents.trim();
-    if !pid_str.is_empty() {
-        let pid: u32 = pid_str
-            .parse()
-            .with_context(|| format!("invalid PID value in pid file: {pid_str:?}"))?;
-        info!(pid, "sending SIGTERM to wintermute");
-        let pid_string = pid.to_string();
-        tokio::task::spawn_blocking(move || {
-            std::process::Command::new("kill")
-                .args([&pid_string])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-        })
-        .await
-        .context("kill task panicked")?
-        .ok();
-
-        // Wait 5 seconds for graceful shutdown.
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                // Wait 5 seconds for graceful shutdown.
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
+        }
+        Err(_) => {
+            info!(
+                path = %paths.pid_file.display(),
+                "no PID file found, skipping graceful shutdown (cold start)"
+            );
+        }
     }
 
     // Step 2: Start wintermute as a background process.
-    info!("starting wintermute");
-    tokio::task::spawn_blocking(|| {
-        std::process::Command::new("wintermute")
+    let bin = resolve_wintermute_bin();
+    info!(path = %bin.display(), "starting wintermute");
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&bin)
             .arg("start")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -362,11 +374,28 @@ async fn apply_restart_process(paths: &RuntimePaths) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the path to the `wintermute` binary.
+///
+/// Checks `./wintermute` in the current directory first, then falls back to
+/// bare `"wintermute"` (PATH lookup).
+fn resolve_wintermute_bin() -> PathBuf {
+    let local = PathBuf::from("./wintermute");
+    if local.is_file() {
+        info!(path = %local.display(), "using local wintermute binary");
+        local
+    } else {
+        PathBuf::from("wintermute")
+    }
+}
+
+// -- Private action implementations --
+
 /// Reset the Docker sandbox via `wintermute reset`.
 async fn apply_reset_sandbox() -> anyhow::Result<()> {
-    info!("resetting sandbox");
-    let status = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("wintermute")
+    let bin = resolve_wintermute_bin();
+    info!(path = %bin.display(), "resetting sandbox");
+    let status = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&bin)
             .arg("reset")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -72,3 +72,17 @@ Dixie Flatline from Neuromancer.
 - [x] DESIGN.md updated (Flatline reference updated)
 - [x] dev/AGENT.md updated (flatline scope + project structure)
 - [x] PRD updated with progress
+
+### Cold-Start: Single Entry Point (Phase 5)
+
+- [x] 5.1 Fix `apply_restart_process` — handle missing PID file (cold start)
+- [x] 5.2 Add `start_on_boot` config field (default: true) to `AutoFixConfig`
+- [x] 5.3 Boot-time startup check in `main.rs` (gates on `enabled && start_on_boot && !is_pid_alive`)
+- [x] 5.4 Inline `apply_restart_process` into public `start_wintermute` (no wrapper indirection)
+- [x] 5.5 Use `tokio::fs::read_to_string` for async PID file read
+- [x] 5.6 Update `flatline.toml.example` with `start_on_boot = true`
+- [x] 5.7 Update README.md — "Running with Flatline" section
+- [x] 5.8 Update doc/FLATLINE.md — process management docs (single command, systemd)
+- [x] 5.9 Tests: 3 fixer tests (cold_start, empty_pid, start_wintermute) + 3 config tests
+- [x] 5.10 Security review: all 8 invariants PRESERVED, 3 findings fixed
+- [x] 5.11 Linter + clippy clean, 477 tests passing
