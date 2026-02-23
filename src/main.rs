@@ -141,6 +141,11 @@ const OUTBOUND_CHANNEL_CAPACITY: usize = 256;
 
 async fn handle_start() -> anyhow::Result<()> {
     let paths = runtime_paths()?;
+
+    // Write PID file for Flatline monitoring.
+    std::fs::write(&paths.pid_file, std::process::id().to_string())
+        .with_context(|| format!("failed to write PID file {}", paths.pid_file.display()))?;
+
     let config = load_default_config()
         .with_context(|| format!("failed to load {}", paths.config_toml.display()))?;
     let agent_config = load_default_agent_config()

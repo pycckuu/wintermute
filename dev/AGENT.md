@@ -68,6 +68,17 @@ src/
     ├── scheduler.rs           # Cron evaluation + task dispatch
     ├── backup.rs              # git bundle + sqlite backup
     └── health.rs              # Self-checks, log structured health
+flatline/src/                      # Flatline supervisor (separate crate)
+├── main.rs                        # CLI + daemon loop
+├── lib.rs                         # Crate root
+├── config.rs                      # flatline.toml loading + validation
+├── db.rs                          # state.db (tool_stats, fixes, suppressions)
+├── watcher.rs                     # Log tailing + health.json monitoring
+├── stats.rs                       # Rolling tool/budget statistics
+├── patterns.rs                    # 8 known failure patterns
+├── diagnosis.rs                   # LLM-based diagnosis (novel problems)
+├── fixer.rs                       # Fix lifecycle (propose → apply → verify)
+└── reporter.rs                    # Telegram notifications + daily reports
 ```
 
 ## Security Invariants
@@ -172,7 +183,7 @@ type(scope): brief summary
 
 **Types:** `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`
 
-**Scopes:** `providers`, `executor`, `tools`, `agent`, `memory`, `telegram`, `observer`, `heartbeat`, `config`
+**Scopes:** `providers`, `executor`, `tools`, `agent`, `memory`, `telegram`, `observer`, `heartbeat`, `config`, `flatline`
 
 ## Build & Run
 
