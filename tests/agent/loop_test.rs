@@ -233,6 +233,7 @@ async fn run_session_completes_on_shutdown() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     // Spawn the session task
@@ -323,6 +324,7 @@ async fn run_session_completes_on_channel_close() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -599,6 +601,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -704,6 +707,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -815,6 +819,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -919,6 +924,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         telegram_tx,
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
+        observer_tx: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));

@@ -243,7 +243,7 @@ pub enum PromotionMode {
 }
 
 /// Learning and promotion settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LearningConfig {
     /// Enables or disables observer-driven learning.
     #[serde(default = "default_learning_enabled")]

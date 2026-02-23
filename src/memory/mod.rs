@@ -402,6 +402,58 @@ impl MemoryEngine {
             .map_err(|_| MemoryError::WriterClosed)
     }
 
+    /// Search memories filtered by status, ordered by most recently updated.
+    ///
+    /// Returns up to `limit` memories with the given status.
+    pub async fn search_by_status(
+        &self,
+        status: MemoryStatus,
+        limit: usize,
+    ) -> Result<Vec<Memory>, MemoryError> {
+        search::search_by_status(&self.db, status.as_str(), limit).await
+    }
+
+    /// Delete a memory by its row id.
+    ///
+    /// The deletion is sent to the single-writer actor for serialized execution.
+    /// Both the `memories` row and its corresponding FTS5 index entry are removed
+    /// (via the `memories_ad` trigger).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::WriterClosed`] if the writer actor has stopped.
+    pub async fn delete_memory(&self, id: i64) -> Result<(), MemoryError> {
+        self.writer_tx
+            .send(WriteOp::DeleteMemory { id })
+            .await
+            .map_err(|_| MemoryError::WriterClosed)
+    }
+
+    /// Count the number of memories with the given status.
+    pub async fn count_by_status(&self, status: MemoryStatus) -> Result<u64, MemoryError> {
+        let row: (i64,) = sqlx::query_as("SELECT count(*) FROM memories WHERE status = ?1")
+            .bind(status.as_str())
+            .fetch_one(&self.db)
+            .await?;
+        // count(*) is always non-negative, safe to cast.
+        Ok(row.0.cast_unsigned())
+    }
+
+    /// Get the database file size in bytes for health reporting.
+    ///
+    /// Uses SQLite's `page_count * page_size` PRAGMA to compute the size.
+    /// This works for both file-backed and in-memory databases.
+    pub async fn db_size_bytes(&self) -> Result<u64, MemoryError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+        )
+        .fetch_one(&self.db)
+        .await
+        .map_err(MemoryError::Database)?;
+        // page_count * page_size is always non-negative, safe to cast.
+        Ok(row.0.cast_unsigned())
+    }
+
     /// Record a domain as trusted in the trust ledger.
     ///
     /// # Errors

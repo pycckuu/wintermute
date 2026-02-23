@@ -6,13 +6,14 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Connection;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use wintermute::agent::approval::ApprovalManager;
@@ -191,6 +192,7 @@ async fn handle_start() -> anyhow::Result<()> {
         .context("failed to create sqlite pool for memory engine")?;
     apply_memory_migration(&pool).await?;
 
+    let memory_pool = pool.clone();
     let memory = Arc::new(
         MemoryEngine::new(pool, None)
             .await
@@ -225,6 +227,7 @@ async fn handle_start() -> anyhow::Result<()> {
         executor_kind: executor.kind(),
     };
 
+    let observer_redactor = redactor.clone();
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -239,18 +242,72 @@ async fn handle_start() -> anyhow::Result<()> {
 
     let config_arc = Arc::new(config);
     let agent_config_arc = Arc::new(agent_config);
+    let router_arc = Arc::new(router);
+
+    // Phase 3: Observer channel + background task
+    let observer_tx = if agent_config_arc.learning.enabled {
+        let (tx, rx) = mpsc::channel::<wintermute::observer::ObserverEvent>(64);
+        let observer_deps = wintermute::observer::ObserverDeps {
+            memory: Arc::clone(&memory),
+            router: Arc::clone(&router_arc),
+            daily_budget: Arc::clone(&daily_budget),
+            redactor: observer_redactor,
+            learning_config: agent_config_arc.learning.clone(),
+            telegram_tx: telegram_tx.clone(),
+        };
+        tokio::spawn(wintermute::observer::run_observer(observer_deps, rx));
+        info!("observer pipeline spawned");
+        Some(tx)
+    } else {
+        info!("observer disabled via learning.enabled = false");
+        None
+    };
 
     let session_router = Arc::new(SessionRouter::new(
-        Arc::new(router),
+        Arc::clone(&router_arc),
         Arc::clone(&tool_router),
         Arc::clone(&memory),
-        daily_budget,
+        Arc::clone(&daily_budget),
         Arc::clone(&approval_manager),
         policy_context,
-        telegram_tx,
+        telegram_tx.clone(),
         Arc::clone(&config_arc),
         Arc::clone(&agent_config_arc),
+        observer_tx,
     ));
+
+    // Phase 3: Heartbeat background task
+    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    if agent_config_arc.heartbeat.enabled {
+        let notify_user_id = config_arc
+            .channels
+            .telegram
+            .allowed_users
+            .first()
+            .copied()
+            .unwrap_or(0);
+        let heartbeat_deps = wintermute::heartbeat::HeartbeatDeps {
+            config: Arc::clone(&config_arc),
+            agent_config: Arc::clone(&agent_config_arc),
+            memory: Arc::clone(&memory),
+            executor: Arc::clone(&executor),
+            tool_router: Arc::clone(&tool_router),
+            router: Arc::clone(&router_arc),
+            daily_budget: Arc::clone(&daily_budget),
+            telegram_tx: telegram_tx.clone(),
+            notify_user_id,
+            paths: paths.clone(),
+            session_router: Arc::clone(&session_router),
+        };
+        tokio::spawn(wintermute::heartbeat::run_heartbeat(
+            heartbeat_deps,
+            Instant::now(),
+            shutdown_rx,
+        ));
+        info!("heartbeat spawned");
+    } else {
+        info!("heartbeat disabled via heartbeat.enabled = false");
+    }
 
     info!(
         default_model = %config_arc.models.default,
@@ -267,6 +324,8 @@ async fn handle_start() -> anyhow::Result<()> {
         executor,
         memory,
         registry,
+        paths,
+        memory_pool,
     )
     .await?;
 

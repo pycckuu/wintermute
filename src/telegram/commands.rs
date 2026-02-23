@@ -86,14 +86,41 @@ pub async fn handle_memory(memory: &MemoryEngine) -> String {
     }
 }
 
-/// Placeholder for pending observer memories.
-pub fn handle_memory_pending() -> String {
-    "No pending memories (observer not yet active).".to_owned()
+/// Show pending observer memories.
+pub async fn handle_memory_pending(memory: &MemoryEngine) -> String {
+    use crate::memory::MemoryStatus;
+
+    let pending = match memory.search_by_status(MemoryStatus::Pending, 20).await {
+        Ok(p) => p,
+        Err(e) => return format!("Error: {}", escape_html(&e.to_string())),
+    };
+
+    if pending.is_empty() {
+        return "No pending observer memories.".to_owned();
+    }
+
+    let mut lines = vec![format!("<b>Pending memories ({}):</b>", pending.len())];
+    for mem in &pending {
+        let kind = mem.kind.as_str();
+        let content = escape_html(&mem.content);
+        let display = if content.len() > 120 {
+            let truncated: String = content.chars().take(120).collect();
+            format!("{truncated}...")
+        } else {
+            content
+        };
+        lines.push(format!("  [{kind}] {display}"));
+    }
+    lines.join("\n")
 }
 
-/// Placeholder for observer undo.
-pub fn handle_memory_undo() -> String {
-    "Observer undo not yet available.".to_owned()
+/// Undo the last batch of observer-promoted memories.
+pub async fn handle_memory_undo(memory: &MemoryEngine) -> String {
+    match crate::observer::staging::undo_last_promotion(memory).await {
+        Ok(0) => "No observer-promoted memories to undo.".to_owned(),
+        Ok(count) => format!("Reverted {count} observer-promoted memories to archived."),
+        Err(e) => format!("Undo failed: {}", escape_html(&e.to_string())),
+    }
 }
 
 /// List all dynamic tools with descriptions.
@@ -151,7 +178,23 @@ pub async fn handle_sandbox(executor: &dyn Executor) -> String {
     )
 }
 
-/// Placeholder for backup trigger.
-pub fn handle_backup_trigger() -> String {
-    "Backup not yet automated (heartbeat not active).".to_owned()
+/// Trigger an immediate backup.
+pub async fn handle_backup_trigger(
+    scripts_dir: &std::path::Path,
+    memory_pool: &sqlx::SqlitePool,
+    backups_dir: &std::path::Path,
+) -> String {
+    match crate::heartbeat::backup::create_backup(scripts_dir, memory_pool, backups_dir).await {
+        Ok(result) => {
+            let size_kb = result.total_size_bytes / 1024;
+            format!(
+                "<b>Backup created</b>\nPath: <code>{}</code>\nScripts: {}\nMemory: {}\nSize: {} KB",
+                escape_html(&result.backup_dir.display().to_string()),
+                if result.scripts_copied { "yes" } else { "no" },
+                if result.memory_copied { "yes" } else { "no" },
+                size_kb,
+            )
+        }
+        Err(e) => format!("Backup failed: {}", escape_html(&e.to_string())),
+    }
 }
