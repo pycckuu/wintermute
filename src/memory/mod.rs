@@ -473,6 +473,11 @@ impl MemoryEngine {
             .map_err(|_| MemoryError::WriterClosed)
     }
 
+    /// Returns `true` if an embedding model is configured for vector search.
+    pub fn has_embedder(&self) -> bool {
+        self.embedder.is_some()
+    }
+
     /// Check if a domain is trusted (exists in the trust ledger).
     pub async fn is_domain_trusted(&self, domain: &str) -> Result<bool, MemoryError> {
         let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM trust_ledger WHERE domain = ?1")

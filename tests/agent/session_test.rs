@@ -185,6 +185,22 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
     let approval_manager = Arc::new(ApprovalManager::new());
     let (telegram_tx, telegram_rx) = mpsc::channel::<TelegramOutbound>(64);
 
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let paths = wintermute::config::RuntimePaths {
+        root: tmp_dir.path().to_path_buf(),
+        config_toml: tmp_dir.path().join("config.toml"),
+        agent_toml: tmp_dir.path().join("agent.toml"),
+        env_file: tmp_dir.path().join(".env"),
+        scripts_dir: tmp_dir.path().join("scripts"),
+        workspace_dir: tmp_dir.path().join("workspace"),
+        data_dir: tmp_dir.path().join("data"),
+        backups_dir: tmp_dir.path().join("backups"),
+        memory_db: tmp_dir.path().join("data/memory.db"),
+        pid_file: tmp_dir.path().join("wintermute.pid"),
+        health_json: tmp_dir.path().join("health.json"),
+        identity_md: tmp_dir.path().join("IDENTITY.md"),
+    };
+
     let session_router = SessionRouter::new(
         router,
         tool_router,
@@ -196,6 +212,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         Arc::new(make_config()),
         Arc::new(make_agent_config()),
         None,
+        paths,
     );
 
     (session_router, telegram_rx)

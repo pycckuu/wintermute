@@ -291,6 +291,7 @@ async fn handle_start() -> anyhow::Result<()> {
         Arc::clone(&config_arc),
         Arc::clone(&agent_config_arc),
         observer_tx,
+        paths.clone(),
     ));
 
     // Phase 3: Heartbeat background task with graceful shutdown via Ctrl+C.
