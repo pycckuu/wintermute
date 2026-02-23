@@ -233,7 +233,7 @@ fn parse_scheduled_task_with_enabled_field() {
     let toml_str = r#"
 [[scheduled_tasks]]
 name = "daily_backup"
-cron = "0 3 * * *"
+cron = "0 0 3 * * *"
 builtin = "backup"
 enabled = false
 "#;
@@ -247,7 +247,7 @@ fn scheduled_task_enabled_defaults_to_true() {
     let toml_str = r#"
 [[scheduled_tasks]]
 name = "daily_backup"
-cron = "0 3 * * *"
+cron = "0 0 3 * * *"
 builtin = "backup"
 "#;
     let agent: AgentConfig = toml::from_str(toml_str).expect("scheduled task should parse");
