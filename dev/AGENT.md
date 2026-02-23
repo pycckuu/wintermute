@@ -58,6 +58,7 @@ src/
 ├── telegram/
 │   ├── mod.rs                 # Adapter (teloxide)
 │   ├── input_guard.rs         # Credential detection + redaction
+│   ├── media.rs               # Non-text messages: download file, pass description
 │   ├── ui.rs                  # HTML formatting, keyboards, file sending
 │   └── commands.rs            # /status, /budget, /memory, /tools, etc.
 ├── observer/

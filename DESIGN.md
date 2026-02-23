@@ -975,6 +975,15 @@ If the user asks about setup or configuration, you can:
 - Create scheduled tasks: edit agent.toml to add cron-triggered tools
 - Configure model routing: explain how to set per-role/per-skill models
 
+## Handling Non-Text Messages
+When you receive a voice message, photo, or document you can't process:
+- Tell the user what you received and where the file is
+- Offer to build a tool to handle it using create_tool
+- For voice: transcribe via whisper (Ollama model, pip package, or API)
+- For images: describe via multimodal model or OCR via tesseract
+- For documents: extract text via Python libraries (pypdf, docx, etc.)
+Once you create the tool, you'll handle that media type automatically.
+
 ## How to Create Tools
 When you solve a repeatable task:
 1. Write the script, test it in /workspace
@@ -1170,6 +1179,40 @@ send_telegram supports file attachments:
 
 The agent creates files in /workspace, sends via Telegram.
 
+### Voice Messages & Other Media
+
+The core doesn't transcribe voice, parse images, or extract PDFs.
+Those are capabilities the agent builds for itself.
+
+The Telegram adapter handles non-text messages by downloading the file
+and passing a description to the agent:
+
+```
+User sends voice →
+Agent receives: "[Voice message: /workspace/inbox/voice_20260223.ogg, 12s]"
+
+User sends photo →
+Agent receives: "[Photo: /workspace/inbox/photo_20260223.jpg]"
+
+User sends document →
+Agent receives: "[Document: /workspace/inbox/report.pdf]"
+```
+
+First time the agent gets a voice message, it has no transcription tool.
+The SID guides it to offer building one:
+
+1. "I got your voice message but can't transcribe it yet.
+   Want me to set up speech-to-text?"
+2. If yes: `create_tool` → `transcribe_audio` (whisper via Ollama,
+   or a pip package, or an API — agent figures out what's available)
+3. Transcribe the message using the new tool
+4. From now on: agent checks for `transcribe_audio` tool when voice
+   arrives and uses it automatically
+
+This is the self-coding flywheel. New input type → agent builds a
+capability → handles it forever. Same pattern applies to images
+(OCR, multimodal description), PDFs (text extraction), etc.
+
 ---
 
 ## Observer (Staged Learning)
@@ -1288,6 +1331,7 @@ wintermute/
 │   ├── telegram/
 │   │   ├── mod.rs                 # Adapter (teloxide)
 │   │   ├── input_guard.rs         # Credential detection + redaction
+│   │   ├── media.rs               # Non-text messages: download file, pass description
 │   │   ├── ui.rs                  # HTML formatting, keyboards, file sending
 │   │   └── commands.rs            # /status, /budget, /memory, /tools, etc.
 │   │
@@ -1408,6 +1452,8 @@ Files: memory/*, migrations/
 Files: telegram/*
 - teloxide adapter, HTML formatting
 - Input credential guard (block + redact)
+- Non-text media: download voice/photo/document to /workspace/inbox/,
+  pass description to agent ("[Voice message: /workspace/inbox/voice.ogg, 12s]")
 - File sending support
 - Inline keyboard support (for approvals)
 - Message routing to agent sessions
