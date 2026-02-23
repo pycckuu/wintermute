@@ -244,12 +244,12 @@ async fn suggest_promote(
     let mut lines = vec!["<b>Pending observer memories for review:</b>".to_owned()];
     for mem in &pending {
         let kind = mem.kind.as_str();
-        let content = escape_html(&mem.content);
-        let truncated = if content.len() > 100 {
-            let t: String = content.chars().take(100).collect();
-            format!("{t}...")
+        // Truncate raw content before escaping to avoid splitting HTML entities.
+        let truncated = if mem.content.chars().count() > 100 {
+            let t: String = mem.content.chars().take(100).collect();
+            format!("{}...", escape_html(&t))
         } else {
-            content
+            escape_html(&mem.content)
         };
         lines.push(format!("  [{kind}] {truncated}"));
     }

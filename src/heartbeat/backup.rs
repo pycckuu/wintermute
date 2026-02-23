@@ -109,9 +109,12 @@ async fn vacuum_into(pool: &SqlitePool, destination: &Path) -> anyhow::Result<()
 
     // Reject paths containing characters that could interfere with SQL parsing.
     // VACUUM INTO does not support parameterized queries, so we must
-    // validate the path before interpolation.
+    // validate the path before interpolation. The path is always internally
+    // generated (backups_dir + timestamp), never user-controlled.
     anyhow::ensure!(
-        !dest_str.contains(['\'', ';', '\0']),
+        dest_str
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | ' ')),
         "backup path contains disallowed characters"
     );
 

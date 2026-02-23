@@ -74,6 +74,27 @@ async fn backup_copies_nested_directory_structure() {
     );
 }
 
+#[tokio::test]
+async fn backup_rejects_path_with_sql_dangerous_characters() {
+    let tmp = tempfile::tempdir().expect("should create temp dir");
+    let scripts_dir = tmp.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).expect("should create scripts dir");
+
+    let pool = create_test_pool().await;
+
+    // Paths with characters outside the allowlist trigger a VACUUM INTO
+    // rejection. create_backup catches the error and sets memory_copied = false.
+    let backups_dir = tmp.path().join("back'up");
+    let result =
+        wintermute::heartbeat::backup::create_backup(&scripts_dir, &pool, &backups_dir).await;
+    // create_backup returns Ok even if VACUUM INTO fails (it logs a warning).
+    let backup = result.expect("create_backup should succeed overall");
+    assert!(
+        !backup.memory_copied,
+        "memory_copied should be false when path contains disallowed chars"
+    );
+}
+
 async fn create_test_pool() -> sqlx::SqlitePool {
     let opts = SqliteConnectOptions::new()
         .filename(":memory:")

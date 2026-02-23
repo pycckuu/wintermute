@@ -189,13 +189,13 @@ auto_promote_threshold = 3
 
 [[scheduled_tasks]]
 name = "daily_backup"
-cron = "0 3 * * *"
+cron = "0 0 3 * * *"
 builtin = "backup"            # built-in task, not a script
 
 # Agent adds more:
 # [[scheduled_tasks]]
 # name = "news_digest"
-# cron = "0 8 * * *"
+# cron = "0 0 8 * * *"
 # tool = "news_digest"
 # budget_tokens = 50000
 # notify = true
@@ -845,7 +845,7 @@ Defined in agent.toml. Executed by heartbeat.
 ```toml
 [[scheduled_tasks]]
 name = "news_digest"
-cron = "0 8 * * *"          # cron expression
+cron = "0 0 8 * * *"        # cron expression (sec min hour dom month dow)
 tool = "news_digest"         # dynamic tool to invoke
 budget_tokens = 50000        # per-execution budget
 notify = true                # send result to user via Telegram
@@ -1292,7 +1292,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 notify = "7"          # filesystem watcher for /scripts hot-reload
-cron = "0.12"         # cron expression parsing
+cron = "0.13"         # cron expression parsing
 
 # Optional: vector search
 # sqlite-vec via sqlx custom extension loading

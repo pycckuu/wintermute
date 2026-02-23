@@ -18,11 +18,13 @@ use crate::telegram::ui::escape_html;
 
 use super::HeartbeatDeps;
 
-/// Tracks last-run timestamps for scheduled tasks.
+/// Tracks last-run timestamps and cached cron schedules for scheduled tasks.
 #[derive(Debug)]
 pub struct SchedulerState {
     /// Map of task name to last execution time.
     last_run: HashMap<String, DateTime<Utc>>,
+    /// Cached parsed cron schedules, keyed by cron expression string.
+    schedules: HashMap<String, cron::Schedule>,
 }
 
 impl SchedulerState {
@@ -30,6 +32,7 @@ impl SchedulerState {
     pub fn new() -> Self {
         Self {
             last_run: HashMap::new(),
+            schedules: HashMap::new(),
         }
     }
 
@@ -41,6 +44,22 @@ impl SchedulerState {
     /// Get the last run time for a task.
     pub fn last_run_for(&self, name: &str) -> Option<&DateTime<Utc>> {
         self.last_run.get(name)
+    }
+
+    /// Parse and cache a cron expression, returning the schedule on success.
+    fn resolve_schedule(&mut self, cron_expr: &str) -> Option<&cron::Schedule> {
+        if !self.schedules.contains_key(cron_expr) {
+            match cron::Schedule::from_str(cron_expr) {
+                Ok(s) => {
+                    self.schedules.insert(cron_expr.to_owned(), s);
+                }
+                Err(e) => {
+                    warn!(cron = %cron_expr, error = %e, "invalid cron expression");
+                    return None;
+                }
+            }
+        }
+        self.schedules.get(cron_expr)
     }
 }
 
@@ -73,9 +92,17 @@ pub struct TaskOutcome {
 /// 3. It has not been run within the current cron interval.
 pub fn due_tasks<'a>(
     tasks: &'a [ScheduledTaskConfig],
-    state: &SchedulerState,
+    state: &mut SchedulerState,
     now: DateTime<Utc>,
 ) -> Vec<&'a ScheduledTaskConfig> {
+    // Pre-resolve all cron expressions into the cache so the mutable borrow
+    // is released before we read last_run timestamps.
+    for task in tasks.iter().filter(|t| t.enabled) {
+        if state.resolve_schedule(&task.cron).is_none() {
+            warn!(task = %task.name, "skipping task with invalid cron");
+        }
+    }
+
     tasks
         .iter()
         .filter(|task| {
@@ -83,17 +110,9 @@ pub fn due_tasks<'a>(
                 return false;
             }
 
-            let schedule = match cron::Schedule::from_str(&task.cron) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(
-                        task = %task.name,
-                        cron = %task.cron,
-                        error = %e,
-                        "invalid cron expression, skipping task"
-                    );
-                    return false;
-                }
+            let schedule = match state.schedules.get(&task.cron) {
+                Some(s) => s,
+                None => return false, // already warned above
             };
 
             // For never-run tasks, use epoch so the first cron match triggers.
@@ -137,7 +156,6 @@ pub async fn execute_task(
     };
 
     let duration = start.elapsed();
-    state.record_run(&task.name, Utc::now());
 
     let outcome = match result {
         Ok(output) => TaskOutcome {
@@ -155,6 +173,11 @@ pub async fn execute_task(
             duration,
         },
     };
+
+    // Only record successful runs so failed tasks retry on the next tick.
+    if outcome.success {
+        state.record_run(&task.name, Utc::now());
+    }
 
     // Notify user if configured.
     if task.notify {
