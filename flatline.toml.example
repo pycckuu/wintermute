@@ -24,6 +24,7 @@ disk_warning_gb = 5.0
 [auto_fix]
 enabled = true
 restart_on_crash = true
+start_on_boot = true
 quarantine_failing_tools = true
 disable_failing_tasks = true
 revert_recent_changes = true
