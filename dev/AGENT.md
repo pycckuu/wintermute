@@ -45,10 +45,11 @@ src/
 ├── agent/
 │   ├── mod.rs                 # Session router (per-session tasks)
 │   ├── loop.rs                # Agent loop (assemble → LLM → route → execute)
-│   ├── context.rs             # Context assembly + trimming
+│   ├── context.rs             # Context assembly + trimming + compaction
+│   ├── identity.rs            # SID generator (IDENTITY.md from config + state)
 │   ├── policy.rs              # Policy gate + egress rules
 │   ├── approval.rs            # Non-blocking approval (short-ID callbacks)
-│   └── budget.rs              # Token/cost budget (atomic counters)
+│   └── budget.rs              # Token/cost budget (atomic counters, warnings)
 ├── memory/
 │   ├── mod.rs                 # MemoryEngine
 │   ├── writer.rs              # Write actor (mpsc)

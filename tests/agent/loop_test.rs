@@ -234,6 +234,7 @@ async fn run_session_completes_on_shutdown() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     // Spawn the session task
@@ -325,6 +326,7 @@ async fn run_session_completes_on_channel_close() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -602,6 +604,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -708,6 +711,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -820,6 +824,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -834,7 +839,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
                 let has_budget_error = msg
                     .text
                     .as_deref()
-                    .is_some_and(|text| text.contains("Budget exceeded"));
+                    .is_some_and(|text| text.contains("budget reached") || text.contains("budget exhausted") || text.contains("Budget exceeded"));
                 if has_budget_error {
                     break msg;
                 }
@@ -925,6 +930,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         config: Arc::new(make_config()),
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
+        identity_document: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));

@@ -6,6 +6,8 @@ mod approval_test;
 mod budget_test;
 #[path = "agent/context_test.rs"]
 mod context_test;
+#[path = "agent/identity_test.rs"]
+mod identity_test;
 #[path = "agent/loop_test.rs"]
 mod loop_test;
 #[path = "agent/policy_test.rs"]

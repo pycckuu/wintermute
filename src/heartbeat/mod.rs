@@ -15,10 +15,11 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::agent::budget::DailyBudget;
+use crate::agent::identity::{self, IdentitySnapshot};
 use crate::agent::{SessionRouter, TelegramOutbound};
 use crate::config::{AgentConfig, Config, RuntimePaths};
 use crate::executor::Executor;
-use crate::memory::MemoryEngine;
+use crate::memory::{MemoryEngine, MemoryStatus};
 use crate::providers::router::ModelRouter;
 use crate::tools::ToolRouter;
 
@@ -64,14 +65,24 @@ pub async fn run_heartbeat(
 
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     let mut scheduler_state = scheduler::SchedulerState::new();
+    let mut tick_count: u64 = 0;
 
     // Skip the first immediate tick.
     interval.tick().await;
 
+    // Generate SID immediately on startup.
+    regenerate_sid(&deps, start_time).await;
+
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                tick_count = tick_count.saturating_add(1);
                 run_tick(&deps, &mut scheduler_state, start_time).await;
+
+                // Regenerate SID every 5 ticks (~5 minutes at 60s interval).
+                if tick_count.is_multiple_of(5) {
+                    regenerate_sid(&deps, start_time).await;
+                }
             }
             result = shutdown_rx.changed() => {
                 if result.is_err() || *shutdown_rx.borrow() {
@@ -122,5 +133,40 @@ async fn run_tick(
 
     if let Err(e) = health::write_health_file(&report, &health_path).await {
         warn!(error = %e, "failed to write health.json");
+    }
+}
+
+/// Regenerate the System Identity Document (IDENTITY.md).
+async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
+    let active_count = deps
+        .memory
+        .count_by_status(MemoryStatus::Active)
+        .await
+        .unwrap_or(0);
+    let pending_count = deps
+        .memory
+        .count_by_status(MemoryStatus::Pending)
+        .await
+        .unwrap_or(0);
+
+    let dynamic_tool_count = deps.tool_router.dynamic_tool_count();
+
+    let snap = IdentitySnapshot {
+        model_id: deps.config.models.default.clone(),
+        executor_kind: deps.executor.kind(),
+        has_network_isolation: deps.executor.has_network_isolation(),
+        core_tool_count: crate::tools::core::core_tool_definitions().len(),
+        dynamic_tool_count,
+        active_memory_count: active_count,
+        pending_memory_count: pending_count,
+        has_vector_search: deps.memory.has_embedder(),
+        session_budget_limit: deps.config.budget.max_tokens_per_session,
+        daily_budget_limit: deps.config.budget.max_tokens_per_day,
+        uptime: start_time.elapsed(),
+    };
+
+    let content = identity::render_identity(&snap);
+    if let Err(e) = identity::write_identity_file(&content, &deps.paths.identity_md) {
+        warn!(error = %e, "failed to write IDENTITY.md");
     }
 }

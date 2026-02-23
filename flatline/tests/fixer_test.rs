@@ -59,6 +59,7 @@ fn temp_runtime_paths(dir: &tempfile::TempDir) -> RuntimePaths {
         memory_db: root.join("data/memory.db"),
         pid_file: root.join("wintermute.pid"),
         health_json: root.join("health.json"),
+        identity_md: root.join("IDENTITY.md"),
     }
 }
 
