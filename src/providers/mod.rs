@@ -243,6 +243,7 @@ fn sanitize_http_error_body(raw: &str) -> String {
         r"ghp_[A-Za-z0-9]{20,}",
         r"glpat-[A-Za-z0-9_\-]{16,}",
         r"xoxb-[A-Za-z0-9\-]{20,}",
+        r"eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}",
     ] {
         if let Ok(regex) = Regex::new(pattern) {
             sanitized = regex.replace_all(&sanitized, "[REDACTED]").into_owned();

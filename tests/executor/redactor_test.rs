@@ -64,6 +64,17 @@ fn redactor_handles_empty_input() {
 }
 
 #[test]
+fn redactor_hides_jwt_like_tokens() {
+    let redactor = Redactor::new(vec![]);
+    // Simulate a JWT: header.payload.signature (each part base64url-encoded, 20+ chars)
+    let jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    let input = format!("token={jwt}");
+    let output = redactor.redact(&input);
+    assert!(!output.contains("eyJhbGci"));
+    assert!(output.contains(REDACTION_MARKER));
+}
+
+#[test]
 fn redaction_marker_value() {
     assert_eq!(REDACTION_MARKER, "[REDACTED]");
 }

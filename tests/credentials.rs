@@ -2,3 +2,6 @@
 
 #[path = "credentials/credentials_test.rs"]
 mod credentials_test;
+
+#[path = "credentials/oauth_test.rs"]
+mod oauth_test;
