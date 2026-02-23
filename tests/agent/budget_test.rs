@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use wintermute::agent::budget::{BudgetError, DailyBudget, SessionBudget};
+use wintermute::agent::budget::{BudgetError, BudgetScope, BudgetStatus, DailyBudget, SessionBudget};
 use wintermute::config::BudgetConfig;
 
 fn test_config(session: u64, daily: u64, tool_calls: u32) -> BudgetConfig {
@@ -109,4 +109,117 @@ async fn concurrent_increments_are_consistent() {
 
     assert_eq!(budget.session_used(), 10_000);
     assert_eq!(budget.daily_used(), 10_000);
+}
+
+// ---------------------------------------------------------------------------
+// Budget status + warning threshold tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn budget_status_ok_when_under_thresholds() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(3_000, 0); // 30%
+    let (status, _scope) = budget.budget_status();
+    assert_eq!(status, BudgetStatus::Ok);
+}
+
+#[test]
+fn budget_status_warning_at_70_percent() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(7_000, 0); // 70%
+    let (status, scope) = budget.budget_status();
+    assert_eq!(
+        status,
+        BudgetStatus::Warning {
+            level: "elevated",
+            percent: 70,
+        }
+    );
+    assert_eq!(scope, BudgetScope::Session);
+}
+
+#[test]
+fn budget_status_warning_at_85_percent() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(4_000, 4_500); // 85%
+    let (status, _scope) = budget.budget_status();
+    assert_eq!(
+        status,
+        BudgetStatus::Warning {
+            level: "high",
+            percent: 85,
+        }
+    );
+}
+
+#[test]
+fn budget_status_warning_at_95_percent() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(5_000, 4_500); // 95%
+    let (status, _scope) = budget.budget_status();
+    assert_eq!(
+        status,
+        BudgetStatus::Warning {
+            level: "critical",
+            percent: 95,
+        }
+    );
+}
+
+#[test]
+fn budget_status_exhausted_at_100_percent() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(5_000, 5_000); // 100%
+    let (status, scope) = budget.budget_status();
+    assert_eq!(status, BudgetStatus::Exhausted);
+    assert_eq!(scope, BudgetScope::Session);
+}
+
+#[test]
+fn budget_status_daily_triggers_when_worse_than_session() {
+    // Daily limit is tight, session limit is generous
+    let daily = Arc::new(DailyBudget::new(10_000));
+    let budget = SessionBudget::new(daily, test_config(100_000, 10_000, 20));
+
+    budget.record_usage(3_500, 3_600); // session: 7.1%, daily: 71%
+    let (status, scope) = budget.budget_status();
+    assert_eq!(
+        status,
+        BudgetStatus::Warning {
+            level: "elevated",
+            percent: 70,
+        }
+    );
+    assert_eq!(scope, BudgetScope::Daily);
+}
+
+#[test]
+fn session_percent_accuracy() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    assert_eq!(budget.session_percent(), 0);
+    budget.record_usage(2_500, 0);
+    assert_eq!(budget.session_percent(), 25);
+    budget.record_usage(5_000, 0);
+    assert_eq!(budget.session_percent(), 75);
+}
+
+#[test]
+fn daily_percent_accuracy() {
+    let daily = Arc::new(DailyBudget::new(1_000_000));
+    let budget = SessionBudget::new(daily, test_config(500_000, 1_000_000, 20));
+
+    budget.record_usage(500_000, 0);
+    assert_eq!(budget.daily_percent(), 50);
 }

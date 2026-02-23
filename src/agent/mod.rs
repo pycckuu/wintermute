@@ -13,12 +13,13 @@ use tracing::{info, warn};
 pub mod approval;
 pub mod budget;
 pub mod context;
+pub mod identity;
 pub mod r#loop;
 pub mod policy;
 
 pub use r#loop::SessionEvent;
 
-use crate::config::{AgentConfig, Config};
+use crate::config::{AgentConfig, Config, RuntimePaths};
 use crate::memory::MemoryEngine;
 use crate::observer::ObserverEvent;
 use crate::providers::router::ModelRouter;
@@ -76,6 +77,8 @@ pub struct SessionRouter {
     agent_config: Arc<AgentConfig>,
     /// Optional channel for observer idle events.
     observer_tx: Option<mpsc::Sender<ObserverEvent>>,
+    /// Resolved runtime paths.
+    paths: RuntimePaths,
 }
 
 impl std::fmt::Debug for SessionRouter {
@@ -100,6 +103,7 @@ impl SessionRouter {
         config: Arc<Config>,
         agent_config: Arc<AgentConfig>,
         observer_tx: Option<mpsc::Sender<ObserverEvent>>,
+        paths: RuntimePaths,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -113,6 +117,7 @@ impl SessionRouter {
             config,
             agent_config,
             observer_tx,
+            paths,
         }
     }
 
@@ -213,6 +218,8 @@ impl SessionRouter {
         let session_budget =
             SessionBudget::new(Arc::clone(&self.daily_budget), self.config.budget.clone());
 
+        let identity_document = identity::load_identity(&self.paths.identity_md);
+
         SessionConfig {
             session_id,
             user_id,
@@ -226,6 +233,7 @@ impl SessionRouter {
             config: Arc::clone(&self.config),
             agent_config: Arc::clone(&self.agent_config),
             observer_tx: self.observer_tx.clone(),
+            identity_document,
         }
     }
 }

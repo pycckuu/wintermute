@@ -14,9 +14,11 @@ use url::Url;
 use crate::observer::ObserverEvent;
 
 use crate::agent::approval::ApprovalResult;
-use crate::agent::budget::SessionBudget;
+use crate::agent::budget::{BudgetStatus, SessionBudget};
 use crate::agent::context::{
-    assemble_system_prompt, estimate_messages_tokens, trim_messages, trim_messages_to_fraction,
+    apply_compaction, assemble_system_prompt, build_compaction_plan, build_compaction_request,
+    estimate_messages_tokens, should_compact, trim_messages, trim_messages_to_fraction,
+    COMPACTION_KEEP_LAST,
 };
 use crate::agent::policy::{check_policy, PolicyContext, PolicyDecision};
 use crate::agent::TelegramOutbound;
@@ -75,6 +77,8 @@ pub struct SessionConfig {
     pub agent_config: Arc<AgentConfig>,
     /// Optional channel for observer idle events.
     pub observer_tx: Option<mpsc::Sender<ObserverEvent>>,
+    /// Loaded System Identity Document content (from IDENTITY.md).
+    pub identity_document: Option<String>,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -104,6 +108,10 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
 
     let mut conversation: Vec<Message> = Vec::new();
     let mut last_turn_had_activity = false;
+    // Track which warning threshold was last shown to avoid repeating.
+    let mut last_warned_percent: u8 = 0;
+    // Compaction fires at most once per session to avoid repeated LLM calls.
+    let mut compacted_this_session = false;
 
     loop {
         let event = if last_turn_had_activity {
@@ -161,11 +169,11 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                 }
 
                 // Run the agent reasoning turn
-                run_agent_turn(&cfg, &mut conversation).await;
+                run_agent_turn(&cfg, &mut conversation, &mut last_warned_percent, &mut compacted_this_session).await;
             }
             SessionEvent::ApprovalResolved(result) => {
                 debug!(session_id = %cfg.session_id, "received approval resolution");
-                handle_approval_resolved(&cfg, &mut conversation, result).await;
+                handle_approval_resolved(&cfg, &mut conversation, result, &mut last_warned_percent, &mut compacted_this_session).await;
             }
             SessionEvent::Shutdown => {
                 info!(session_id = %cfg.session_id, "session shutting down");
@@ -192,8 +200,68 @@ const OVERFLOW_TRIM_FRACTION: f64 = 0.5;
 ///
 /// The inner loop continues as long as the LLM returns `StopReason::ToolUse`,
 /// executing each tool call and feeding results back.
-async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
+///
+/// `last_warned_percent` tracks which budget warning threshold was last shown
+/// to the user, so warnings are only injected once per threshold crossing.
+async fn run_agent_turn(
+    cfg: &SessionConfig,
+    conversation: &mut Vec<Message>,
+    last_warned_percent: &mut u8,
+    compacted_this_session: &mut bool,
+) {
     let mut tool_call_count: u32 = 0;
+
+    // Context compaction: compress older messages if budget usage is high.
+    // Only fires once per session to avoid repeated LLM summarization calls.
+    if !*compacted_this_session && should_compact(cfg.budget.session_percent()) {
+        if let Some(plan) = build_compaction_plan(conversation, COMPACTION_KEEP_LAST) {
+            info!(
+                messages_to_compact = plan.messages_to_compact.len(),
+                estimated_savings = plan.estimated_savings_tokens,
+                "attempting context compaction"
+            );
+
+            // Target tokens for the summary: ~20% of estimated savings
+            #[allow(clippy::arithmetic_side_effects)]
+            let target_tokens = plan.estimated_savings_tokens / 5;
+            let compaction_messages = build_compaction_request(&plan, target_tokens.max(200));
+
+            // Budget check before compaction LLM call
+            let compaction_estimate = estimate_messages_tokens(&compaction_messages);
+            if let Err(e) = cfg.budget.check_budget(compaction_estimate) {
+                warn!(error = %e, "skipping compaction: budget insufficient");
+            } else if let Ok(provider) = cfg.router.resolve(None, None) {
+                let request = CompletionRequest {
+                    messages: compaction_messages,
+                    system: Some("You are a conversation summarizer. Produce a concise summary.".to_owned()),
+                    tools: vec![],
+                    max_tokens: Some(2048),
+                    stop_sequences: vec![],
+                };
+
+                match provider.complete(request).await {
+                    Ok(response) => {
+                        let summary = extract_assistant_text(&response.content);
+                        if !summary.is_empty() {
+                            cfg.budget.record_usage(
+                                u64::from(response.usage.input_tokens),
+                                u64::from(response.usage.output_tokens),
+                            );
+                            // Safety: messages being summarized already passed through
+                            // the redactor at the tool output layer (ToolRouter::execute_for_user).
+                            // The summary cannot introduce secrets beyond the redacted history.
+                            *conversation = apply_compaction(&summary, plan.messages_to_keep);
+                            *compacted_this_session = true;
+                            info!("context compaction applied");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "context compaction LLM call failed, continuing without");
+                    }
+                }
+            }
+        }
+    }
 
     loop {
         // Step 1: Search for relevant memories
@@ -220,6 +288,7 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
 
         let system_prompt = assemble_system_prompt(
             &cfg.agent_config.personality.soul,
+            cfg.identity_document.as_deref(),
             cfg.policy_context.executor_kind,
             tools.len().saturating_sub(core_tool_count),
             &memories,
@@ -244,8 +313,40 @@ async fn run_agent_turn(cfg: &SessionConfig, conversation: &mut Vec<Message>) {
         let response = loop {
             let estimated = estimate_messages_tokens(&trimmed);
             if let Err(e) = cfg.budget.check_budget(estimated) {
-                send_text(cfg, &format!("Budget exceeded: {e}")).await;
+                // Graceful exhaustion: send a user-friendly message
+                let scope_label = e.scope().label();
+                let msg = format!(
+                    "{scope_label} token budget reached. Start a new conversation to continue, \
+                     or adjust the limit in config.toml under [budget]."
+                );
+                send_text(cfg, &msg).await;
                 return;
+            }
+
+            // Inject budget warning as system message when crossing a threshold
+            let (status, scope) = cfg.budget.budget_status();
+            match &status {
+                BudgetStatus::Warning { percent, .. } if *percent > *last_warned_percent => {
+                    let scope_label = scope.label();
+                    let remaining = scope.remaining(&cfg.budget);
+                    let note = format!(
+                        "[System: {scope_label} budget at {percent}%. \
+                         ~{remaining} tokens remaining. Consider wrapping up.]"
+                    );
+                    trimmed.push(Message {
+                        role: Role::User,
+                        content: MessageContent::Text(note),
+                    });
+                    *last_warned_percent = *percent;
+                    info!(percent, scope = scope_label, "budget warning injected");
+                }
+                BudgetStatus::Exhausted => {
+                    let msg = "Token budget exhausted. Start a new conversation to continue, \
+                               or adjust the limit in config.toml under [budget].";
+                    send_text(cfg, msg).await;
+                    return;
+                }
+                _ => {}
             }
 
             let request = CompletionRequest {
@@ -417,6 +518,8 @@ async fn handle_approval_resolved(
     cfg: &SessionConfig,
     conversation: &mut Vec<Message>,
     result: ApprovalResult,
+    last_warned_percent: &mut u8,
+    compacted_this_session: &mut bool,
 ) {
     match result {
         ApprovalResult::Approved {
@@ -453,7 +556,7 @@ async fn handle_approval_resolved(
                 )),
             });
 
-            run_agent_turn(cfg, conversation).await;
+            run_agent_turn(cfg, conversation, last_warned_percent, compacted_this_session).await;
         }
         ApprovalResult::Denied { tool_name, .. } => {
             send_text(cfg, &format!("Tool <b>{tool_name}</b> was denied by user.")).await;
@@ -465,7 +568,7 @@ async fn handle_approval_resolved(
                 )),
             });
 
-            run_agent_turn(cfg, conversation).await;
+            run_agent_turn(cfg, conversation, last_warned_percent, compacted_this_session).await;
         }
         ApprovalResult::Expired => {
             send_text(cfg, "An approval request has expired.").await;

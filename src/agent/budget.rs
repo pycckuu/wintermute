@@ -10,6 +10,52 @@ use chrono::Utc;
 
 use crate::config::BudgetConfig;
 
+/// Warning thresholds as percentage of session budget.
+const WARNING_THRESHOLDS: [u8; 3] = [70, 85, 95];
+
+/// Current budget consumption status with graduated warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BudgetStatus {
+    /// Usage is below all warning thresholds.
+    Ok,
+    /// Usage has crossed a warning threshold.
+    Warning {
+        /// Human-readable warning level description.
+        level: &'static str,
+        /// Current usage percentage (0–100).
+        percent: u8,
+    },
+    /// Budget is fully exhausted.
+    Exhausted,
+}
+
+/// Which budget scope triggered the status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetScope {
+    /// Session token budget.
+    Session,
+    /// Daily token budget.
+    Daily,
+}
+
+impl BudgetScope {
+    /// Human-readable label for display.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Session => "Session",
+            Self::Daily => "Daily",
+        }
+    }
+
+    /// Compute remaining tokens for this scope from a [`SessionBudget`].
+    pub fn remaining(self, budget: &SessionBudget) -> u64 {
+        match self {
+            Self::Session => budget.session_limit().saturating_sub(budget.session_used()),
+            Self::Daily => budget.daily_limit().saturating_sub(budget.daily_used()),
+        }
+    }
+}
+
 /// Errors produced when budget limits are exceeded.
 #[derive(Debug, thiserror::Error)]
 pub enum BudgetError {
@@ -39,6 +85,18 @@ pub enum BudgetError {
         /// Maximum tool calls per turn.
         limit: u32,
     },
+}
+
+impl BudgetError {
+    /// Which scope this error belongs to.
+    pub fn scope(&self) -> BudgetScope {
+        match self {
+            Self::SessionLimitExceeded { .. } | Self::ToolCallsExceeded { .. } => {
+                BudgetScope::Session
+            }
+            Self::DailyLimitExceeded { .. } => BudgetScope::Daily,
+        }
+    }
 }
 
 /// Daily token budget shared across all sessions.
@@ -187,6 +245,93 @@ impl SessionBudget {
     /// Current daily token usage.
     pub fn daily_used(&self) -> u64 {
         self.daily.used()
+    }
+
+    /// Maximum tokens allowed for this session.
+    pub fn session_limit(&self) -> u64 {
+        self.config.max_tokens_per_session
+    }
+
+    /// Maximum tokens allowed per day.
+    pub fn daily_limit(&self) -> u64 {
+        self.config.max_tokens_per_day
+    }
+
+    /// Session usage as a percentage (0–100), clamped.
+    pub fn session_percent(&self) -> u8 {
+        percent_of(self.session_used(), self.config.max_tokens_per_session)
+    }
+
+    /// Daily usage as a percentage (0–100), clamped.
+    pub fn daily_percent(&self) -> u8 {
+        percent_of(self.daily_used(), self.config.max_tokens_per_day)
+    }
+
+    /// Compute the current budget status considering both session and daily limits.
+    ///
+    /// Returns the highest-severity status across both scopes. Exhausted is
+    /// checked first; then warning thresholds are evaluated in descending order.
+    pub fn budget_status(&self) -> (BudgetStatus, BudgetScope) {
+        let session_pct = self.session_percent();
+        let daily_pct = self.daily_percent();
+
+        // Check exhaustion first
+        if session_pct >= 100 {
+            return (BudgetStatus::Exhausted, BudgetScope::Session);
+        }
+        if daily_pct >= 100 {
+            return (BudgetStatus::Exhausted, BudgetScope::Daily);
+        }
+
+        // Determine highest warning level for each scope
+        let session_warning = highest_warning(session_pct);
+        let daily_warning = highest_warning(daily_pct);
+
+        // Pick whichever scope crossed the highest warning threshold
+        match session_warning.max(daily_warning) {
+            Some(threshold) => {
+                // Tie-break: prefer session scope when thresholds are equal
+                let scope = if session_warning >= daily_warning {
+                    BudgetScope::Session
+                } else {
+                    BudgetScope::Daily
+                };
+                (warning_status(threshold), scope)
+            }
+            None => (BudgetStatus::Ok, BudgetScope::Session),
+        }
+    }
+}
+
+/// Compute usage percentage, clamped to 0–100.
+fn percent_of(used: u64, limit: u64) -> u8 {
+    if limit == 0 {
+        return 100;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
+    { (used.saturating_mul(100) / limit).min(100) as u8 }
+}
+
+/// Return the highest warning threshold that `pct` has crossed, if any.
+fn highest_warning(pct: u8) -> Option<u8> {
+    WARNING_THRESHOLDS
+        .iter()
+        .rev()
+        .find(|&&threshold| pct >= threshold)
+        .copied()
+}
+
+/// Build a `BudgetStatus::Warning` from a threshold percentage.
+fn warning_status(threshold: u8) -> BudgetStatus {
+    let level = match threshold {
+        95 => "critical",
+        85 => "high",
+        70 => "elevated",
+        _ => "warning",
+    };
+    BudgetStatus::Warning {
+        level,
+        percent: threshold,
     }
 }
 

@@ -295,4 +295,9 @@ impl ToolRouter {
         defs.extend(dynamic);
         defs
     }
+
+    /// Number of dynamic tools currently registered.
+    pub fn dynamic_tool_count(&self) -> usize {
+        self.registry.count()
+    }
 }
