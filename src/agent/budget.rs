@@ -309,7 +309,9 @@ fn percent_of(used: u64, limit: u64) -> u8 {
         return 100;
     }
     #[allow(clippy::cast_possible_truncation, clippy::arithmetic_side_effects)]
-    { (used.saturating_mul(100) / limit).min(100) as u8 }
+    {
+        (used.saturating_mul(100) / limit).min(100) as u8
+    }
 }
 
 /// Return the highest warning threshold that `pct` has crossed, if any.

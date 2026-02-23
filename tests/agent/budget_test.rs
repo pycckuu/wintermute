@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use wintermute::agent::budget::{BudgetError, BudgetScope, BudgetStatus, DailyBudget, SessionBudget};
+use wintermute::agent::budget::{
+    BudgetError, BudgetScope, BudgetStatus, DailyBudget, SessionBudget,
+};
 use wintermute::config::BudgetConfig;
 
 fn test_config(session: u64, daily: u64, tool_calls: u32) -> BudgetConfig {
