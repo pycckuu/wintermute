@@ -5,10 +5,13 @@
 //! for each user message.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+use crate::observer::ObserverEvent;
 
 use crate::agent::approval::ApprovalResult;
 use crate::agent::budget::SessionBudget;
@@ -70,6 +73,8 @@ pub struct SessionConfig {
     pub config: Arc<Config>,
     /// Agent-owned configuration.
     pub agent_config: Arc<AgentConfig>,
+    /// Optional channel for observer idle events.
+    pub observer_tx: Option<mpsc::Sender<ObserverEvent>>,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -85,19 +90,54 @@ impl std::fmt::Debug for SessionConfig {
 // Main session loop
 // ---------------------------------------------------------------------------
 
+// Duration of inactivity before triggering observer extraction.
+const OBSERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Run a session, processing events until shutdown or channel close.
 ///
 /// This is the top-level entry point spawned as a Tokio task for each user
 /// session. It maintains the conversation history and dispatches to the
-/// agent reasoning loop on each user message.
+/// agent reasoning loop on each user message. Includes idle detection for
+/// the observer pipeline.
 pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<SessionEvent>) {
     info!(session_id = %cfg.session_id, user_id = cfg.user_id, "session started");
 
     let mut conversation: Vec<Message> = Vec::new();
+    let mut last_turn_had_activity = false;
 
     loop {
-        match event_rx.recv().await {
-            Some(SessionEvent::UserMessage(text)) => {
+        let event = if last_turn_had_activity {
+            // After activity, wait with timeout for observer trigger.
+            match tokio::time::timeout(OBSERVER_IDLE_TIMEOUT, event_rx.recv()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break, // channel closed
+                Err(_) => {
+                    // Idle timeout — notify observer if configured.
+                    if let Some(ref observer_tx) = cfg.observer_tx {
+                        let event = ObserverEvent {
+                            session_id: cfg.session_id.clone(),
+                            user_id: cfg.user_id,
+                            messages: conversation.clone(),
+                        };
+                        if let Err(e) = observer_tx.try_send(event) {
+                            debug!(error = %e, "failed to send observer event (non-blocking)");
+                        }
+                    }
+                    last_turn_had_activity = false;
+                    continue;
+                }
+            }
+        } else {
+            // No recent activity — wait indefinitely.
+            match event_rx.recv().await {
+                Some(event) => event,
+                None => break,
+            }
+        };
+
+        match event {
+            SessionEvent::UserMessage(text) => {
+                last_turn_had_activity = true;
                 debug!(session_id = %cfg.session_id, "received user message");
 
                 // Add user message to conversation
@@ -120,11 +160,11 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                 // Run the agent reasoning turn
                 run_agent_turn(&cfg, &mut conversation).await;
             }
-            Some(SessionEvent::ApprovalResolved(result)) => {
+            SessionEvent::ApprovalResolved(result) => {
                 debug!(session_id = %cfg.session_id, "received approval resolution");
                 handle_approval_resolved(&cfg, &mut conversation, result).await;
             }
-            Some(SessionEvent::Shutdown) | None => {
+            SessionEvent::Shutdown => {
                 info!(session_id = %cfg.session_id, "session shutting down");
                 break;
             }

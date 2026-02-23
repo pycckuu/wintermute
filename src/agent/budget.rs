@@ -96,6 +96,11 @@ impl DailyBudget {
         self.tokens.load(Ordering::Relaxed)
     }
 
+    /// Configured daily token limit.
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
     /// Reset the counter if the calendar day has changed.
     fn maybe_reset(&self) {
         let today = current_ordinal_day();

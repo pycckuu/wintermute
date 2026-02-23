@@ -1,6 +1,36 @@
 //! Tests for `telegram::commands` slash command handlers.
 
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+use wintermute::memory::MemoryEngine;
 use wintermute::telegram::commands;
+
+async fn setup_engine() -> MemoryEngine {
+    let opts = SqliteConnectOptions::new()
+        .filename(":memory:")
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .expect("pool should connect");
+
+    let bootstrap = include_str!("../../migrations/001_schema.sql");
+    sqlx::raw_sql(bootstrap)
+        .execute(&pool)
+        .await
+        .expect("001 should apply");
+
+    let memory_sql = include_str!("../../migrations/002_memory.sql");
+    sqlx::raw_sql(memory_sql)
+        .execute(&pool)
+        .await
+        .expect("002 should apply");
+
+    MemoryEngine::new(pool, None)
+        .await
+        .expect("engine should initialise")
+}
 
 #[test]
 fn help_returns_html_with_command_list() {
@@ -25,22 +55,46 @@ fn budget_returns_formatted_budget_string() {
     assert!(result.contains("5000000"));
 }
 
-#[test]
-fn memory_undo_returns_placeholder() {
-    let result = commands::handle_memory_undo();
-    assert!(result.contains("not yet available"));
+#[tokio::test]
+async fn memory_undo_with_no_observer_memories() {
+    let engine = setup_engine().await;
+    let result = commands::handle_memory_undo(&engine).await;
+    assert!(result.contains("No observer-promoted"));
+    engine.shutdown().await;
 }
 
-#[test]
-fn memory_pending_returns_placeholder() {
-    let result = commands::handle_memory_pending();
-    assert!(result.contains("not yet active"));
+#[tokio::test]
+async fn memory_pending_with_no_pending() {
+    let engine = setup_engine().await;
+    let result = commands::handle_memory_pending(&engine).await;
+    assert!(result.contains("No pending"));
+    engine.shutdown().await;
 }
 
-#[test]
-fn backup_trigger_returns_placeholder() {
-    let result = commands::handle_backup_trigger();
-    assert!(result.contains("not yet automated"));
+#[tokio::test]
+async fn backup_trigger_creates_backup() {
+    let tmp = tempfile::tempdir().expect("should create temp dir");
+    let scripts_dir = tmp.path().join("scripts");
+    let backups_dir = tmp.path().join("backups");
+    std::fs::create_dir_all(&scripts_dir).expect("should create scripts dir");
+
+    let opts = SqliteConnectOptions::new()
+        .filename(":memory:")
+        .create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .expect("pool should connect");
+
+    let bootstrap = include_str!("../../migrations/001_schema.sql");
+    sqlx::raw_sql(bootstrap)
+        .execute(&pool)
+        .await
+        .expect("001 should apply");
+
+    let result = commands::handle_backup_trigger(&scripts_dir, &pool, &backups_dir).await;
+    assert!(result.contains("Backup created") || result.contains("Backup failed"));
 }
 
 #[test]

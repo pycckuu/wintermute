@@ -81,7 +81,7 @@ async fn fts5_search(
 }
 
 /// Convert a raw query row tuple into a [`Memory`].
-fn row_to_memory(row: MemoryRow) -> Result<Memory, MemoryError> {
+pub(crate) fn row_to_memory(row: MemoryRow) -> Result<Memory, MemoryError> {
     let (id, kind_str, content, metadata_str, status_str, source_str, created_at, updated_at) = row;
     let metadata = metadata_str
         .as_deref()
@@ -131,6 +131,31 @@ fn sanitise_fts5_query(query: &str) -> String {
 
     // Join tokens with spaces — FTS5 treats them as implicit AND.
     tokens.join(" ")
+}
+
+/// Search memories filtered by status, ordered by most recently updated.
+///
+/// Returns up to `limit` memories that have the given `status` value.
+pub async fn search_by_status(
+    db: &SqlitePool,
+    status: &str,
+    limit: usize,
+) -> Result<Vec<Memory>, MemoryError> {
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+
+    let rows: Vec<MemoryRow> = sqlx::query_as(
+        "SELECT id, kind, content, metadata, status, source, created_at, updated_at \
+         FROM memories \
+         WHERE status = ?1 \
+         ORDER BY updated_at DESC \
+         LIMIT ?2",
+    )
+    .bind(status)
+    .bind(limit_i64)
+    .fetch_all(db)
+    .await?;
+
+    rows.into_iter().map(row_to_memory).collect()
 }
 
 // ---------------------------------------------------------------------------

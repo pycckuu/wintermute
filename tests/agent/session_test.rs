@@ -195,6 +195,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         telegram_tx,
         Arc::new(make_config()),
         Arc::new(make_agent_config()),
+        None,
     );
 
     (session_router, telegram_rx)

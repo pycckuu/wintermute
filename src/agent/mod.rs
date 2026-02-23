@@ -20,6 +20,7 @@ pub use r#loop::SessionEvent;
 
 use crate::config::{AgentConfig, Config};
 use crate::memory::MemoryEngine;
+use crate::observer::ObserverEvent;
 use crate::providers::router::ModelRouter;
 use crate::tools::ToolRouter;
 
@@ -73,6 +74,8 @@ pub struct SessionRouter {
     config: Arc<Config>,
     /// Agent-owned configuration.
     agent_config: Arc<AgentConfig>,
+    /// Optional channel for observer idle events.
+    observer_tx: Option<mpsc::Sender<ObserverEvent>>,
 }
 
 impl std::fmt::Debug for SessionRouter {
@@ -96,6 +99,7 @@ impl SessionRouter {
         telegram_tx: mpsc::Sender<TelegramOutbound>,
         config: Arc<Config>,
         agent_config: Arc<AgentConfig>,
+        observer_tx: Option<mpsc::Sender<ObserverEvent>>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -108,6 +112,7 @@ impl SessionRouter {
             telegram_tx,
             config,
             agent_config,
+            observer_tx,
         }
     }
 
@@ -216,6 +221,7 @@ impl SessionRouter {
             telegram_tx: self.telegram_tx.clone(),
             config: Arc::clone(&self.config),
             agent_config: Arc::clone(&self.agent_config),
+            observer_tx: self.observer_tx.clone(),
         }
     }
 }

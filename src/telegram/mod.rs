@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::agent::approval::{ApprovalManager, ApprovalResult};
 use crate::agent::{SessionRouter, TelegramOutbound};
-use crate::config::Config;
+use crate::config::{Config, RuntimePaths};
 use crate::executor::Executor;
 use crate::memory::MemoryEngine;
 use crate::tools::registry::DynamicToolRegistry;
@@ -36,6 +36,8 @@ struct SharedState {
     executor: Arc<dyn Executor>,
     memory: Arc<MemoryEngine>,
     registry: Arc<DynamicToolRegistry>,
+    paths: RuntimePaths,
+    memory_pool: sqlx::SqlitePool,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,6 +64,8 @@ pub async fn run_telegram(
     executor: Arc<dyn Executor>,
     memory: Arc<MemoryEngine>,
     registry: Arc<DynamicToolRegistry>,
+    paths: RuntimePaths,
+    memory_pool: sqlx::SqlitePool,
 ) -> anyhow::Result<()> {
     let bot = Bot::new(bot_token);
 
@@ -102,6 +106,8 @@ pub async fn run_telegram(
         executor,
         memory,
         registry,
+        paths,
+        memory_pool,
     };
 
     // Build dptree handler schema
@@ -216,8 +222,8 @@ async fn dispatch_command(text: &str, state: &SharedState) -> String {
             commands::handle_budget(0, 0, 0, 0)
         }
         "memory" => commands::handle_memory(&state.memory).await,
-        "memory_pending" => commands::handle_memory_pending(),
-        "memory_undo" => commands::handle_memory_undo(),
+        "memory_pending" => commands::handle_memory_pending(&state.memory).await,
+        "memory_undo" => commands::handle_memory_undo(&state.memory).await,
         "tools" => {
             if args.is_empty() {
                 commands::handle_tools(&state.registry)
@@ -226,7 +232,14 @@ async fn dispatch_command(text: &str, state: &SharedState) -> String {
             }
         }
         "sandbox" => commands::handle_sandbox(&*state.executor).await,
-        "backup" => commands::handle_backup_trigger(),
+        "backup" => {
+            commands::handle_backup_trigger(
+                &state.paths.scripts_dir,
+                &state.memory_pool,
+                &state.paths.backups_dir,
+            )
+            .await
+        }
         _ => format!("Unknown command: /{}", ui::escape_html(command)),
     }
 }

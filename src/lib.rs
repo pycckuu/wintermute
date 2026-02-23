@@ -20,6 +20,5 @@ pub mod telegram;
 
 pub mod tools;
 
-// Future modules — uncomment as implemented:
-// pub mod observer;
-// pub mod heartbeat;
+pub mod heartbeat;
+pub mod observer;

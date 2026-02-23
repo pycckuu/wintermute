@@ -34,6 +34,12 @@ pub enum WriteOp {
         /// Who approved it.
         approved_by: TrustSource,
     },
+
+    /// Delete a memory by row id.
+    DeleteMemory {
+        /// Memory row id to delete.
+        id: i64,
+    },
 }
 
 /// Run the single-writer actor loop.
@@ -102,6 +108,14 @@ async fn handle_op(db: &SqlitePool, op: &WriteOp) -> Result<(), sqlx::Error> {
                 .execute(db)
                 .await?;
             trace!(domain, approved_by = approved_by.as_str(), "domain trusted");
+        }
+
+        WriteOp::DeleteMemory { id } => {
+            sqlx::query("DELETE FROM memories WHERE id = ?1")
+                .bind(id)
+                .execute(db)
+                .await?;
+            trace!(id, "memory deleted");
         }
     }
     Ok(())
