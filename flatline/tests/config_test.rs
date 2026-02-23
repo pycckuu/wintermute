@@ -30,6 +30,7 @@ disk_warning_gb = 10.0
 [auto_fix]
 enabled = false
 restart_on_crash = false
+start_on_boot = false
 quarantine_failing_tools = false
 disable_failing_tasks = false
 revert_recent_changes = false
@@ -69,6 +70,7 @@ notify_users = [111, 222]
     assert!((config.thresholds.disk_warning_gb - 10.0).abs() < f64::EPSILON);
     assert!(!config.auto_fix.enabled);
     assert!(!config.auto_fix.restart_on_crash);
+    assert!(!config.auto_fix.start_on_boot);
     assert!(!config.auto_fix.quarantine_failing_tools);
     assert!(!config.auto_fix.disable_failing_tasks);
     assert!(!config.auto_fix.revert_recent_changes);
@@ -152,4 +154,23 @@ fn parse_example_config_file() {
     let config: FlatlineConfig = toml::from_str(example).expect("parse example config");
     assert_eq!(config.model.default, "ollama/qwen3:8b");
     assert_eq!(config.checks.interval_secs, 300);
+    assert!(config.auto_fix.start_on_boot);
+}
+
+#[test]
+fn start_on_boot_defaults_to_true() {
+    let config: FlatlineConfig = toml::from_str("").expect("default config");
+    assert!(config.auto_fix.start_on_boot);
+}
+
+#[test]
+fn start_on_boot_can_be_disabled() {
+    let config: FlatlineConfig = toml::from_str(
+        r#"
+        [auto_fix]
+        start_on_boot = false
+        "#,
+    )
+    .expect("parse config");
+    assert!(!config.auto_fix.start_on_boot);
 }

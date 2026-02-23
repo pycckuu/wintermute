@@ -155,6 +155,10 @@ pub struct AutoFixConfig {
     #[serde(default = "default_true")]
     pub restart_on_crash: bool,
 
+    /// Start Wintermute automatically when Flatline boots, if not already running.
+    #[serde(default = "default_true")]
+    pub start_on_boot: bool,
+
     /// Auto-quarantine tools exceeding the failure threshold.
     #[serde(default = "default_true")]
     pub quarantine_failing_tools: bool,
@@ -177,6 +181,7 @@ impl Default for AutoFixConfig {
         Self {
             enabled: true,
             restart_on_crash: true,
+            start_on_boot: true,
             quarantine_failing_tools: true,
             disable_failing_tasks: true,
             revert_recent_changes: true,

@@ -546,6 +546,99 @@ async fn apply_report_only_succeeds() {
 }
 
 // ---------------------------------------------------------------------------
+// apply_fix: RestartProcess (cold start — no PID file)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn apply_restart_process_cold_start_no_pid_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = temp_runtime_paths(&dir);
+    // Do NOT create a PID file — simulates cold start.
+
+    let fix = flatline::db::FixRecord {
+        id: "fix-cold-start".to_owned(),
+        detected_at: chrono::Utc::now().to_rfc3339(),
+        pattern: Some("ProcessDown".to_owned()),
+        diagnosis: Some("cold start".to_owned()),
+        action: Some(serde_json::to_string(&FixAction::RestartProcess).expect("serialize")),
+        applied_at: None,
+        verified: None,
+        user_notified: false,
+    };
+
+    // Should NOT error with "failed to read PID file".
+    // The spawn itself may fail (no `wintermute` binary), but the PID
+    // read step must be gracefully skipped.
+    let result = apply_fix(&fix, &paths).await;
+    match result {
+        Ok(()) => {} // wintermute binary happened to be on PATH
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("failed to read PID file"),
+                "should not fail on missing PID file; got: {msg}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn apply_restart_process_empty_pid_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = temp_runtime_paths(&dir);
+    // Create an empty PID file.
+    std::fs::write(&paths.pid_file, "").expect("write empty pid");
+
+    let fix = flatline::db::FixRecord {
+        id: "fix-empty-pid".to_owned(),
+        detected_at: chrono::Utc::now().to_rfc3339(),
+        pattern: Some("ProcessDown".to_owned()),
+        diagnosis: Some("empty pid file".to_owned()),
+        action: Some(serde_json::to_string(&FixAction::RestartProcess).expect("serialize")),
+        applied_at: None,
+        verified: None,
+        user_notified: false,
+    };
+
+    // Empty PID should be handled gracefully (skip SIGTERM, proceed to spawn).
+    let result = apply_fix(&fix, &paths).await;
+    match result {
+        Ok(()) => {}
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                !msg.contains("failed to read PID file"),
+                "should handle empty PID file gracefully; got: {msg}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// start_wintermute public wrapper
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn start_wintermute_delegates_to_restart_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = temp_runtime_paths(&dir);
+    // No PID file — cold start path.
+
+    let result = flatline::fixer::start_wintermute(&paths).await;
+    match result {
+        Ok(()) => {}
+        Err(e) => {
+            let msg = format!("{e:?}");
+            // Should not fail on PID file; only a spawn error is acceptable.
+            assert!(
+                !msg.contains("failed to read PID file"),
+                "start_wintermute should handle missing PID; got: {msg}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FixAction serde roundtrip
 // ---------------------------------------------------------------------------
 

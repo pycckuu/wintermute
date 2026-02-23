@@ -25,6 +25,25 @@ cargo build --release
 
 See `DESIGN.md` for full architecture documentation.
 
+## Running with Flatline (supervisor)
+
+Flatline monitors Wintermute and auto-fixes failures (restart on crash,
+quarantine bad tools, revert broken changes).
+
+```bash
+# Recommended: Flatline starts Wintermute automatically
+./flatline start
+
+# Or run both independently
+./wintermute start     # Terminal 1
+./flatline start       # Terminal 2
+```
+
+Configure in `~/.wintermute/flatline.toml` (see `flatline.toml.example`).
+Set `start_on_boot = false` for monitoring-only mode.
+
+See `doc/FLATLINE.md` for full supervisor documentation.
+
 ## License
 
 Apache 2.0
