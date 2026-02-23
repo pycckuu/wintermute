@@ -113,11 +113,14 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                 Ok(None) => break, // channel closed
                 Err(_) => {
                     // Idle timeout — notify observer if configured.
+                    // Only send the last MAX_OBSERVER_TAIL messages to avoid
+                    // cloning the entire conversation (observer truncates anyway).
                     if let Some(ref observer_tx) = cfg.observer_tx {
+                        let start = conversation.len().saturating_sub(20);
                         let event = ObserverEvent {
                             session_id: cfg.session_id.clone(),
                             user_id: cfg.user_id,
-                            messages: conversation.clone(),
+                            messages: conversation[start..].to_vec(),
                         };
                         if let Err(e) = observer_tx.try_send(event) {
                             debug!(error = %e, "failed to send observer event (non-blocking)");

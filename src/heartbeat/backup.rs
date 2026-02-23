@@ -107,12 +107,12 @@ async fn vacuum_into(pool: &SqlitePool, destination: &Path) -> anyhow::Result<()
         .to_str()
         .context("backup path is not valid UTF-8")?;
 
-    // Reject paths containing single quotes to prevent SQL injection.
+    // Reject paths containing characters that could interfere with SQL parsing.
     // VACUUM INTO does not support parameterized queries, so we must
     // validate the path before interpolation.
     anyhow::ensure!(
-        !dest_str.contains('\''),
-        "backup path must not contain single quotes"
+        !dest_str.contains(['\'', ';', '\0']),
+        "backup path contains disallowed characters"
     );
 
     // VACUUM INTO creates a new, defragmented copy of the database.

@@ -9,7 +9,7 @@ use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, ParseMode};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::agent::approval::{ApprovalManager, ApprovalResult};
 use crate::agent::{SessionRouter, TelegramOutbound};
@@ -37,7 +37,6 @@ struct SharedState {
     memory: Arc<MemoryEngine>,
     registry: Arc<DynamicToolRegistry>,
     paths: RuntimePaths,
-    memory_pool: sqlx::SqlitePool,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +64,6 @@ pub async fn run_telegram(
     memory: Arc<MemoryEngine>,
     registry: Arc<DynamicToolRegistry>,
     paths: RuntimePaths,
-    memory_pool: sqlx::SqlitePool,
 ) -> anyhow::Result<()> {
     let bot = Bot::new(bot_token);
 
@@ -107,7 +105,6 @@ pub async fn run_telegram(
         memory,
         registry,
         paths,
-        memory_pool,
     };
 
     // Build dptree handler schema
@@ -145,6 +142,8 @@ async fn handle_message(bot: Bot, msg: Message, state: SharedState) -> ResponseR
         None => return Ok(()),
     };
 
+    debug!(user_id, "telegram message received");
+
     // Check if user is in allowed_users
     if !state
         .config
@@ -153,6 +152,11 @@ async fn handle_message(bot: Bot, msg: Message, state: SharedState) -> ResponseR
         .allowed_users
         .contains(&user_id)
     {
+        warn!(
+            user_id,
+            allowed = ?state.config.channels.telegram.allowed_users,
+            "message dropped: user not in allowed_users"
+        );
         return Ok(());
     }
 
@@ -235,7 +239,7 @@ async fn dispatch_command(text: &str, state: &SharedState) -> String {
         "backup" => {
             commands::handle_backup_trigger(
                 &state.paths.scripts_dir,
-                &state.memory_pool,
+                &state.memory,
                 &state.paths.backups_dir,
             )
             .await

@@ -14,6 +14,10 @@ const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Beta feature flag required for Anthropic OAuth authentication.
+/// Can be removed once Anthropic graduates OAuth out of beta.
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+
 // ---------------------------------------------------------------------------
 // Wire types (pub for integration testing)
 // ---------------------------------------------------------------------------
@@ -264,7 +268,7 @@ impl LlmProvider for AnthropicProvider {
             AnthropicAuth::OAuth { access_token, .. } => {
                 builder = builder
                     .header("authorization", format!("Bearer {access_token}"))
-                    .header("anthropic-beta", "oauth-2025-04-20");
+                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA);
             }
             AnthropicAuth::ApiKey(key) => {
                 builder = builder.header("x-api-key", key);

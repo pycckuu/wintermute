@@ -150,7 +150,11 @@ impl SessionRouter {
         let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
         let session_cfg = self.build_session_config(session_key.clone(), user_id);
 
-        tokio::spawn(r#loop::run_session(session_cfg, rx));
+        let spawn_key = session_key.clone();
+        tokio::spawn(async move {
+            r#loop::run_session(session_cfg, rx).await;
+            info!(session = %spawn_key, "session task ended");
+        });
 
         tx.send(SessionEvent::UserMessage(text))
             .await

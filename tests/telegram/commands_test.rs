@@ -78,23 +78,10 @@ async fn backup_trigger_creates_backup() {
     let backups_dir = tmp.path().join("backups");
     std::fs::create_dir_all(&scripts_dir).expect("should create scripts dir");
 
-    let opts = SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .expect("pool should connect");
-
-    let bootstrap = include_str!("../../migrations/001_schema.sql");
-    sqlx::raw_sql(bootstrap)
-        .execute(&pool)
-        .await
-        .expect("001 should apply");
-
-    let result = commands::handle_backup_trigger(&scripts_dir, &pool, &backups_dir).await;
+    let engine = setup_engine().await;
+    let result = commands::handle_backup_trigger(&scripts_dir, &engine, &backups_dir).await;
     assert!(result.contains("Backup created") || result.contains("Backup failed"));
+    engine.shutdown().await;
 }
 
 #[test]
