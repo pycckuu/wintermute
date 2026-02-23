@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::credentials::AnthropicAuth;
+
 use super::{
     check_http_response, CompletionRequest, CompletionResponse, ContentPart, LlmProvider,
     ProviderError, Role, StopReason, UsageStats,
@@ -113,17 +115,17 @@ pub struct AnthropicUsage {
 pub struct AnthropicProvider {
     model_spec: String,
     model_name: String,
-    api_key: String,
+    auth: AnthropicAuth,
     client: reqwest::Client,
 }
 
 impl AnthropicProvider {
     /// Create a new Anthropic provider instance.
-    pub fn new(model_spec: String, model_name: String, api_key: String) -> Self {
+    pub fn new(model_spec: String, model_name: String, auth: AnthropicAuth) -> Self {
         Self {
             model_spec,
             model_name,
-            api_key,
+            auth,
             client: reqwest::Client::new(),
         }
     }
@@ -252,15 +254,24 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<CompletionResponse, ProviderError> {
         let api_request = build_request(&self.model_name, &request);
 
-        let response = self
+        let mut builder = self
             .client
             .post(ANTHROPIC_API_BASE)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&api_request)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+
+        match &self.auth {
+            AnthropicAuth::OAuth { access_token, .. } => {
+                builder = builder
+                    .header("authorization", format!("Bearer {access_token}"))
+                    .header("anthropic-beta", "oauth-2025-04-20");
+            }
+            AnthropicAuth::ApiKey(key) => {
+                builder = builder.header("x-api-key", key);
+            }
+        }
+
+        let response = builder.json(&api_request).send().await?;
 
         let payload = check_http_response(response).await?;
         parse_response(&payload)

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::config::{all_model_specs, ModelsConfig};
-use crate::credentials::Credentials;
+use crate::credentials::{resolve_anthropic_auth, Credentials};
 
 use super::anthropic::AnthropicProvider;
 use super::ollama::OllamaProvider;
@@ -195,17 +195,16 @@ fn instantiate_provider(
 ) -> Result<Arc<dyn LlmProvider>, RouterError> {
     match provider {
         "anthropic" => {
-            let key = credentials
-                .get("ANTHROPIC_API_KEY")
-                .ok_or_else(|| RouterError::MissingCredential {
+            let auth = resolve_anthropic_auth(credentials).ok_or_else(|| {
+                RouterError::MissingCredential {
                     provider: provider.to_owned(),
-                    key: "ANTHROPIC_API_KEY".to_owned(),
-                })?
-                .to_owned();
+                    key: "ANTHROPIC_API_KEY or OAuth token".to_owned(),
+                }
+            })?;
             Ok(Arc::new(AnthropicProvider::new(
                 model_spec.to_owned(),
                 model.to_owned(),
-                key,
+                auth,
             )))
         }
         "ollama" => Ok(Arc::new(OllamaProvider::new(

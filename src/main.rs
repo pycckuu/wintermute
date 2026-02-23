@@ -24,7 +24,7 @@ use wintermute::config::{
     load_default_agent_config, load_default_config, runtime_paths, RuntimePaths,
 };
 use wintermute::credentials::{
-    enforce_private_file_permissions, load_default_credentials, Credentials,
+    enforce_private_file_permissions, load_default_credentials, resolve_anthropic_auth, Credentials,
 };
 use wintermute::executor::direct::DirectExecutor;
 use wintermute::executor::docker::DockerExecutor;
@@ -158,8 +158,14 @@ async fn handle_start() -> anyhow::Result<()> {
         ));
     }
 
+    // Merge OAuth secrets into the redactor's exact-match list.
+    let mut all_secrets = credentials.known_secrets();
+    if let Some(auth) = resolve_anthropic_auth(&credentials) {
+        all_secrets.extend(auth.secret_values());
+    }
+
     // Set up executor: Docker preferred, Direct as fallback
-    let redactor = Redactor::new(credentials.known_secrets());
+    let redactor = Redactor::new(all_secrets);
     let executor: Arc<dyn Executor> = if DockerExecutor::docker_available().await {
         let docker = DockerExecutor::new(&config, &paths, redactor.clone()).await?;
         let health = docker.health_check().await?;
@@ -607,7 +613,7 @@ builtin = "backup"
 }
 
 fn default_env_file() -> &'static str {
-    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n"
+    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\n"
 }
 
 fn list_backups(backups_dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
