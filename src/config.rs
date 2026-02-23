@@ -319,6 +319,10 @@ pub struct RuntimePaths {
     pub backups_dir: PathBuf,
     /// Memory database path.
     pub memory_db: PathBuf,
+    /// PID file path for process monitoring.
+    pub pid_file: PathBuf,
+    /// Health JSON file path.
+    pub health_json: PathBuf,
 }
 
 // Default value functions for serde
@@ -421,6 +425,8 @@ pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
     let data_dir = root.join("data");
     let backups_dir = root.join("backups");
     let memory_db = data_dir.join("memory.db");
+    let pid_file = root.join("wintermute.pid");
+    let health_json = root.join("health.json");
 
     Ok(RuntimePaths {
         root,
@@ -432,6 +438,8 @@ pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
         data_dir,
         backups_dir,
         memory_db,
+        pid_file,
+        health_json,
     })
 }
 

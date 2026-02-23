@@ -7,13 +7,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::HeartbeatDeps;
 
 /// Health report written to `~/.wintermute/health.json` each heartbeat tick.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthReport {
     /// Overall system status.
     pub status: String,
@@ -40,7 +40,7 @@ pub struct HealthReport {
 }
 
 /// Budget usage snapshot.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetReport {
     /// Tokens used today.
     pub used: u64,

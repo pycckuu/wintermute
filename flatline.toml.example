@@ -1,0 +1,39 @@
+# Flatline supervisor configuration.
+# Copy to ~/.wintermute/flatline.toml and adjust.
+
+[model]
+default = "ollama/qwen3:8b"
+# fallback = "anthropic/claude-haiku-4-5-20251001"
+
+[budget]
+max_tokens_per_day = 100_000
+
+[checks]
+interval_secs = 300
+health_stale_threshold_secs = 180
+
+[thresholds]
+tool_failure_rate = 0.5
+tool_failure_window_hours = 1
+budget_burn_rate_alert = 0.8
+memory_pending_alert = 100
+unused_tool_days = 30
+max_tool_count_warning = 40
+disk_warning_gb = 5.0
+
+[auto_fix]
+enabled = true
+restart_on_crash = true
+quarantine_failing_tools = true
+disable_failing_tasks = true
+revert_recent_changes = true
+max_auto_restarts_per_hour = 3
+
+[reports]
+daily_health = "08:00"
+alert_cooldown_mins = 30
+telegram_prefix = "🩺 Flatline"
+
+[telegram]
+bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
+notify_users = []

@@ -103,13 +103,13 @@ uses sonnet). The user configures this, not the code.
 │                                                                   │
 │  ~/.wintermute/                                                   │
 │  ├── config.toml       (human-owned: security, credentials)      │
+│  ├── agent.toml        (agent-owned: personality, tasks)         │
 │  ├── .env              (secrets, chmod 600)                      │
 │  ├── data/memory.db    (NOT in sandbox)                          │
-│  ├── health.json       (written by heartbeat, read by Doctor)    │
+│  ├── health.json       (written by heartbeat, read by Flatline)    │
 │  ├── workspace/        (mounted rw into sandbox)                 │
 │  ├── scripts/          (git repo, mounted rw, hot-reloaded)     │
 │  │   ├── .git/                                                   │
-│  │   ├── agent.toml       (agent-owned: personality, tasks)       │
 │  │   ├── requirements.txt  (pip deps, rebuilt on reset)          │
 │  │   ├── news_digest.py    (agent-created tool)                  │
 │  │   ├── news_digest.json  (tool schema)                         │
@@ -159,7 +159,6 @@ allowed_domains = ["github.com", "api.github.com", "pypi.org",
                    "en.wikipedia.org"]
 fetch_rate_limit = 30
 request_rate_limit = 10
-browser_rate_limit = 60
 
 [privacy]
 # Domains that are NEVER auto-trusted, always require approval
@@ -360,9 +359,6 @@ dynamic tools per LLM call. Selection strategy:
   "required": ["name", "description", "parameters_schema", "implementation"]
 }
 ```
-
-`create_tool` accepts `parameters_schema` as input and writes it to the
-on-disk schema file under the `parameters` key.
 
 When called:
 1. Validate name (alphanumeric + underscore, no path traversal)
@@ -871,7 +867,7 @@ Built-in tasks (not agent-removable):
 ### Health File
 
 Heartbeat writes ~/.wintermute/health.json every cycle. This is the
-primary interface for the Doctor supervisor (v1.1) but also useful
+primary interface for the Flatline supervisor (v1.1) but also useful
 for manual monitoring and the /status command.
 
 ```json
@@ -893,7 +889,7 @@ for manual monitoring and the /status command.
 ### Structured Logging
 
 All logs are structured JSON (.jsonl) for both human debugging and
-future Doctor consumption:
+future Flatline consumption:
 
 ```json
 {"ts":"...","level":"info","event":"tool_call","tool":"news_digest","duration_ms":1200,"success":true,"session":"abc123"}
@@ -1145,7 +1141,7 @@ cargo build --release
 
 # First time setup
 ./wintermute init
-# Creates ~/.wintermute/, config.toml, scripts/agent.toml, .env template
+# Creates ~/.wintermute/, config.toml, agent.toml, .env template
 # Initializes git repo in scripts/
 # Builds Docker image (if Docker available)
 # Runs migrations on memory.db
@@ -1193,15 +1189,13 @@ Files: executor/*, Dockerfile.sandbox
 
 ### Phase 2: Core Loop (weeks 4-6)
 
-**Task 4: Memory** ✅
+**Task 4: Memory**
 Files: memory/*, migrations/
 - SQLite schema + FTS5 + triggers
 - Write actor (mpsc channel)
 - FTS5 search
 - Optional: sqlite-vec + OllamaEmbedder + RRF merge
 - Embedder trait + OllamaEmbedder implementation
-- TrustSource typed enum (config/user), content size limits, WAL mode + pragmas
-- 29 tests
 
 **Task 5: Telegram**
 Files: telegram/*
@@ -1211,23 +1205,21 @@ Files: telegram/*
 - Inline keyboard support (for approvals)
 - Message routing to agent sessions
 
-**Task 6: Agent Loop + Tools** ✅
+**Task 6: Agent Loop + Tools**
 Files: agent/*, tools/*
 - Session router (per-session Tokio tasks, try_send)
 - Agent loop: context assemble → LLM call → tool routing → execute → observe
-- Context assembler with trimming + overflow retry (aggressive trim on context_length_exceeded)
+- Context assembler with trimming + retry
 - Policy gate + egress rules
 - Non-blocking approval manager (short-ID callbacks)
 - Budget tracker (atomic, per-session + daily)
-- 8 core tool implementations (including browser)
+- 8 core tool implementations
 - Dynamic tool registry (watch /scripts/*.json, hot-reload)
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
-- Dynamic tool selection (ranked by relevance + recency, query passed from agent loop)
-- Browser tool: safe bridge interface, rate limiting, input validation. Returns clear
-  unavailable error when no runtime bridge configured. **Remaining:** runtime bridge
-  (Playwright subprocess or MCP) for actual automation — not implemented to avoid
-  `std::process::Command`/`tokio::process::Command` in this phase.
+- Dynamic tool selection (top N by relevance/recency)
+- Browser bridge: Playwright subprocess, auto-detection, domain policy
+  (skip if headless — tool not registered)
 
 ### Phase 3: Intelligence (weeks 7-8)
 
@@ -1249,10 +1241,11 @@ Files: heartbeat/*, telegram/commands.rs
 
 ### v1.1 (post-launch)
 
-- **Doctor** — supervisor process. See wintermute-doctor.md.
-  Separate binary, reads logs + health.json + git history,
-  diagnoses failures, quarantines bad tools, restarts crashed process,
-  proposes fixes via Telegram. Own LLM budget (cheap model).
+- **Flatline** — supervisor process (implemented). See `doc/FLATLINE.md`.
+  Separate Cargo workspace member (`flatline/`), reads logs + health.json
+  + git history, detects 8 failure patterns, diagnoses novel problems via
+  LLM, quarantines bad tools, restarts crashed process, proposes fixes
+  via Telegram. Own LLM budget (cheap model), own SQLite state.db.
 - OS-native sandboxing (bubblewrap on Linux, sandbox-exec on macOS)
 - LanceDB migration if sqlite-vec insufficient
 - VOYAGER-style skill verification (LLM critic evaluates tool output)
