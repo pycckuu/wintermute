@@ -32,6 +32,7 @@ fn render_identity_contains_all_sections() {
     assert!(doc.contains("## Your Memory"));
     assert!(doc.contains("## Budget"));
     assert!(doc.contains("## Privacy Boundary"));
+    assert!(doc.contains("## Handling Non-Text Messages"));
 }
 
 #[test]
@@ -101,6 +102,16 @@ fn load_identity_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join("DOES_NOT_EXIST.md");
     assert!(load_identity(&path).is_none());
+}
+
+#[test]
+fn render_identity_contains_media_handling_guidance() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("## Handling Non-Text Messages"));
+    assert!(doc.contains("create_tool"));
+    assert!(doc.contains("whisper"));
+    assert!(doc.contains("multimodal model"));
+    assert!(doc.contains("pypdf"));
 }
 
 // ---------------------------------------------------------------------------
