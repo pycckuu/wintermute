@@ -169,11 +169,24 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                 }
 
                 // Run the agent reasoning turn
-                run_agent_turn(&cfg, &mut conversation, &mut last_warned_percent, &mut compacted_this_session).await;
+                run_agent_turn(
+                    &cfg,
+                    &mut conversation,
+                    &mut last_warned_percent,
+                    &mut compacted_this_session,
+                )
+                .await;
             }
             SessionEvent::ApprovalResolved(result) => {
                 debug!(session_id = %cfg.session_id, "received approval resolution");
-                handle_approval_resolved(&cfg, &mut conversation, result, &mut last_warned_percent, &mut compacted_this_session).await;
+                handle_approval_resolved(
+                    &cfg,
+                    &mut conversation,
+                    result,
+                    &mut last_warned_percent,
+                    &mut compacted_this_session,
+                )
+                .await;
             }
             SessionEvent::Shutdown => {
                 info!(session_id = %cfg.session_id, "session shutting down");
@@ -233,7 +246,9 @@ async fn run_agent_turn(
             } else if let Ok(provider) = cfg.router.resolve(None, None) {
                 let request = CompletionRequest {
                     messages: compaction_messages,
-                    system: Some("You are a conversation summarizer. Produce a concise summary.".to_owned()),
+                    system: Some(
+                        "You are a conversation summarizer. Produce a concise summary.".to_owned(),
+                    ),
                     tools: vec![],
                     max_tokens: Some(2048),
                     stop_sequences: vec![],
@@ -556,7 +571,13 @@ async fn handle_approval_resolved(
                 )),
             });
 
-            run_agent_turn(cfg, conversation, last_warned_percent, compacted_this_session).await;
+            run_agent_turn(
+                cfg,
+                conversation,
+                last_warned_percent,
+                compacted_this_session,
+            )
+            .await;
         }
         ApprovalResult::Denied { tool_name, .. } => {
             send_text(cfg, &format!("Tool <b>{tool_name}</b> was denied by user.")).await;
@@ -568,7 +589,13 @@ async fn handle_approval_resolved(
                 )),
             });
 
-            run_agent_turn(cfg, conversation, last_warned_percent, compacted_this_session).await;
+            run_agent_turn(
+                cfg,
+                conversation,
+                last_warned_percent,
+                compacted_this_session,
+            )
+            .await;
         }
         ApprovalResult::Expired => {
             send_text(cfg, "An approval request has expired.").await;

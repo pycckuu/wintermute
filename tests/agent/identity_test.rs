@@ -124,8 +124,5 @@ fn format_uptime_hours() {
 
 #[test]
 fn format_uptime_days() {
-    assert_eq!(
-        format_uptime(Duration::from_secs(90_000)),
-        "1d 1h 0m"
-    );
+    assert_eq!(format_uptime(Duration::from_secs(90_000)), "1d 1h 0m");
 }

@@ -836,10 +836,11 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
     let outbound = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if let Some(msg) = telegram_rx.recv().await {
-                let has_budget_error = msg
-                    .text
-                    .as_deref()
-                    .is_some_and(|text| text.contains("budget reached") || text.contains("budget exhausted") || text.contains("Budget exceeded"));
+                let has_budget_error = msg.text.as_deref().is_some_and(|text| {
+                    text.contains("budget reached")
+                        || text.contains("budget exhausted")
+                        || text.contains("Budget exceeded")
+                });
                 if has_budget_error {
                     break msg;
                 }
