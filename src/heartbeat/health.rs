@@ -139,6 +139,7 @@ async fn count_json_files(dir: &Path) -> usize {
     let dir = dir.to_owned();
     tokio::task::spawn_blocking(move || count_json_files_sync(&dir))
         .await
+        .inspect_err(|e| warn!(error = %e, "count_json_files task panicked"))
         .unwrap_or(0)
 }
 

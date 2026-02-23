@@ -78,9 +78,8 @@ async fn extract_rejects_when_budget_exhausted() {
 #[tokio::test]
 async fn extract_redacts_secrets_from_llm_output() {
     let secret = "sk-ant-secret-key-12345";
-    let response_json = format!(
-        r#"[{{"kind": "fact", "content": "API key is {secret}", "confidence": 0.9}}]"#
-    );
+    let response_json =
+        format!(r#"[{{"kind": "fact", "content": "API key is {secret}", "confidence": 0.9}}]"#);
     let router = mock_router(&response_json);
     // The redactor knows this secret and should mask it.
     let redactor = Redactor::new(vec![secret.to_owned()]);

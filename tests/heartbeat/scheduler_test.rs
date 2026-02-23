@@ -23,11 +23,11 @@ fn due_tasks_returns_matching_cron() {
         // Every minute.
         test_task("every_minute", "0 * * * * *"),
     ];
-    let state = SchedulerState::new();
+    let mut state = SchedulerState::new();
 
     // A time that's definitely past at least one cron trigger.
     let now = Utc::now();
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
 
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].name, "every_minute");
@@ -39,10 +39,10 @@ fn disabled_tasks_are_skipped() {
     task.enabled = false;
 
     let tasks = vec![task];
-    let state = SchedulerState::new();
+    let mut state = SchedulerState::new();
     let now = Utc::now();
 
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
     assert!(due.is_empty());
 }
 
@@ -56,7 +56,7 @@ fn task_not_due_if_recently_run() {
     let now = Utc::now();
     state.record_run("hourly", now);
 
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
     assert!(due.is_empty(), "task should not be due right after running");
 }
 
@@ -71,17 +71,17 @@ fn task_due_after_interval_passes() {
     state.record_run("minutely", two_minutes_ago);
 
     let now = Utc::now();
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
     assert_eq!(due.len(), 1);
 }
 
 #[test]
 fn invalid_cron_expression_is_skipped() {
     let tasks = vec![test_task("bad_cron", "not a cron expression")];
-    let state = SchedulerState::new();
+    let mut state = SchedulerState::new();
     let now = Utc::now();
 
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
     assert!(due.is_empty(), "invalid cron should be skipped");
 }
 
@@ -107,10 +107,10 @@ fn multiple_tasks_with_different_schedules() {
         test_task("yearly", "0 0 0 1 1 *"),    // once a year (Jan 1 midnight)
     ];
 
-    let state = SchedulerState::new();
+    let mut state = SchedulerState::new();
     let now = Utc::now();
 
-    let due = due_tasks(&tasks, &state, now);
+    let due = due_tasks(&tasks, &mut state, now);
     // "every_sec" should be due; "yearly" might or might not be depending on date
     assert!(
         due.iter().any(|t| t.name == "every_sec"),

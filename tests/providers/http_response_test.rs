@@ -96,3 +96,36 @@ async fn check_http_response_truncates_long_error_body() {
         other => panic!("expected http status error, got: {other}"),
     }
 }
+
+#[tokio::test]
+async fn check_http_response_redacts_jwt_tokens() {
+    let jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dGVzdF9zaWduYXR1cmVfaGVyZQ";
+    let body = format!("error token={jwt}");
+    let url = serve_once("500 Internal Server Error", &body).await;
+
+    let response_result = reqwest::get(url).await;
+    assert!(response_result.is_ok());
+    let response = match response_result {
+        Ok(response) => response,
+        Err(err) => panic!("request should complete: {err}"),
+    };
+
+    let checked = check_http_response(response).await;
+    assert!(checked.is_err());
+
+    let err = match checked {
+        Ok(_) => panic!("response should fail on non-success status"),
+        Err(err) => err,
+    };
+
+    match err {
+        ProviderError::HttpStatus { body, .. } => {
+            assert!(
+                !body.contains(jwt),
+                "JWT should be redacted from error body"
+            );
+            assert!(body.contains("[REDACTED]"));
+        }
+        other => panic!("expected http status error, got: {other}"),
+    }
+}

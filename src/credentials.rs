@@ -300,12 +300,11 @@ const CLAUDE_KEYCHAIN_ACCOUNT: &str = "Claude Code";
 fn read_claude_cli_keychain() -> Option<AnthropicAuth> {
     use security_framework::passwords::get_generic_password;
 
-    let password_bytes =
-        get_generic_password(CLAUDE_KEYCHAIN_SERVICE, CLAUDE_KEYCHAIN_ACCOUNT)
-            .map_err(|e| {
-                debug!(error = %e, "Claude CLI keychain entry not found");
-            })
-            .ok()?;
+    let password_bytes = get_generic_password(CLAUDE_KEYCHAIN_SERVICE, CLAUDE_KEYCHAIN_ACCOUNT)
+        .map_err(|e| {
+            debug!(error = %e, "Claude CLI keychain entry not found");
+        })
+        .ok()?;
 
     let json_str = std::str::from_utf8(&password_bytes)
         .map_err(|e| {

@@ -165,7 +165,10 @@ pub fn parse_extractions(text: &str) -> anyhow::Result<Vec<Extraction>> {
     Ok(filtered)
 }
 
-/// Build a simple user message from text for testing.
+/// Build a simple user message from text.
+///
+/// Exposed for integration tests under `tests/`.
+#[doc(hidden)]
 pub fn user_message(text: &str) -> Message {
     Message {
         role: Role::User,

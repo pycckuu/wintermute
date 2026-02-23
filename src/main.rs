@@ -151,15 +151,7 @@ async fn handle_start() -> anyhow::Result<()> {
     let token_key = &config.channels.telegram.bot_token_env;
     let telegram_token = credentials.require(token_key)?;
 
-    let router = ModelRouter::from_config(&config.models, &credentials)?;
-    if !router.has_model(&config.models.default) {
-        return Err(anyhow::anyhow!(
-            "default model '{}' is not available",
-            config.models.default
-        ));
-    }
-
-    // Merge OAuth secrets into the redactor's exact-match list.
+    // Resolve auth once so the router and redactor use the same token.
     let mut all_secrets = credentials.known_secrets();
     if let Some(auth) = resolve_anthropic_auth(&credentials) {
         match &auth {
@@ -171,8 +163,16 @@ async fn handle_start() -> anyhow::Result<()> {
         warn!("no Anthropic credentials found; provider will be unavailable");
     }
 
+    let router = ModelRouter::from_config(&config.models, &credentials)?;
+    if !router.has_model(&config.models.default) {
+        return Err(anyhow::anyhow!(
+            "default model '{}' is not available",
+            config.models.default
+        ));
+    }
+
     // Set up executor: Docker preferred, Direct as fallback
-    let redactor = Redactor::new(all_secrets);
+    let redactor = Redactor::new(all_secrets.clone());
     let executor: Arc<dyn Executor> = if DockerExecutor::docker_available().await {
         let docker = DockerExecutor::new(&config, &paths, redactor.clone()).await?;
         let health = docker.health_check().await?;
@@ -288,8 +288,14 @@ async fn handle_start() -> anyhow::Result<()> {
         observer_tx,
     ));
 
-    // Phase 3: Heartbeat background task
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Phase 3: Heartbeat background task with graceful shutdown via Ctrl+C.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("ctrl-c received, signalling heartbeat shutdown");
+            let _ = shutdown_tx.send(true);
+        }
+    });
     if agent_config_arc.heartbeat.enabled {
         let notify_user_id = match config_arc.channels.telegram.allowed_users.first() {
             Some(&id) => id,
@@ -332,7 +338,7 @@ async fn handle_start() -> anyhow::Result<()> {
         session_router,
         approval_manager,
         telegram_rx,
-        credentials.known_secrets(),
+        all_secrets,
         executor,
         memory,
         registry,
@@ -612,7 +618,7 @@ auto_promote_threshold = 3
 
 [[scheduled_tasks]]
 name = "daily_backup"
-cron = "0 3 * * *"
+cron = "0 0 3 * * *"
 builtin = "backup"
 "#
 }

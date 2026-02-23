@@ -15,6 +15,12 @@ fn test_config(session: u64, daily: u64, tool_calls: u32) -> BudgetConfig {
 }
 
 #[test]
+fn daily_budget_limit_returns_configured_value() {
+    let daily = DailyBudget::new(42_000);
+    assert_eq!(daily.limit(), 42_000);
+}
+
+#[test]
 fn session_budget_allows_when_under_limit() {
     let daily = Arc::new(DailyBudget::new(100_000));
     let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
