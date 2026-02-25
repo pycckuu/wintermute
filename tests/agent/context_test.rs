@@ -1,5 +1,7 @@
 //! Tests for context assembly, conversation trimming, and compaction.
 
+use std::path::PathBuf;
+
 use wintermute::agent::context::{
     apply_compaction, assemble_system_prompt, build_compaction_plan, build_compaction_request,
     should_compact, trim_messages, trim_messages_to_fraction,
@@ -515,4 +517,24 @@ fn apply_compaction_handles_single_kept() {
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].content.text(), "Only message");
     assert!(result[1].content.text().contains("Summary text"));
+}
+
+#[test]
+fn compaction_summary_is_redacted_before_apply_compaction() -> Result<(), Box<dyn std::error::Error>>
+{
+    let loop_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/agent/loop.rs");
+    let content = std::fs::read_to_string(loop_src)?;
+
+    let redact_idx = content
+        .find("redactor().redact(&summary)")
+        .ok_or("missing compaction summary redaction call")?;
+    let apply_idx = content
+        .find("apply_compaction(&redacted_summary")
+        .ok_or("missing apply_compaction call with redacted summary")?;
+
+    assert!(
+        redact_idx < apply_idx,
+        "compaction summary redaction must occur before apply_compaction"
+    );
+    Ok(())
 }

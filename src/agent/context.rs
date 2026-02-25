@@ -60,8 +60,9 @@ pub fn assemble_system_prompt(
 
     // Section 3: USER.md — consolidated long-term memory
     // Trust boundary: USER.md is LLM-generated from active memories. Memory content
-    // originates from agent observations and user interactions. The redactor does not
-    // run on this path; malicious memory content could persist across sessions.
+    // originates from agent observations and user interactions. Digest prompt assembly
+    // redacts known secrets on the memory path, but USER.md remains untrusted
+    // model-authored content that can persist across sessions.
     if let Some(umd) = user_md {
         if !umd.is_empty() {
             sections.push(format!("## Long-Term Memory\n{umd}"));

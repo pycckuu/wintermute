@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tracing::{info, warn};
 
+use crate::executor::redactor::Redactor;
 use crate::memory::{MemoryEngine, MemoryStatus};
 
 /// Default cutoff (in days) for archiving stale memories.
@@ -30,7 +31,11 @@ pub struct DigestResult {
 ///
 /// The returned string is suitable for feeding to an LLM to produce a merged
 /// USER.md that incorporates new memories.
-pub fn build_consolidation_prompt(current_user_md: &str, memories: &[String]) -> String {
+pub fn build_consolidation_prompt(
+    current_user_md: &str,
+    memories: &[String],
+    redactor: &Redactor,
+) -> String {
     let mut prompt = String::with_capacity(4096);
 
     prompt.push_str(
@@ -61,7 +66,8 @@ pub fn build_consolidation_prompt(current_user_md: &str, memories: &[String]) ->
         prompt.push_str("(no new memories)\n");
     } else {
         for (i, mem) in memories.iter().enumerate() {
-            prompt.push_str(&format!("{}. {}\n", i.saturating_add(1), mem));
+            let redacted_memory = redactor.redact(mem);
+            prompt.push_str(&format!("{}. {}\n", i.saturating_add(1), redacted_memory));
         }
     }
     prompt.push('\n');
@@ -172,6 +178,7 @@ pub async fn prepare_digest(
     memory: &Arc<MemoryEngine>,
     user_md_path: &Path,
     cutoff_days: u64,
+    redactor: &Redactor,
 ) -> anyhow::Result<(String, u64)> {
     let current_user_md = load_user_md(user_md_path);
 
@@ -188,7 +195,7 @@ pub async fn prepare_digest(
         archive_stale_memories(memory, cutoff_days, Some(&active_memories)).await?;
 
     // Build the consolidation prompt.
-    let prompt = build_consolidation_prompt(&current_user_md, &memory_contents);
+    let prompt = build_consolidation_prompt(&current_user_md, &memory_contents, redactor);
 
     Ok((prompt, archived_count))
 }

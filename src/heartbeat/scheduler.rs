@@ -2,7 +2,7 @@
 //!
 //! Evaluates cron expressions from `agent.toml` scheduled tasks and dispatches
 //! due tasks. Builtin tasks (like "backup") are handled internally. Dynamic
-//! tool tasks execute via [`ToolRouter`].
+//! tool tasks execute via [`crate::tools::ToolRouter`].
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -131,7 +131,7 @@ pub fn due_tasks<'a>(
 ///
 /// Dispatches to the appropriate handler based on task configuration:
 /// - Builtin tasks (e.g. "backup") are handled internally.
-/// - Tool tasks execute via [`ToolRouter`].
+/// - Tool tasks execute via [`crate::tools::ToolRouter`].
 ///
 /// # Errors
 ///
@@ -181,6 +181,8 @@ pub async fn execute_task(
 
     // Notify user if configured.
     if task.notify {
+        let redacted_output = deps.tool_router.redactor().redact(&outcome.output);
+        let truncated_output = redacted_output.chars().take(500).collect::<String>();
         let status = if outcome.success {
             "completed"
         } else {
@@ -190,7 +192,7 @@ pub async fn execute_task(
             "<b>Scheduled task:</b> {}\n<b>Status:</b> {}\n<b>Output:</b> {}",
             escape_html(&outcome.name),
             status,
-            escape_html(&outcome.output.chars().take(500).collect::<String>())
+            escape_html(&truncated_output)
         );
         let msg = TelegramOutbound {
             user_id: deps.notify_user_id,
@@ -220,8 +222,13 @@ async fn execute_builtin(name: &str, deps: &HeartbeatDeps) -> anyhow::Result<Str
         }
         "digest" => {
             let cutoff = super::digest::DEFAULT_STALE_CUTOFF_DAYS;
-            let (prompt, archived) =
-                super::digest::prepare_digest(&deps.memory, &deps.paths.user_md, cutoff).await?;
+            let (prompt, archived) = super::digest::prepare_digest(
+                &deps.memory,
+                &deps.paths.user_md,
+                cutoff,
+                deps.tool_router.redactor(),
+            )
+            .await?;
             // The prompt is ready for LLM invocation. For now, write the prompt
             // length and archive count as output. Full LLM integration requires
             // a model call which is wired separately.
