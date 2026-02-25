@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use wintermute::credentials::{
-    parse_claude_cli_json, resolve_anthropic_auth, AnthropicAuth, Credentials,
+    parse_claude_cli_json, resolve_anthropic_auth, resolve_openai_auth, AnthropicAuth, Credentials,
+    OpenAiAuth,
 };
 
 // ---------------------------------------------------------------------------
@@ -169,4 +170,62 @@ fn filters_empty_refresh_token() {
         }
         _ => panic!("expected OAuth variant"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// resolve_openai_auth
+// ---------------------------------------------------------------------------
+
+#[test]
+fn openai_oauth_priority_over_api_key() {
+    let mut vars = BTreeMap::new();
+    vars.insert(
+        "OPENAI_OAUTH_TOKEN".to_owned(),
+        "oauth-token-123".to_owned(),
+    );
+    vars.insert("OPENAI_API_KEY".to_owned(), "api-key-456".to_owned());
+    let credentials = Credentials::from_map(vars);
+    let auth = resolve_openai_auth(&credentials).expect("should resolve");
+    assert_eq!(auth, OpenAiAuth::OAuthToken("oauth-token-123".to_owned()));
+}
+
+#[test]
+fn openai_falls_back_to_api_key() {
+    let mut vars = BTreeMap::new();
+    vars.insert("OPENAI_API_KEY".to_owned(), "my-key".to_owned());
+    let credentials = Credentials::from_map(vars);
+    let auth = resolve_openai_auth(&credentials).expect("should resolve");
+    assert_eq!(auth, OpenAiAuth::ApiKey("my-key".to_owned()));
+}
+
+#[test]
+fn openai_returns_none_when_missing() {
+    let credentials = Credentials::default();
+    assert!(resolve_openai_auth(&credentials).is_none());
+}
+
+#[test]
+fn openai_empty_oauth_is_skipped() {
+    let mut vars = BTreeMap::new();
+    vars.insert("OPENAI_OAUTH_TOKEN".to_owned(), "   ".to_owned());
+    vars.insert("OPENAI_API_KEY".to_owned(), "fallback-key".to_owned());
+    let credentials = Credentials::from_map(vars);
+    let auth = resolve_openai_auth(&credentials).expect("should resolve");
+    assert_eq!(auth, OpenAiAuth::ApiKey("fallback-key".to_owned()));
+}
+
+// ---------------------------------------------------------------------------
+// OpenAiAuth::secret_values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn openai_oauth_secret_values() {
+    let auth = OpenAiAuth::OAuthToken("oauth-tok".to_owned());
+    assert_eq!(auth.secret_values(), vec!["oauth-tok"]);
+}
+
+#[test]
+fn openai_api_key_secret_values() {
+    let auth = OpenAiAuth::ApiKey("api-key".to_owned());
+    assert_eq!(auth.secret_values(), vec!["api-key"]);
 }

@@ -202,6 +202,62 @@ impl AnthropicAuth {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI OAuth / API key
+// ---------------------------------------------------------------------------
+
+/// How Wintermute authenticates with the OpenAI API.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OpenAiAuth {
+    /// OAuth token sent as `Authorization: Bearer`.
+    OAuthToken(String),
+    /// API key sent as `Authorization: Bearer`.
+    ApiKey(String),
+}
+
+impl std::fmt::Debug for OpenAiAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OAuthToken(_) => f.debug_tuple("OAuthToken").field(&"[REDACTED]").finish(),
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+        }
+    }
+}
+
+impl OpenAiAuth {
+    /// Returns secret values for redactor registration.
+    pub fn secret_values(&self) -> Vec<String> {
+        match self {
+            Self::OAuthToken(token) | Self::ApiKey(token) => vec![token.clone()],
+        }
+    }
+}
+
+/// Resolve OpenAI authentication from loaded `.env` credentials.
+///
+/// Resolution order:
+/// 1. `OPENAI_OAUTH_TOKEN`
+/// 2. `OPENAI_API_KEY`
+///
+/// Returns `None` if no credential source provides a value.
+pub fn resolve_openai_auth(credentials: &Credentials) -> Option<OpenAiAuth> {
+    if let Some(token) = credentials.get("OPENAI_OAUTH_TOKEN") {
+        if !token.trim().is_empty() {
+            debug!("using OPENAI_OAUTH_TOKEN from .env");
+            return Some(OpenAiAuth::OAuthToken(token.to_owned()));
+        }
+    }
+
+    if let Some(key) = credentials.get("OPENAI_API_KEY") {
+        if !key.trim().is_empty() {
+            debug!("using OPENAI_API_KEY from .env");
+            return Some(OpenAiAuth::ApiKey(key.to_owned()));
+        }
+    }
+
+    None
+}
+
 /// Resolve Anthropic authentication using a priority chain.
 ///
 /// Resolution order:

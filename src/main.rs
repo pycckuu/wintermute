@@ -25,7 +25,7 @@ use wintermute::config::{
 };
 use wintermute::credentials::{
     enforce_private_file_permissions, load_default_credentials, resolve_anthropic_auth,
-    AnthropicAuth, Credentials,
+    resolve_openai_auth, AnthropicAuth, Credentials, OpenAiAuth,
 };
 use wintermute::executor::direct::DirectExecutor;
 use wintermute::executor::docker::DockerExecutor;
@@ -166,6 +166,15 @@ async fn handle_start() -> anyhow::Result<()> {
         all_secrets.extend(auth.secret_values());
     } else {
         warn!("no Anthropic credentials found; provider will be unavailable");
+    }
+    if let Some(auth) = resolve_openai_auth(&credentials) {
+        match &auth {
+            OpenAiAuth::OAuthToken(_) => info!("openai auth resolved: OAuth token"),
+            OpenAiAuth::ApiKey(_) => info!("openai auth resolved: API key"),
+        }
+        all_secrets.extend(auth.secret_values());
+    } else {
+        warn!("no OpenAI credentials found; provider will be unavailable");
     }
 
     let router = ModelRouter::from_config(&config.models, &credentials)?;
@@ -633,7 +642,7 @@ builtin = "backup"
 }
 
 fn default_env_file() -> &'static str {
-    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\n"
+    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\nOPENAI_API_KEY=\n# OPENAI_OAUTH_TOKEN=\n"
 }
 
 fn list_backups(backups_dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
