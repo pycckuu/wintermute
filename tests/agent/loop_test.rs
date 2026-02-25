@@ -221,6 +221,7 @@ async fn run_session_completes_on_shutdown() {
         browser_limiter,
         None,
         None,
+        None,
     ));
 
     let cfg = SessionConfig {
@@ -313,6 +314,7 @@ async fn run_session_completes_on_channel_close() {
         fetch_limiter,
         request_limiter,
         browser_limiter,
+        None,
         None,
         None,
     ));
@@ -594,6 +596,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         browser_limiter,
         None,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -701,6 +704,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         fetch_limiter,
         request_limiter,
         browser_limiter,
+        None,
         None,
         None,
     ));
@@ -818,6 +822,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         browser_limiter,
         None,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -925,6 +930,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         fetch_limiter,
         request_limiter,
         browser_limiter,
+        None,
         None,
         None,
     ));

@@ -202,6 +202,10 @@ pub struct EgressConfig {
     #[serde(default = "default_request_rate")]
     pub request_rate_limit: u32,
 
+    /// Rate limit for browser actions per minute.
+    #[serde(default = "default_browser_rate")]
+    pub browser_rate_limit: u32,
+
     /// Maximum file download size in megabytes for web_fetch save_to mode.
     #[serde(default = "default_max_file_download_mb")]
     pub max_file_download_mb: u32,
@@ -225,6 +229,7 @@ impl Default for EgressConfig {
             allowed_domains: Vec::new(),
             fetch_rate_limit: default_fetch_rate(),
             request_rate_limit: default_request_rate(),
+            browser_rate_limit: default_browser_rate(),
             max_file_download_mb: default_max_file_download_mb(),
         }
     }
@@ -379,6 +384,9 @@ fn default_fetch_rate() -> u32 {
 }
 fn default_request_rate() -> u32 {
     10
+}
+fn default_browser_rate() -> u32 {
+    60
 }
 fn default_max_file_download_mb() -> u32 {
     500

@@ -177,6 +177,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         browser_limiter,
         None,
         None,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));

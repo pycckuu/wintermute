@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine;
 use bollard::container::{
     Config as ContainerConfig, CreateContainerOptions, InspectContainerOptions,
     RemoveContainerOptions, StartContainerOptions,
@@ -13,6 +14,7 @@ use bollard::container::{
 use bollard::models::HostConfig;
 use bollard::network::CreateNetworkOptions;
 use bollard::Docker;
+use tracing::info;
 
 use super::ExecutorError;
 
@@ -170,7 +172,11 @@ async fn ensure_network(docker: &Docker) -> Result<(), ExecutorError> {
 }
 
 /// Ensure the Squid proxy container is running with the given config.
+///
+/// If the container exists but its config has drifted (domain allowlist changed),
+/// it is recreated with the new config before starting.
 async fn ensure_squid_container(docker: &Docker, squid_config: &str) -> Result<(), ExecutorError> {
+    let desired_b64 = base64_encode(squid_config);
     let inspect = docker
         .inspect_container(SQUID_CONTAINER_NAME, None::<InspectContainerOptions>)
         .await;
@@ -178,7 +184,33 @@ async fn ensure_squid_container(docker: &Docker, squid_config: &str) -> Result<(
     let needs_start = match inspect {
         Ok(state) => {
             let running = state.state.and_then(|s| s.running).unwrap_or(false);
-            !running
+
+            // Check if config has drifted by comparing the SQUID_CONFIG_B64 env var.
+            let current_b64 = state
+                .config
+                .as_ref()
+                .and_then(|c| c.env.as_ref())
+                .and_then(|env| {
+                    env.iter()
+                        .find(|e| e.starts_with("SQUID_CONFIG_B64="))
+                        .map(|e| e.trim_start_matches("SQUID_CONFIG_B64="))
+                });
+
+            if current_b64 != Some(desired_b64.as_str()) {
+                // Config changed: recreate the container with the new allowlist.
+                info!("egress proxy config drifted, recreating container");
+                let remove_opts = RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                };
+                let _ = docker
+                    .remove_container(SQUID_CONTAINER_NAME, Some(remove_opts))
+                    .await;
+                create_squid_container(docker, squid_config).await?;
+                true
+            } else {
+                !running
+            }
         }
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
@@ -252,85 +284,7 @@ async fn create_squid_container(docker: &Docker, squid_config: &str) -> Result<(
     Ok(())
 }
 
-/// Simple base64 encoding without pulling in a crate.
+/// Encode a string as standard base64.
 fn base64_encode(input: &str) -> String {
-    use std::io::Write;
-    let mut buf = Vec::new();
-    {
-        let mut encoder = Base64Encoder::new(&mut buf);
-        // Write cannot fail: the underlying Vec<u8> is infallible.
-        let _ = encoder.write_all(input.as_bytes());
-        encoder.finish();
-    }
-    // Safety: Base64 output is always ASCII, so this conversion is infallible.
-    String::from_utf8(buf).unwrap_or_default()
-}
-
-/// Minimal base64 encoder (no external dependency).
-struct Base64Encoder<'a> {
-    out: &'a mut Vec<u8>,
-    buf: [u8; 3],
-    buf_len: usize,
-}
-
-const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-impl<'a> Base64Encoder<'a> {
-    fn new(out: &'a mut Vec<u8>) -> Self {
-        Self {
-            out,
-            buf: [0; 3],
-            buf_len: 0,
-        }
-    }
-
-    fn flush_triplet(&mut self) {
-        let b0 = self.buf[0];
-        let b1 = self.buf[1];
-        let b2 = self.buf[2];
-
-        self.out.push(B64_CHARS[(b0 >> 2) as usize]);
-        self.out
-            .push(B64_CHARS[((b0 & 0x03) << 4 | (b1 >> 4)) as usize]);
-
-        if self.buf_len > 1 {
-            self.out
-                .push(B64_CHARS[((b1 & 0x0f) << 2 | (b2 >> 6)) as usize]);
-        } else {
-            self.out.push(b'=');
-        }
-
-        if self.buf_len > 2 {
-            self.out.push(B64_CHARS[(b2 & 0x3f) as usize]);
-        } else {
-            self.out.push(b'=');
-        }
-
-        self.buf = [0; 3];
-        self.buf_len = 0;
-    }
-
-    fn finish(&mut self) {
-        if self.buf_len > 0 {
-            self.flush_triplet();
-        }
-    }
-}
-
-impl<'a> std::io::Write for Base64Encoder<'a> {
-    #[allow(clippy::arithmetic_side_effects)]
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        for &byte in data {
-            self.buf[self.buf_len] = byte;
-            self.buf_len += 1;
-            if self.buf_len == 3 {
-                self.flush_triplet();
-            }
-        }
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+    base64::engine::general_purpose::STANDARD.encode(input)
 }

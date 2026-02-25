@@ -92,7 +92,7 @@ pub async fn execute_command(
 // web_fetch
 // ---------------------------------------------------------------------------
 
-/// Maximum file download size in bytes (default 500 MB).
+/// Default maximum file download size in bytes (500 MB).
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Approval threshold for large file downloads (50 MB).
@@ -101,8 +101,10 @@ const LARGE_FILE_THRESHOLD: u64 = 50 * 1024 * 1024;
 /// Fetch a URL via GET with SSRF protection and manual redirect following.
 ///
 /// When `save_to` is provided, downloads the response body to the given path
-/// under `/workspace/`. Supports binary downloads. Files >50 MB return an
-/// approval-needed result.
+/// under `/workspace/`. Supports binary downloads. Files >50 MB return a
+/// large-file warning.
+///
+/// `max_download_bytes` overrides the default 500 MB limit when provided.
 ///
 /// # Errors
 ///
@@ -110,7 +112,9 @@ const LARGE_FILE_THRESHOLD: u64 = 50 * 1024 * 1024;
 pub async fn web_fetch(
     input: &serde_json::Value,
     limiter: &RateLimiter,
+    max_download_bytes: Option<u64>,
 ) -> Result<String, ToolError> {
+    let download_limit = max_download_bytes.unwrap_or(DEFAULT_MAX_DOWNLOAD_BYTES);
     let url_str = input
         .get("url")
         .and_then(|v| v.as_str())
@@ -166,9 +170,9 @@ pub async fn web_fetch(
             continue;
         }
 
-        // save_to mode: download file to disk.
+        // save_to mode: stream file to disk.
         if let Some(path) = save_to {
-            return download_to_file(response, path).await;
+            return download_to_file(response, path, download_limit).await;
         }
 
         let body = response.text().await.map_err(|e| {
@@ -215,44 +219,68 @@ pub fn validate_save_path(path: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Download the response body to a file path.
-async fn download_to_file(response: reqwest::Response, path: &str) -> Result<String, ToolError> {
-    let content_length = response.content_length();
+/// Stream the response body to a file path, avoiding buffering the entire file in memory.
+async fn download_to_file(
+    response: reqwest::Response,
+    path: &str,
+    max_bytes: u64,
+) -> Result<String, ToolError> {
+    use tokio::io::AsyncWriteExt;
+    use tokio_stream::StreamExt;
 
     // Check content-length header for early rejection.
-    if let Some(len) = content_length {
-        if len > DEFAULT_MAX_DOWNLOAD_BYTES {
+    if let Some(len) = response.content_length() {
+        if len > max_bytes {
             return Err(ToolError::ExecutionFailed(format!(
                 "file too large ({} MB, max {} MB)",
                 len / (1024 * 1024),
-                DEFAULT_MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                max_bytes / (1024 * 1024)
             )));
         }
     }
 
-    let bytes = response.bytes().await.map_err(|e| {
-        ToolError::ExecutionFailed(format!("failed to download response body: {e}"))
-    })?;
-
-    let size = bytes.len() as u64;
-
-    if size > DEFAULT_MAX_DOWNLOAD_BYTES {
-        return Err(ToolError::ExecutionFailed(format!(
-            "file too large ({} MB, max {} MB)",
-            size / (1024 * 1024),
-            DEFAULT_MAX_DOWNLOAD_BYTES / (1024 * 1024)
-        )));
-    }
-
-    // Create parent directories if needed.
+    // Create parent directories if needed (async).
     if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
             ToolError::ExecutionFailed(format!("failed to create directories for {path}: {e}"))
         })?;
     }
 
-    std::fs::write(path, &bytes)
-        .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file {path}: {e}")))?;
+    // Stream chunks to disk.
+    let file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("failed to create file {path}: {e}")))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+    let mut stream = response.bytes_stream();
+    let mut size: u64 = 0;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| ToolError::ExecutionFailed(format!("download stream error: {e}")))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let chunk_len = chunk.len() as u64;
+        size = size.saturating_add(chunk_len);
+
+        if size > max_bytes {
+            // Clean up partial file.
+            drop(writer);
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(ToolError::ExecutionFailed(format!(
+                "file too large ({} MB, max {} MB)",
+                size / (1024 * 1024),
+                max_bytes / (1024 * 1024)
+            )));
+        }
+
+        writer.write_all(&chunk).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to write chunk to {path}: {e}"))
+        })?;
+    }
+
+    writer
+        .flush()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("failed to flush file {path}: {e}")))?;
 
     if size > LARGE_FILE_THRESHOLD {
         Ok(serde_json::json!({
