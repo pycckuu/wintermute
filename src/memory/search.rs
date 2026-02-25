@@ -27,14 +27,19 @@ type MemoryRow = (
 ///
 /// Returns up to `limit` results ranked by relevance. Only memories with
 /// `status = 'active'` are returned.
+///
+/// Falls back to the most recently updated active memories when the query
+/// is empty or produces no FTS5 matches, so the caller always receives
+/// context (prevents "cognitive cold start").
 pub async fn search(
     db: &SqlitePool,
     _embedder: Option<&dyn Embedder>,
     query: &str,
     limit: usize,
 ) -> Result<Vec<Memory>, MemoryError> {
-    if query.is_empty() {
-        return Ok(Vec::new());
+    // Empty or whitespace-only query — skip FTS5 entirely.
+    if query.trim().is_empty() {
+        return recent_active_memories(db, limit).await;
     }
 
     let fts_results = fts5_search(db, query, limit).await?;
@@ -42,6 +47,12 @@ pub async fn search(
     // Vector search integration deferred — sqlite-vec extension loading
     // requires runtime configuration that will be added in a follow-up.
     // For now, FTS5 is the sole search path.
+
+    // When FTS5 returned nothing (query sanitised to empty, or no token
+    // matches), fall back to recent active memories instead of nothing.
+    if fts_results.is_empty() {
+        return recent_active_memories(db, limit).await;
+    }
 
     Ok(fts_results)
 }
@@ -135,7 +146,8 @@ fn sanitise_fts5_query(query: &str) -> String {
 
 /// Search memories filtered by status, ordered by most recently updated.
 ///
-/// Returns up to `limit` memories that have the given `status` value.
+/// Returns up to `limit` memories whose `status` column matches the given
+/// value. Results are sorted with the most recently updated first.
 pub async fn search_by_status(
     db: &SqlitePool,
     status: &str,
@@ -156,6 +168,14 @@ pub async fn search_by_status(
     .await?;
 
     rows.into_iter().map(row_to_memory).collect()
+}
+
+/// Return the most recently updated active memories.
+///
+/// Convenience wrapper around [`search_by_status`] used as the fallback
+/// when FTS5 yields no results.
+async fn recent_active_memories(db: &SqlitePool, limit: usize) -> Result<Vec<Memory>, MemoryError> {
+    search_by_status(db, "active", limit).await
 }
 
 // ---------------------------------------------------------------------------

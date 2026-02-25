@@ -23,7 +23,7 @@ use crate::agent::context::{
 use crate::agent::policy::{check_policy, PolicyContext, PolicyDecision};
 use crate::agent::TelegramOutbound;
 use crate::config::{AgentConfig, Config};
-use crate::memory::{ConversationEntry, MemoryEngine, TrustSource};
+use crate::memory::{ConversationEntry, Memory, MemoryEngine, MemoryStatus, TrustSource};
 use crate::providers::router::ModelRouter;
 use crate::providers::{CompletionRequest, ContentPart, Message, MessageContent, Role, StopReason};
 use crate::tools::ToolRouter;
@@ -96,7 +96,7 @@ impl std::fmt::Debug for SessionConfig {
 // Main session loop
 // ---------------------------------------------------------------------------
 
-// Duration of inactivity before triggering observer extraction.
+/// Duration of inactivity before triggering observer extraction.
 const OBSERVER_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run a session, processing events until shutdown or channel close.
@@ -109,6 +109,34 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
     info!(session_id = %cfg.session_id, user_id = cfg.user_id, "session started");
 
     let mut conversation: Vec<Message> = Vec::new();
+
+    // Bootstrap: fetch recent active memories so the first turn has context
+    // about prior interactions. Prevents "cognitive cold start" where the
+    // agent has no awareness of what it previously learned.
+    // Bounded by a timeout so a contended database cannot delay session start.
+    let mut bootstrap_memories = match tokio::time::timeout(
+        Duration::from_secs(2),
+        cfg.memory.search_by_status(MemoryStatus::Active, 5),
+    )
+    .await
+    {
+        Ok(Ok(mems)) => mems,
+        Ok(Err(e)) => {
+            warn!(error = %e, "bootstrap memory fetch failed, proceeding without");
+            Vec::new()
+        }
+        Err(_) => {
+            warn!("bootstrap memory fetch timed out, proceeding without");
+            Vec::new()
+        }
+    };
+    if !bootstrap_memories.is_empty() {
+        debug!(
+            count = bootstrap_memories.len(),
+            "loaded bootstrap memories for session"
+        );
+    }
+
     let mut last_turn_had_activity = false;
     // Track which warning threshold was last shown to avoid repeating.
     let mut last_warned_percent: u8 = 0;
@@ -176,6 +204,7 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     &mut conversation,
                     &mut last_warned_percent,
                     &mut compacted_this_session,
+                    &mut bootstrap_memories,
                 )
                 .await;
             }
@@ -187,6 +216,7 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     result,
                     &mut last_warned_percent,
                     &mut compacted_this_session,
+                    &mut bootstrap_memories,
                 )
                 .await;
             }
@@ -214,15 +244,15 @@ const OVERFLOW_TRIM_FRACTION: f64 = 0.5;
 /// Execute one full agent reasoning turn (may involve multiple LLM calls).
 ///
 /// The inner loop continues as long as the LLM returns `StopReason::ToolUse`,
-/// executing each tool call and feeding results back.
-///
-/// `last_warned_percent` tracks which budget warning threshold was last shown
-/// to the user, so warnings are only injected once per threshold crossing.
+/// executing each tool call and feeding results back. `bootstrap_memories`
+/// are merged into the first turn's context and drained so that subsequent
+/// turns rely solely on query-driven memory search.
 async fn run_agent_turn(
     cfg: &SessionConfig,
     conversation: &mut Vec<Message>,
     last_warned_percent: &mut u8,
     compacted_this_session: &mut bool,
+    bootstrap_memories: &mut Vec<Memory>,
 ) {
     let mut tool_call_count: u32 = 0;
 
@@ -283,7 +313,8 @@ async fn run_agent_turn(
 
     loop {
         // Step 1: Search for relevant memories
-        let memories = match cfg.memory.search(&last_user_text(conversation), 5).await {
+        let last_query = last_user_text(conversation);
+        let mut memories = match cfg.memory.search(&last_query, 5).await {
             Ok(mems) => mems,
             Err(e) => {
                 warn!(error = %e, "memory search failed, proceeding without memories");
@@ -291,13 +322,15 @@ async fn run_agent_turn(
             }
         };
 
+        // Merge bootstrap memories (consumed on first turn only).
+        merge_bootstrap_memories(&mut memories, bootstrap_memories);
+
         // Step 2: Assemble system prompt
         let pending_approvals = cfg.approval_manager.pending_count(&cfg.session_id);
         let current_time = chrono::Utc::now()
             .format("%Y-%m-%d %H:%M:%S UTC")
             .to_string();
 
-        let last_query = last_user_text(conversation);
         let tools = cfg.tool_router.tool_definitions(
             cfg.config.budget.max_dynamic_tools_per_turn,
             Some(&last_query),
@@ -532,13 +565,15 @@ async fn run_agent_turn(
 // ---------------------------------------------------------------------------
 
 /// Handle a resolved approval by executing the tool (if approved) and
-/// feeding the result back into the conversation.
+/// feeding the result back into the conversation, then triggering another
+/// agent turn.
 async fn handle_approval_resolved(
     cfg: &SessionConfig,
     conversation: &mut Vec<Message>,
     result: ApprovalResult,
     last_warned_percent: &mut u8,
     compacted_this_session: &mut bool,
+    bootstrap_memories: &mut Vec<Memory>,
 ) {
     match result {
         ApprovalResult::Approved {
@@ -580,6 +615,7 @@ async fn handle_approval_resolved(
                 conversation,
                 last_warned_percent,
                 compacted_this_session,
+                bootstrap_memories,
             )
             .await;
         }
@@ -598,6 +634,7 @@ async fn handle_approval_resolved(
                 conversation,
                 last_warned_percent,
                 compacted_this_session,
+                bootstrap_memories,
             )
             .await;
         }
@@ -616,6 +653,35 @@ async fn handle_approval_resolved(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Maximum combined memories (query results + bootstrap) to feed into context.
+const MAX_CONTEXT_MEMORIES: usize = 10;
+
+/// Merge bootstrap memories into the query results, deduplicating by id.
+///
+/// Bootstrap memories are loaded once at session start to prevent "cognitive
+/// cold start". They are drained on first call so subsequent turns use only
+/// query-driven results.
+fn merge_bootstrap_memories(memories: &mut Vec<Memory>, bootstrap: &mut Vec<Memory>) {
+    if bootstrap.is_empty() {
+        return;
+    }
+
+    // Both query results and bootstrap memories come from the database and
+    // always have Some(id). Deduplicate on the id value, skipping None to
+    // avoid accidentally collapsing unpersisted entries.
+    let existing_ids: std::collections::HashSet<i64> =
+        memories.iter().filter_map(|m| m.id).collect();
+
+    for mem in bootstrap.drain(..) {
+        if mem.id.is_none_or(|id| !existing_ids.contains(&id)) {
+            memories.push(mem);
+        }
+    }
+
+    // Cap to avoid oversized system prompts.
+    memories.truncate(MAX_CONTEXT_MEMORIES);
+}
 
 /// Extract plain text from assistant response content parts.
 fn extract_assistant_text(parts: &[ContentPart]) -> String {
