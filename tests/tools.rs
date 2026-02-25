@@ -6,6 +6,8 @@ mod browser_test;
 mod core_test;
 #[path = "tools/create_tool_test.rs"]
 mod create_tool_test;
+#[path = "tools/docker_test.rs"]
+mod docker_test;
 #[path = "tools/registry_test.rs"]
 mod registry_test;
 #[path = "tools/tool_router_test.rs"]

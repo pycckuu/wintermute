@@ -7,6 +7,7 @@
 pub mod browser;
 pub mod core;
 pub mod create_tool;
+pub mod docker;
 pub mod registry;
 
 use std::sync::Arc;
@@ -121,6 +122,8 @@ pub struct ToolRouter {
     browser_limiter: Arc<RateLimiter>,
     /// Optional browser bridge; when None, browser tool returns unavailable.
     browser_bridge: Option<Arc<dyn BrowserBridge>>,
+    /// Optional Docker client for docker_manage; when None, tool returns unavailable.
+    docker_client: Option<bollard::Docker>,
 }
 
 impl std::fmt::Debug for ToolRouter {
@@ -144,6 +147,7 @@ impl ToolRouter {
         request_limiter: Arc<RateLimiter>,
         browser_limiter: Arc<RateLimiter>,
         browser_bridge: Option<Arc<dyn BrowserBridge>>,
+        docker_client: Option<bollard::Docker>,
     ) -> Self {
         Self {
             executor,
@@ -155,6 +159,7 @@ impl ToolRouter {
             request_limiter,
             browser_limiter,
             browser_bridge,
+            docker_client,
         }
     }
 
@@ -225,6 +230,10 @@ impl ToolRouter {
             "create_tool" => into_tool_result(
                 core::handle_create_tool(&*self.executor, &self.registry, input).await,
             ),
+            "docker_manage" => match &self.docker_client {
+                Some(client) => into_tool_result(docker::docker_manage(client, input).await),
+                None => ToolResult::error("docker not available"),
+            },
             _ => {
                 if let Some(schema) = self.registry.get(name) {
                     self.registry.record_usage(name);
@@ -286,6 +295,9 @@ impl ToolRouter {
         let mut defs = core::core_tool_definitions();
         if self.browser_bridge.is_none() {
             defs.retain(|def| def.name != "browser");
+        }
+        if self.docker_client.is_some() {
+            defs.push(docker::docker_manage_tool_definition());
         }
         let max_dynamic = match usize::try_from(max_dynamic) {
             Ok(value) => value,

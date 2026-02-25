@@ -2,6 +2,8 @@
 
 #[path = "heartbeat/backup_test.rs"]
 mod backup_test;
+#[path = "heartbeat/digest_test.rs"]
+mod digest_test;
 #[path = "heartbeat/health_test.rs"]
 mod health_test;
 #[path = "heartbeat/scheduler_test.rs"]

@@ -57,6 +57,7 @@ fn make_agent_config() -> AgentConfig {
         heartbeat: HeartbeatConfig::default(),
         learning: LearningConfig::default(),
         scheduled_tasks: vec![],
+        services: vec![],
     }
 }
 
@@ -86,10 +87,6 @@ impl wintermute::executor::Executor for TestExecutor {
             kind: ExecutorKind::Direct,
             details: "test".to_owned(),
         })
-    }
-
-    fn has_network_isolation(&self) -> bool {
-        false
     }
 
     fn scripts_dir(&self) -> &std::path::Path {
@@ -179,6 +176,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));
@@ -199,6 +197,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         pid_file: tmp_dir.path().join("wintermute.pid"),
         health_json: tmp_dir.path().join("health.json"),
         identity_md: tmp_dir.path().join("IDENTITY.md"),
+        user_md: tmp_dir.path().join("USER.md"),
     };
 
     let session_router = SessionRouter::new(

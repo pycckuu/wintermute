@@ -79,6 +79,8 @@ pub struct SessionConfig {
     pub observer_tx: Option<mpsc::Sender<ObserverEvent>>,
     /// Loaded System Identity Document content (from IDENTITY.md).
     pub identity_document: Option<String>,
+    /// Loaded USER.md content (consolidated long-term memory).
+    pub user_md_content: Option<String>,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -304,6 +306,7 @@ async fn run_agent_turn(
         let system_prompt = assemble_system_prompt(
             &cfg.agent_config.personality.soul,
             cfg.identity_document.as_deref(),
+            cfg.user_md_content.as_deref(),
             cfg.policy_context.executor_kind,
             tools.len().saturating_sub(core_tool_count),
             &memories,

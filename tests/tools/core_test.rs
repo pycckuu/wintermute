@@ -13,7 +13,8 @@ use wintermute::executor::{
 };
 use wintermute::memory::{Memory, MemoryEngine, MemoryKind, MemorySource, MemoryStatus};
 use wintermute::tools::core::{
-    core_tool_definitions, execute_command, memory_save, memory_search, web_request,
+    core_tool_definitions, execute_command, memory_save, memory_search, validate_save_path,
+    web_request,
 };
 
 // ---------------------------------------------------------------------------
@@ -52,10 +53,6 @@ impl Executor for MockExecutor {
             kind: ExecutorKind::Direct,
             details: "mock".to_owned(),
         })
-    }
-
-    fn has_network_isolation(&self) -> bool {
-        false
     }
 
     fn scripts_dir(&self) -> &Path {
@@ -335,4 +332,54 @@ async fn memory_save_rejects_missing_content() {
     assert!(result.is_err());
 
     engine.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// web_fetch save_to path validation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_save_path_accepts_workspace_path() {
+    assert!(validate_save_path("/workspace/file.bin").is_ok());
+}
+
+#[test]
+fn validate_save_path_accepts_nested_workspace_path() {
+    assert!(validate_save_path("/workspace/sub/dir/file.tar.gz").is_ok());
+}
+
+#[test]
+fn validate_save_path_rejects_non_workspace_path() {
+    assert!(validate_save_path("/tmp/file.bin").is_err());
+}
+
+#[test]
+fn validate_save_path_rejects_root_path() {
+    assert!(validate_save_path("/etc/passwd").is_err());
+}
+
+#[test]
+fn validate_save_path_rejects_traversal() {
+    assert!(validate_save_path("/workspace/../etc/passwd").is_err());
+}
+
+#[test]
+fn validate_save_path_rejects_relative_path() {
+    assert!(validate_save_path("workspace/file.bin").is_err());
+}
+
+#[test]
+fn web_fetch_definition_includes_save_to_property() {
+    let defs = core_tool_definitions();
+    let fetch_def = defs
+        .iter()
+        .find(|d| d.name == "web_fetch")
+        .expect("web_fetch should exist");
+    let props = fetch_def.input_schema["properties"]
+        .as_object()
+        .expect("should have properties");
+    assert!(
+        props.contains_key("save_to"),
+        "web_fetch should have save_to property"
+    );
 }

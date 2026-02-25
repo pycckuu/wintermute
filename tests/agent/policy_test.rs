@@ -246,6 +246,64 @@ fn policy_denies_dangerous_commands_in_direct_mode() {
     }
 }
 
+// ---------- docker_manage policy tests ----------
+
+#[test]
+fn policy_requires_approval_for_docker_run() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "run", "image": "postgres:16"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::RequireApproval);
+}
+
+#[test]
+fn policy_requires_approval_for_docker_pull() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "pull", "image": "redis:latest"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::RequireApproval);
+}
+
+#[test]
+fn policy_allows_docker_ps() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "ps"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_allows_docker_logs() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "logs", "container": "my-pg"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_allows_docker_stop() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "stop", "container": "my-pg"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_allows_docker_exec() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "exec", "container": "my-pg", "args": {"command": "psql -c 'SELECT 1'"}});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
+#[test]
+fn policy_allows_docker_inspect() {
+    let ctx = default_ctx(ExecutorKind::Docker);
+    let input = serde_json::json!({"action": "inspect", "container": "my-pg"});
+    let result = check_policy("docker_manage", &input, &ctx, &always_false);
+    assert_eq!(result, PolicyDecision::Allow);
+}
+
 // ---------- rate limiter tests ----------
 
 #[test]

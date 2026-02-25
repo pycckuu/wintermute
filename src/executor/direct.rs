@@ -87,10 +87,6 @@ impl Executor for DirectExecutor {
         })
     }
 
-    fn has_network_isolation(&self) -> bool {
-        false
-    }
-
     fn scripts_dir(&self) -> &Path {
         &self.scripts_dir
     }

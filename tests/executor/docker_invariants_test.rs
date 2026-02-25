@@ -9,16 +9,28 @@ fn docker_source() -> String {
 }
 
 #[test]
-fn docker_container_config_disables_network() {
+fn docker_container_network_uses_proxy_or_none() {
     let source = docker_source();
-    assert!(source.contains("network_mode: Some(\"none\".to_owned())"));
+    // Network mode is parameterized: proxy network when available, "none" as fallback.
+    assert!(source.contains("network_name"));
+    assert!(source.contains(".unwrap_or_else(|| \"none\".to_owned())"));
 }
 
 #[test]
-fn docker_exec_and_container_env_are_empty() {
+fn docker_container_env_sets_proxy_vars() {
     let source = docker_source();
-    let empty_env_mentions = source.matches("env: Some(Vec::new())").count();
-    assert!(empty_env_mentions >= 2);
+    // Container env sets proxy variables for egress routing.
+    assert!(source.contains("HTTP_PROXY="));
+    assert!(source.contains("HTTPS_PROXY="));
+    assert!(source.contains("http_proxy="));
+    assert!(source.contains("https_proxy="));
+}
+
+#[test]
+fn docker_exec_env_is_empty() {
+    let source = docker_source();
+    // Exec env must remain empty (inherits container env, no extra secrets).
+    assert!(source.contains("env: Some(Vec::new())"));
 }
 
 #[test]

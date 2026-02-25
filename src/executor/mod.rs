@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 pub mod direct;
 pub mod docker;
+pub mod egress;
 pub mod redactor;
 
 /// Executor implementation kind.
@@ -126,8 +127,6 @@ pub trait Executor: Send + Sync {
     async fn execute(&self, command: &str, opts: ExecOptions) -> Result<ExecResult, ExecutorError>;
     /// Check health for this executor instance.
     async fn health_check(&self) -> Result<HealthStatus, ExecutorError>;
-    /// Whether this executor provides network isolation.
-    fn has_network_isolation(&self) -> bool;
     /// Returns scripts directory for dynamic tools.
     fn scripts_dir(&self) -> &Path;
     /// Returns workspace directory for command execution.

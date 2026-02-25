@@ -5,6 +5,7 @@
 //! health checks, and writes a health report to disk.
 
 pub mod backup;
+pub mod digest;
 pub mod health;
 pub mod scheduler;
 
@@ -154,7 +155,6 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
     let snap = IdentitySnapshot {
         model_id: deps.config.models.default.clone(),
         executor_kind: deps.executor.kind(),
-        has_network_isolation: deps.executor.has_network_isolation(),
         core_tool_count: crate::tools::core::core_tool_definitions().len(),
         dynamic_tool_count,
         active_memory_count: active_count,
