@@ -77,16 +77,24 @@ pub fn build_consolidation_prompt(current_user_md: &str, memories: &[String]) ->
 
 /// Archive memories older than `cutoff_days` by setting their status to `Archived`.
 ///
+/// When `prefetched` is provided, those memories are used instead of re-querying.
 /// Returns the number of memories archived.
 pub async fn archive_stale_memories(
     memory: &Arc<MemoryEngine>,
     cutoff_days: u64,
+    prefetched: Option<&[crate::memory::Memory]>,
 ) -> anyhow::Result<u64> {
-    // Fetch all active memories (reasonable upper bound for iteration).
-    let all_active = memory
-        .search_by_status(MemoryStatus::Active, 10_000)
-        .await
-        .context("failed to fetch active memories")?;
+    let owned_memories;
+    let all_active = match prefetched {
+        Some(mems) => mems,
+        None => {
+            owned_memories = memory
+                .search_by_status(MemoryStatus::Active, 10_000)
+                .await
+                .context("failed to fetch active memories")?;
+            &owned_memories
+        }
+    };
 
     let days_i64 = i64::try_from(cutoff_days).unwrap_or(90);
     let cutoff = match chrono::Utc::now().checked_sub_signed(chrono::Duration::days(days_i64)) {
@@ -102,7 +110,7 @@ pub async fn archive_stale_memories(
     let cutoff_str = cutoff.to_rfc3339();
 
     let mut archived = 0u64;
-    for mem in &all_active {
+    for mem in all_active {
         let is_stale = mem
             .updated_at
             .as_deref()
@@ -175,8 +183,9 @@ pub async fn prepare_digest(
 
     let memory_contents: Vec<String> = active_memories.iter().map(|m| m.content.clone()).collect();
 
-    // Archive stale entries.
-    let archived_count = archive_stale_memories(memory, cutoff_days).await?;
+    // Archive stale entries (reuses the already-fetched list to avoid a second query).
+    let archived_count =
+        archive_stale_memories(memory, cutoff_days, Some(&active_memories)).await?;
 
     // Build the consolidation prompt.
     let prompt = build_consolidation_prompt(&current_user_md, &memory_contents);

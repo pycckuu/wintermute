@@ -94,6 +94,7 @@ async fn build_router(executor: Arc<dyn Executor>, redactor: Redactor) -> ToolRo
         browser_limiter,
         None,
         None,
+        None,
     )
 }
 
@@ -296,6 +297,7 @@ async fn browser_output_is_redacted_when_bridge_is_configured() {
         browser_limiter,
         Some(Arc::new(SecretBrowserBridge)),
         None,
+        None,
     );
 
     let input = json!({"action": "close"});
@@ -340,6 +342,7 @@ async fn tool_definitions_returns_core_plus_dynamic() {
         fetch_limiter,
         request_limiter,
         browser_limiter,
+        None,
         None,
         None,
     );
@@ -403,6 +406,7 @@ async fn tool_definitions_respects_max_dynamic_limit() {
         browser_limiter,
         None,
         None,
+        None,
     );
 
     // max_dynamic = 1, so total should be 7 visible core + 1 dynamic = 8.
@@ -459,6 +463,7 @@ async fn tool_definitions_with_query_prefers_relevant_dynamic_tool() {
         browser_limiter,
         None,
         None,
+        None,
     );
 
     let defs = router.tool_definitions(1, Some("weather forecast"));
@@ -488,6 +493,7 @@ async fn tool_definitions_include_browser_when_bridge_is_configured() {
         request_limiter,
         browser_limiter,
         Some(Arc::new(SecretBrowserBridge)),
+        None,
         None,
     );
 

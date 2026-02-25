@@ -235,7 +235,7 @@ async fn handle_start() -> anyhow::Result<()> {
 
     let fetch_limiter = Arc::new(RateLimiter::new(60, config.egress.fetch_rate_limit));
     let request_limiter = Arc::new(RateLimiter::new(60, config.egress.request_rate_limit));
-    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
+    let browser_limiter = Arc::new(RateLimiter::new(60, config.egress.browser_rate_limit));
 
     let policy_context = PolicyContext {
         allowed_domains: config.egress.allowed_domains.clone(),
@@ -257,6 +257,7 @@ async fn handle_start() -> anyhow::Result<()> {
         browser_limiter,
         None, // No browser bridge configured; tool returns unavailable when called
         docker_client,
+        Some(u64::from(config.egress.max_file_download_mb).saturating_mul(1024 * 1024)),
     ));
 
     let config_arc = Arc::new(config);
