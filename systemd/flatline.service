@@ -1,3 +1,5 @@
+# User-level unit. Install to ~/.config/systemd/user/
+# Manage with: systemctl --user enable --now flatline
 [Unit]
 Description=Flatline Supervisor for Wintermute
 After=wintermute.service docker.service
