@@ -16,6 +16,7 @@ use tokio_stream::StreamExt;
 
 use crate::config::{Config, RuntimePaths, SandboxConfig};
 
+use super::egress::EgressProxy;
 use super::redactor::Redactor;
 use super::{ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, HealthStatus};
 
@@ -47,6 +48,7 @@ pub struct DockerExecutor {
     scripts_dir: PathBuf,
     workspace_dir: PathBuf,
     redactor: Redactor,
+    egress_proxy: Option<EgressProxy>,
 }
 
 impl DockerExecutor {
@@ -70,12 +72,17 @@ impl DockerExecutor {
         std::fs::create_dir_all(&scripts_dir)
             .map_err(|e| ExecutorError::Infrastructure(e.to_string()))?;
 
+        // Start egress proxy before sandbox so the network is ready.
+        let egress_proxy =
+            Some(EgressProxy::ensure(&docker, &config.egress.allowed_domains).await?);
+
         let instance = Self {
             docker,
             container_name: SANDBOX_CONTAINER_NAME.to_owned(),
             scripts_dir,
             workspace_dir,
             redactor,
+            egress_proxy,
         };
         instance.ensure_container(config).await?;
         Ok(instance)
@@ -96,6 +103,7 @@ impl DockerExecutor {
             scripts_dir,
             workspace_dir,
             redactor,
+            egress_proxy: None,
         })
     }
 
@@ -167,8 +175,13 @@ impl DockerExecutor {
     }
 
     async fn create_container(&self, config: &Config) -> Result<(), ExecutorError> {
-        let container_config =
-            build_container_config(&self.workspace_dir, &self.scripts_dir, &config.sandbox)?;
+        let container_config = build_container_config(
+            &self.workspace_dir,
+            &self.scripts_dir,
+            &config.sandbox,
+            self.egress_proxy.as_ref().map(|p| p.network_name()),
+            self.egress_proxy.as_ref().map(|p| p.proxy_address()),
+        )?;
 
         let options = Some(CreateContainerOptions {
             name: self.container_name.clone(),
@@ -318,10 +331,6 @@ impl Executor for DockerExecutor {
         }
     }
 
-    fn has_network_isolation(&self) -> bool {
-        true
-    }
-
     fn scripts_dir(&self) -> &Path {
         &self.scripts_dir
     }
@@ -336,11 +345,17 @@ impl Executor for DockerExecutor {
 }
 
 /// Build a container configuration for the sandbox.
+///
+/// When `network_name` and `proxy_address` are provided, the sandbox joins
+/// the egress proxy network with HTTP(S) proxy environment variables set.
+/// When absent, the sandbox runs with `network: none` (test/fallback mode).
 #[doc(hidden)]
 pub fn build_container_config(
     workspace_dir: &Path,
     scripts_dir: &Path,
     sandbox: &SandboxConfig,
+    network_name: Option<&str>,
+    proxy_address: Option<&str>,
 ) -> Result<ContainerConfig<String>, ExecutorError> {
     let memory_limit = i64::from(sandbox.memory_mb)
         .saturating_mul(1024)
@@ -351,8 +366,12 @@ pub fn build_container_config(
     let mut tmpfs: HashMap<String, String> = HashMap::new();
     tmpfs.insert("/tmp".to_owned(), "rw,size=512m".to_owned());
 
+    let network_mode = network_name
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "none".to_owned());
+
     let host_config = HostConfig {
-        network_mode: Some("none".to_owned()),
+        network_mode: Some(network_mode),
         readonly_rootfs: Some(true),
         cap_drop: Some(vec!["ALL".to_owned()]),
         security_opt: Some(vec!["no-new-privileges:true".to_owned()]),
@@ -368,12 +387,25 @@ pub fn build_container_config(
         ..Default::default()
     };
 
+    let env = match proxy_address {
+        Some(addr) => {
+            let proxy_url = format!("http://{addr}");
+            vec![
+                format!("HTTP_PROXY={proxy_url}"),
+                format!("HTTPS_PROXY={proxy_url}"),
+                format!("http_proxy={proxy_url}"),
+                format!("https_proxy={proxy_url}"),
+            ]
+        }
+        None => Vec::new(),
+    };
+
     Ok(ContainerConfig {
         image: Some(SANDBOX_IMAGE.to_owned()),
         cmd: Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
         user: Some("wintermute".to_owned()),
         working_dir: Some("/workspace".to_owned()),
-        env: Some(Vec::new()),
+        env: Some(env),
         host_config: Some(host_config),
         ..Default::default()
     })

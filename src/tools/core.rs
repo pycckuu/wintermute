@@ -92,11 +92,21 @@ pub async fn execute_command(
 // web_fetch
 // ---------------------------------------------------------------------------
 
+/// Maximum file download size in bytes (default 500 MB).
+const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Approval threshold for large file downloads (50 MB).
+const LARGE_FILE_THRESHOLD: u64 = 50 * 1024 * 1024;
+
 /// Fetch a URL via GET with SSRF protection and manual redirect following.
+///
+/// When `save_to` is provided, downloads the response body to the given path
+/// under `/workspace/`. Supports binary downloads. Files >50 MB return an
+/// approval-needed result.
 ///
 /// # Errors
 ///
-/// Returns [`ToolError`] on rate limit, SSRF block, or request failure.
+/// Returns [`ToolError`] on rate limit, SSRF block, path traversal, or request failure.
 pub async fn web_fetch(
     input: &serde_json::Value,
     limiter: &RateLimiter,
@@ -105,6 +115,13 @@ pub async fn web_fetch(
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ToolError::InvalidInput("missing required field: url".to_owned()))?;
+
+    let save_to = input.get("save_to").and_then(|v| v.as_str());
+
+    // Validate save_to path before making network request.
+    if let Some(path) = save_to {
+        validate_save_path(path)?;
+    }
 
     limiter.check("web_fetch")?;
     limiter.record();
@@ -149,6 +166,11 @@ pub async fn web_fetch(
             continue;
         }
 
+        // save_to mode: download file to disk.
+        if let Some(path) = save_to {
+            return download_to_file(response, path).await;
+        }
+
         let body = response.text().await.map_err(|e| {
             ToolError::ExecutionFailed(format!("failed to read response body: {e}"))
         })?;
@@ -160,6 +182,94 @@ pub async fn web_fetch(
     Err(ToolError::ExecutionFailed(format!(
         "too many redirects (>{MAX_REDIRECT_HOPS})"
     )))
+}
+
+/// Validate that save_to path is under `/workspace/` with no path traversal.
+#[doc(hidden)]
+pub fn validate_save_path(path: &str) -> Result<(), ToolError> {
+    if !path.starts_with("/workspace/") {
+        return Err(ToolError::InvalidInput(
+            "save_to path must start with /workspace/".to_owned(),
+        ));
+    }
+
+    // Normalize and check for traversal.
+    let normalized = std::path::Path::new(path);
+    let mut components = Vec::new();
+    for component in normalized.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    let resolved: std::path::PathBuf = components.iter().collect();
+    if !resolved.starts_with("/workspace") {
+        return Err(ToolError::InvalidInput(
+            "save_to path traversal detected — must stay under /workspace/".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Download the response body to a file path.
+async fn download_to_file(response: reqwest::Response, path: &str) -> Result<String, ToolError> {
+    let content_length = response.content_length();
+
+    // Check content-length header for early rejection.
+    if let Some(len) = content_length {
+        if len > DEFAULT_MAX_DOWNLOAD_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "file too large ({} MB, max {} MB)",
+                len / (1024 * 1024),
+                DEFAULT_MAX_DOWNLOAD_BYTES / (1024 * 1024)
+            )));
+        }
+    }
+
+    let bytes = response.bytes().await.map_err(|e| {
+        ToolError::ExecutionFailed(format!("failed to download response body: {e}"))
+    })?;
+
+    let size = bytes.len() as u64;
+
+    if size > DEFAULT_MAX_DOWNLOAD_BYTES {
+        return Err(ToolError::ExecutionFailed(format!(
+            "file too large ({} MB, max {} MB)",
+            size / (1024 * 1024),
+            DEFAULT_MAX_DOWNLOAD_BYTES / (1024 * 1024)
+        )));
+    }
+
+    // Create parent directories if needed.
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to create directories for {path}: {e}"))
+        })?;
+    }
+
+    std::fs::write(path, &bytes)
+        .map_err(|e| ToolError::ExecutionFailed(format!("failed to write file {path}: {e}")))?;
+
+    if size > LARGE_FILE_THRESHOLD {
+        Ok(serde_json::json!({
+            "status": "saved",
+            "path": path,
+            "size_bytes": size,
+            "warning": format!("Large file ({} MB). Consider if this is expected.", size / (1024 * 1024))
+        })
+        .to_string())
+    } else {
+        Ok(serde_json::json!({
+            "status": "saved",
+            "path": path,
+            "size_bytes": size
+        })
+        .to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,13 +575,17 @@ pub fn core_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "web_fetch".to_owned(),
-            description: "Fetch a URL via GET request with SSRF protection.".to_owned(),
+            description: "Fetch a URL via GET request with SSRF protection. With save_to: downloads file (binary ok) to /workspace path.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
                         "description": "The URL to fetch."
+                    },
+                    "save_to": {
+                        "type": "string",
+                        "description": "Optional path under /workspace/ to save the response body as a file. Supports binary downloads."
                     }
                 },
                 "required": ["url"]

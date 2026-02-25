@@ -4,6 +4,8 @@
 mod direct_policy_test;
 #[path = "executor/docker_invariants_test.rs"]
 mod docker_invariants_test;
+#[path = "executor/egress_test.rs"]
+mod egress_test;
 #[path = "executor/exec_result_test.rs"]
 mod exec_result_test;
 #[path = "executor/health_status_test.rs"]

@@ -22,9 +22,7 @@ pub struct IdentitySnapshot {
     pub model_id: String,
     /// Executor type (Docker or Direct).
     pub executor_kind: ExecutorKind,
-    /// Whether the executor has network isolation.
-    pub has_network_isolation: bool,
-    /// Number of core tools (always 8).
+    /// Number of core tools.
     pub core_tool_count: usize,
     /// Number of dynamic (agent-created) tools.
     pub dynamic_tool_count: usize,
@@ -55,7 +53,7 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
     let _ = writeln!(doc, "- Model: {}", snap.model_id);
 
     let executor_label = match snap.executor_kind {
-        ExecutorKind::Docker => "Docker sandbox (network-isolated container)",
+        ExecutorKind::Docker => "Docker sandbox (outbound via egress proxy)",
         ExecutorKind::Direct => "Direct mode (host-local, no container isolation)",
     };
     let _ = writeln!(doc, "- Executor: {executor_label}");
@@ -70,6 +68,17 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
     let _ = writeln!(doc, "- Uptime: {}", format_uptime(snap.uptime));
     doc.push('\n');
 
+    // Topology (Docker mode only)
+    if snap.executor_kind == ExecutorKind::Docker {
+        doc.push_str("## Topology\n");
+        doc.push_str("```\n");
+        doc.push_str("HOST → egress-proxy (Squid) → sandbox → service containers\n");
+        doc.push_str("```\n");
+        doc.push_str("- The sandbox runs your code. Service containers (databases, etc.) are managed via `docker_manage`.\n");
+        doc.push_str("- All outbound traffic from the sandbox goes through the egress proxy.\n");
+        doc.push('\n');
+    }
+
     // Tools
     doc.push_str("## Your Tools\n");
     let _ = writeln!(
@@ -82,6 +91,7 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
         "- {} custom tools (agent-created)",
         snap.dynamic_tool_count
     );
+    doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_telegram, create_tool, docker_manage\n");
     doc.push('\n');
 
     // Memory
@@ -107,12 +117,16 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
 
     // Privacy boundary
     doc.push_str("## Privacy Boundary\n");
-    if snap.has_network_isolation {
-        doc.push_str(
-            "- Your sandbox has NO network access. Use web_fetch/web_request for internet.\n",
-        );
-    } else {
-        doc.push_str("- Running in direct mode without network isolation. Be careful with outbound requests.\n");
+    match snap.executor_kind {
+        ExecutorKind::Docker => {
+            doc.push_str(
+                "- Your sandbox has network, but ALL traffic goes through an egress proxy.\n",
+            );
+            doc.push_str("- Only domains in the allowlist (config.toml) are reachable.\n");
+        }
+        ExecutorKind::Direct => {
+            doc.push_str("- Running in direct mode without network isolation. Be careful with outbound requests.\n");
+        }
     }
     doc.push_str("- POST to unknown domains requires user approval.\n");
     doc.push_str("- Everything in /scripts/ is git-versioned.\n");

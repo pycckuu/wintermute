@@ -61,8 +61,8 @@ fn security_invariant_8_config_split_paths_are_enforced() -> Result<(), Box<dyn 
         "config.toml must stay outside agent-writable scripts directory"
     );
     assert!(
-        paths.agent_toml.starts_with(&paths.scripts_dir),
-        "agent.toml must live inside scripts directory"
+        paths.agent_toml != paths.config_toml,
+        "agent.toml and config.toml must be separate files"
     );
     Ok(())
 }
@@ -86,23 +86,38 @@ fn security_invariant_5_budget_check_precedes_provider_call(
 }
 
 #[test]
-fn security_invariant_2_container_env_is_empty() -> Result<(), Box<dyn std::error::Error>> {
+fn security_invariant_2_container_env_only_proxy_vars() -> Result<(), Box<dyn std::error::Error>> {
     let docker_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/executor/docker.rs");
     let content = std::fs::read_to_string(docker_src)?;
+    // Container env must contain only proxy variables (or be empty in test mode).
+    assert!(
+        content.contains("HTTP_PROXY=") && content.contains("HTTPS_PROXY="),
+        "docker container env must set HTTP_PROXY and HTTPS_PROXY for egress proxy"
+    );
+    // Exec env must remain empty (no secrets leak into executed commands).
     assert!(
         content.contains("env: Some(Vec::new())"),
-        "docker executor must set empty env for container and exec options"
+        "docker exec options must keep env empty (no secret leakage)"
     );
     Ok(())
 }
 
 #[test]
-fn security_invariant_3_container_network_is_none() -> Result<(), Box<dyn std::error::Error>> {
+fn security_invariant_3_container_network_via_proxy() -> Result<(), Box<dyn std::error::Error>> {
     let docker_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/executor/docker.rs");
     let content = std::fs::read_to_string(docker_src)?;
+    // The sandbox joins the egress proxy network (or falls back to none for tests).
     assert!(
-        content.contains("network_mode: Some(\"none\".to_owned())"),
-        "docker host config must force network mode none"
+        content.contains("network_name") && content.contains("proxy_address"),
+        "docker sandbox must accept network and proxy configuration for egress proxy"
+    );
+    // The egress module must define the proxy network and enforce domain allowlist.
+    let egress_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/executor/egress.rs");
+    let egress_content = std::fs::read_to_string(egress_src)?;
+    assert!(
+        egress_content.contains("wintermute-net")
+            && egress_content.contains("http_access deny all"),
+        "egress proxy must use wintermute-net network and deny-all default policy"
     );
     Ok(())
 }

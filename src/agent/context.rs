@@ -28,13 +28,16 @@ const BYTES_PER_TOKEN: u64 = 4;
 /// Sections included:
 /// 1. Personality text (from `agent.toml`)
 /// 2. System Identity Document (SID) — self-knowledge about architecture and state
-/// 3. Environment: executor type and working directory context
-/// 4. Tool availability summary
-/// 5. Relevant memories (if any)
-/// 6. Current context: date/time and pending approvals
+/// 3. USER.md — consolidated long-term memory document
+/// 4. Environment: executor type and working directory context
+/// 5. Tool availability summary
+/// 6. Relevant memories (if any)
+/// 7. Current context: date/time and pending approvals
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_system_prompt(
     personality: &str,
     identity_document: Option<&str>,
+    user_md: Option<&str>,
     executor_kind: ExecutorKind,
     dynamic_tool_count: usize,
     memories: &[Memory],
@@ -55,19 +58,29 @@ pub fn assemble_system_prompt(
         }
     }
 
-    // Section 3: Environment
+    // Section 3: USER.md — consolidated long-term memory
+    // Trust boundary: USER.md is LLM-generated from active memories. Memory content
+    // originates from agent observations and user interactions. The redactor does not
+    // run on this path; malicious memory content could persist across sessions.
+    if let Some(umd) = user_md {
+        if !umd.is_empty() {
+            sections.push(format!("## Long-Term Memory\n{umd}"));
+        }
+    }
+
+    // Section 4: Environment
     let env_label = match executor_kind {
         ExecutorKind::Docker => "Docker sandbox (network-isolated container)",
         ExecutorKind::Direct => "Direct (host-local, restricted)",
     };
     sections.push(format!("## Environment\nExecutor: {env_label}"));
 
-    // Section 4: Tools
+    // Section 5: Tools
     sections.push(format!(
         "## Tools\nYou have access to core tools plus {dynamic_tool_count} dynamic tool(s)."
     ));
 
-    // Section 5: Memories
+    // Section 6: Memories
     if !memories.is_empty() {
         let mut memory_section = String::from("## Relevant Memories\n");
         for mem in memories {
@@ -77,7 +90,7 @@ pub fn assemble_system_prompt(
         sections.push(memory_section);
     }
 
-    // Section 6: Current context
+    // Section 7: Current context
     let mut ctx_section = format!("## Current Context\nDate/Time: {current_time}");
     if pending_approvals > 0 {
         ctx_section.push_str(&format!(
