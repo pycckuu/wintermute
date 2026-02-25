@@ -6,6 +6,8 @@ mod anthropic_test;
 mod http_response_test;
 #[path = "providers/ollama_test.rs"]
 mod ollama_test;
+#[path = "providers/openai_test.rs"]
+mod openai_test;
 #[path = "providers/provider_contract_test.rs"]
 mod provider_contract_test;
 #[path = "providers/router_test.rs"]

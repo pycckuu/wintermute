@@ -144,6 +144,7 @@ Two files. Clear ownership. No blocklists needed.
 ```toml
 [models]
 default = "anthropic/claude-sonnet-4-5-20250929"
+# default = "openai/gpt-5"
 
 [models.roles]
 observer = "ollama/qwen3:8b"
@@ -257,10 +258,13 @@ Example:
   deploy_check skill     → skills.deploy_check (claude-haiku)
 ```
 
-Two provider implementations in v1:
+Three provider implementations in v1:
 
 **AnthropicProvider** — native tool calling via /v1/messages. Streaming.
 Tool definitions as JSON schema in the request.
+
+**OpenAiProvider** — native tool calling via /v1/chat/completions.
+Tool definitions passed with `tools` function schema.
 
 **OllamaProvider** — native tool calling via /api/chat with `tools` param.
 Structured output via `format` param (GBNF grammar enforcement).
