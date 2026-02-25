@@ -1,0 +1,15 @@
+[Unit]
+Description=Wintermute AI Agent
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=%h/.wintermute/bin/wintermute start
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=-%h/.wintermute/.env
+
+[Install]
+WantedBy=default.target
