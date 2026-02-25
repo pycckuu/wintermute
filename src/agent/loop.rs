@@ -264,10 +264,11 @@ async fn run_agent_turn(
                                 u64::from(response.usage.input_tokens),
                                 u64::from(response.usage.output_tokens),
                             );
-                            // Safety: messages being summarized already passed through
-                            // the redactor at the tool output layer (ToolRouter::execute_for_user).
-                            // The summary cannot introduce secrets beyond the redacted history.
-                            *conversation = apply_compaction(&summary, plan.messages_to_keep);
+                            // Compaction output is model-authored text and therefore untrusted.
+                            // Redact before inserting it into long-lived conversation state.
+                            let redacted_summary = cfg.tool_router.redactor().redact(&summary);
+                            *conversation =
+                                apply_compaction(&redacted_summary, plan.messages_to_keep);
                             *compacted_this_session = true;
                             info!("context compaction applied");
                         }

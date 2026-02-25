@@ -52,7 +52,7 @@ pub struct HeartbeatDeps {
 
 /// Run the heartbeat background loop.
 ///
-/// Ticks every `interval_secs` from [`HeartbeatConfig`]. Each tick evaluates
+/// Ticks every `interval_secs` from [`crate::config::HeartbeatConfig`]. Each tick evaluates
 /// cron schedules for due tasks, runs health checks, and writes `health.json`.
 ///
 /// Exits when the shutdown signal is received or the watch channel closes.

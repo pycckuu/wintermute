@@ -175,6 +175,11 @@ impl ToolRouter {
         self.execute_for_user(name, input, None).await
     }
 
+    /// Return the shared output redactor used by this router.
+    pub fn redactor(&self) -> &Redactor {
+        &self.redactor
+    }
+
     /// Execute a tool with optional session user context.
     ///
     /// When `session_user_id` is provided, it is used by tools that need an
