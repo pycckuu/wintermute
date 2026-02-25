@@ -158,6 +158,7 @@ bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
 allowed_users = [123456789]
 
 [sandbox]
+# image = "ghcr.io/pycckuu/wintermute-sandbox:latest"  # or pin a version tag
 memory_mb = 2048
 cpu_cores = 2.0
 # runtime = "runsc"  # optional: gVisor for stronger isolation

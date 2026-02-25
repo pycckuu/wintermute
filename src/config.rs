@@ -60,7 +60,7 @@ pub struct AgentConfig {
 }
 
 /// Docker service definition persisted by the agent.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
     /// Service name (e.g. "ollama").
     pub name: String,
@@ -133,6 +133,10 @@ impl Default for PersonalityConfig {
 /// Sandbox resource limits.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxConfig {
+    /// Docker image for the sandbox container.
+    #[serde(default = "default_sandbox_image")]
+    pub image: String,
+
     /// Memory limit in megabytes.
     #[serde(default = "default_memory_mb")]
     pub memory_mb: u32,
@@ -149,6 +153,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            image: default_sandbox_image(),
             memory_mb: default_memory_mb(),
             cpu_cores: default_cpu_cores(),
             runtime: None,
@@ -360,6 +365,9 @@ pub struct RuntimePaths {
 
 fn default_personality_name() -> String {
     "Wintermute".to_owned()
+}
+fn default_sandbox_image() -> String {
+    "ghcr.io/pycckuu/wintermute-sandbox:latest".to_owned()
 }
 fn default_memory_mb() -> u32 {
     2048

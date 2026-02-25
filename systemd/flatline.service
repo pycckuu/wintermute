@@ -1,0 +1,14 @@
+[Unit]
+Description=Flatline Supervisor for Wintermute
+After=wintermute.service docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=%h/.wintermute/bin/flatline start
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=-%h/.wintermute/.env
+
+[Install]
+WantedBy=default.target

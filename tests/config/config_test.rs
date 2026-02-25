@@ -25,6 +25,7 @@ fn default_budget_values() {
 #[test]
 fn default_sandbox_values() {
     let sandbox = SandboxConfig::default();
+    assert_eq!(sandbox.image, "ghcr.io/pycckuu/wintermute-sandbox:latest");
     assert_eq!(sandbox.memory_mb, 2048);
     assert!((sandbox.cpu_cores - 2.0).abs() < f64::EPSILON);
     assert!(sandbox.runtime.is_none());
