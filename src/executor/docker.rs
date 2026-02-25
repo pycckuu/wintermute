@@ -20,7 +20,6 @@ use super::egress::EgressProxy;
 use super::redactor::Redactor;
 use super::{ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, HealthStatus};
 
-const SANDBOX_IMAGE: &str = "wintermute-sandbox:latest";
 const SANDBOX_CONTAINER_NAME: &str = "wintermute-sandbox";
 const RESET_REQUIREMENTS_COMMAND: &str =
     "if [ -f /scripts/requirements.txt ]; then pip install --user -r /scripts/requirements.txt; fi";
@@ -401,7 +400,7 @@ pub fn build_container_config(
     };
 
     Ok(ContainerConfig {
-        image: Some(SANDBOX_IMAGE.to_owned()),
+        image: Some(sandbox.image.clone()),
         cmd: Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
         user: Some("wintermute".to_owned()),
         working_dir: Some("/workspace".to_owned()),

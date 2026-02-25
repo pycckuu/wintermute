@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        if: ${{ !matrix.cross }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: ${{ matrix.cross }}
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARGET="${{ matrix.target }}"
+          ARCHIVE="wintermute-${VERSION}-${TARGET}"
+
+          mkdir -p "${ARCHIVE}"
+          cp "target/${TARGET}/release/wintermute" "${ARCHIVE}/"
+          cp "target/${TARGET}/release/flatline" "${ARCHIVE}/"
+          cp config.example.toml "${ARCHIVE}/"
+          cp flatline.toml.example "${ARCHIVE}/"
+          cp LICENSE "${ARCHIVE}/"
+          cp README.md "${ARCHIVE}/"
+
+          if [ -d systemd ]; then
+            cp -r systemd "${ARCHIVE}/"
+          fi
+
+          tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
+          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            wintermute-*.tar.gz
+            wintermute-*.tar.gz.sha256
+
+  sandbox-image:
+    name: Publish sandbox image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push sandbox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.sandbox
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/wintermute-sandbox:latest
+            ghcr.io/${{ github.repository_owner }}/wintermute-sandbox:${{ github.ref_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: [build, sandbox-image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Create checksums file
+        working-directory: dist
+        run: cat *.sha256 > checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/wintermute-*.tar.gz
+            dist/checksums.txt
