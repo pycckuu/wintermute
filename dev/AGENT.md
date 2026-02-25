@@ -13,10 +13,10 @@ See `DESIGN.md` for full architecture documentation.
 - **Agent Loop** — per-session Tokio tasks with non-blocking dispatch
   - Context Assembler, Model Router, Tool Router, Policy Gate, Approval Manager, Egress Controller, Budget Tracker, Redactor
 - **Executor** — DockerExecutor (production) or DirectExecutor (development), auto-detected
-- **Tools** — 8 core tools + dynamic tools (agent-created, hot-reloaded from /scripts/)
+- **Tools** — 9 core tools + dynamic tools (agent-created, hot-reloaded from /scripts/)
 - **Memory Engine** — SQLite with write-serialization actor, FTS5 search, optional vector (sqlite-vec)
 - **Observer** — staged learning with configurable promotion (auto/suggest/off)
-- **Heartbeat** — scheduled tasks, health checks, daily backup
+- **Heartbeat** — scheduled tasks, health checks, daily backup, weekly digest
 - **Model Router** — default model, per-role and per-skill overrides (Anthropic + Ollama providers)
 
 ## Project Structure
@@ -35,10 +35,12 @@ src/
 │   ├── mod.rs                 # Executor trait
 │   ├── docker.rs              # DockerExecutor (bollard, warm container)
 │   ├── direct.rs              # DirectExecutor (host, restricted dir)
+│   ├── egress.rs              # Egress proxy (Squid sidecar for sandbox outbound)
 │   └── redactor.rs            # Secret pattern redaction
 ├── tools/
 │   ├── mod.rs                 # Tool routing (core + dynamic)
-│   ├── core.rs                # 8 core tool implementations
+│   ├── core.rs                # Core tool implementations (execute_command, web_fetch, etc.)
+│   ├── docker.rs              # docker_manage tool (host-side Docker management)
 │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   ├── create_tool.rs         # create_tool implementation + git commit
 │   └── browser.rs             # Browser bridge (Playwright subprocess)
@@ -69,6 +71,7 @@ src/
     ├── mod.rs                 # Tick loop
     ├── scheduler.rs           # Cron evaluation + task dispatch
     ├── backup.rs              # git bundle + sqlite backup
+    ├── digest.rs              # Weekly memory digest (USER.md consolidation)
     └── health.rs              # Self-checks, log structured health
 flatline/src/                      # Flatline supervisor (separate crate)
 ├── main.rs                        # CLI + daemon loop
@@ -88,8 +91,8 @@ flatline/src/                      # Flatline supervisor (separate crate)
 These MUST hold in every commit. Violation is a blocking review finding.
 
 1. **No host executor** — `DockerExecutor` is the ONLY command execution path for user/LLM-generated commands. No `std::process::Command` or `tokio::process::Command` for user-controlled input on the host.
-2. **Container env always empty** — No secrets injected into container environment.
-3. **Container has no network** — Network mode is always `none`. All HTTP goes through host-side `web_fetch`/`web_request` tools.
+2. **Container env contains only proxy vars** — Only `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` pointing at the egress proxy. No secrets injected. Exec env inherits container env.
+3. **Container outbound goes through egress proxy** — Sandbox connects to `wintermute-net` Docker bridge. Squid proxy enforces domain allowlist. Falls back to `none` if proxy unavailable.
 4. **Egress controlled** — `web_fetch` is GET only (no body). `web_request` (POST/PUT/DELETE) is domain-allowlisted with approval for unknown domains. Browser follows same domain policy.
 5. **Budget limits are atomic** — Counters checked before every LLM call. No unchecked paths.
 6. **Inbound credential scanning** — User messages scanned for API key patterns before entering pipeline.
@@ -106,7 +109,7 @@ These MUST hold in every commit. Violation is a blocking review finding.
 4. `thiserror` for domain errors, `anyhow` for propagation
 5. `tracing` macros for logging — never `println!` or `eprintln!`
 6. Single-writer actor for all SQLite writes (mpsc channel to one Tokio task)
-7. Container env must always be empty (`HashMap::new()`)
+7. Container env must contain only proxy variables (no secrets, no config)
 8. Redactor is the single chokepoint for ALL tool output
 9. GNU `timeout` wraps every command executed in container
 10. Derive order: `Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize`
@@ -159,18 +162,19 @@ fn do_thing() -> Result<()> {
 - **Database**: sqlx with migrations in `migrations/` directory
 - **CLI**: clap with derive macros
 
-## Tools (8 core)
+## Tools (9 core)
 
 | Tool | Behavior | Rate Limit | Approval |
 |------|----------|------------|----------|
-| `execute_command` | Shell in container. Timeout-wrapped. No network. | None | Policy gate |
+| `execute_command` | Shell in container. Timeout-wrapped. Outbound via egress proxy. | None | Policy gate |
 | `create_tool` | Create/update dynamic tool in /scripts/ + git commit | None | No |
-| `web_fetch` | GET only, no body, SSRF filtered | 30/min | No |
+| `web_fetch` | GET only, no body, SSRF filtered. `save_to` mode for file downloads. | 30/min | No |
 | `web_request` | POST/PUT/etc, domain allowlist | 10/min | New domains |
 | `browser` | Playwright automation, domain policy. Host-side. | 60/min | New domains |
 | `memory_search` | FTS5 + optional vector search | None | No |
 | `memory_save` | Save a fact or procedure | None | No |
 | `send_telegram` | Send message/file to user | None | No |
+| `docker_manage` | Host-side Docker management (run/stop/rm/ps/logs/pull/exec/inspect). `wintermute=true` label enforced. | None | pull, run |
 
 ## Commit Convention
 

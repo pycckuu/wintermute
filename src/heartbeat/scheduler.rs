@@ -218,6 +218,18 @@ async fn execute_builtin(name: &str, deps: &HeartbeatDeps) -> anyhow::Result<Str
             .await?;
             Ok(format!("backup created at {}", result.backup_dir.display()))
         }
+        "digest" => {
+            let cutoff = super::digest::DEFAULT_STALE_CUTOFF_DAYS;
+            let (prompt, archived) =
+                super::digest::prepare_digest(&deps.memory, &deps.paths.user_md, cutoff).await?;
+            // The prompt is ready for LLM invocation. For now, write the prompt
+            // length and archive count as output. Full LLM integration requires
+            // a model call which is wired separately.
+            Ok(format!(
+                "digest prepared: prompt_len={}, archived={archived}",
+                prompt.len()
+            ))
+        }
         other => Err(anyhow::anyhow!("unknown builtin task: {other}")),
     }
 }

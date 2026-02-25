@@ -108,6 +108,7 @@ pub fn check_policy(
         "web_fetch" => PolicyDecision::Allow,
         "web_request" => check_domain_policy(input, ctx, is_domain_trusted),
         "browser" => check_browser_policy(input, ctx, is_domain_trusted),
+        "docker_manage" => check_docker_manage(input),
         "memory_search" | "memory_save" | "send_telegram" | "create_tool" => PolicyDecision::Allow,
         // Dynamic tools execute inside the sandbox via the executor, so they are allowed.
         _ => PolicyDecision::Allow,
@@ -167,6 +168,15 @@ fn check_browser_policy(
         return PolicyDecision::RequireApproval;
     }
     PolicyDecision::Allow
+}
+
+/// Check docker_manage: pull/run require approval, other actions are allowed.
+fn check_docker_manage(input: &serde_json::Value) -> PolicyDecision {
+    let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "pull" | "run" => PolicyDecision::RequireApproval,
+        _ => PolicyDecision::Allow,
+    }
 }
 
 /// Core domain evaluation logic shared by web_request and browser navigate.

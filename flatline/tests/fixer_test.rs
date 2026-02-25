@@ -50,7 +50,7 @@ fn temp_runtime_paths(dir: &tempfile::TempDir) -> RuntimePaths {
     RuntimePaths {
         root: root.clone(),
         config_toml: root.join("config.toml"),
-        agent_toml: scripts_dir.join("agent.toml"),
+        agent_toml: root.join("agent.toml"),
         env_file: root.join(".env"),
         scripts_dir,
         workspace_dir: root.join("workspace"),
@@ -60,6 +60,7 @@ fn temp_runtime_paths(dir: &tempfile::TempDir) -> RuntimePaths {
         pid_file: root.join("wintermute.pid"),
         health_json: root.join("health.json"),
         identity_md: root.join("IDENTITY.md"),
+        user_md: root.join("USER.md"),
     }
 }
 

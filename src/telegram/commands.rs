@@ -170,10 +170,8 @@ pub async fn handle_sandbox(executor: &dyn Executor) -> String {
     format!(
         "<b>Sandbox</b>\n\
          Kind: {:?}\n\
-         Network isolation: {}\n\
          Health: {}",
         executor.kind(),
-        executor.has_network_isolation(),
         escape_html(&health),
     )
 }

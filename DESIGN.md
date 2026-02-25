@@ -20,7 +20,7 @@ that orchestrated its own evolution.
 6. Over time: accumulates capabilities specific to YOUR needs
 ```
 
-Week 1: 8 built-in tools. Does everything through execute_command.
+Week 1: 9 built-in tools. Does everything through execute_command.
 Month 1: 20 custom tools it wrote itself. Common tasks are one-step.
 Month 6: A personal automation platform shaped by your usage.
 
@@ -59,19 +59,19 @@ uses sonnet). The user configures this, not the code.
 │  │                                                            │   │
 │  │  Telegram Adapter (teloxide)                               │   │
 │  │  ├── Input credential guard                                │   │
+│  │  ├── Media handler (download to /workspace/inbox/)         │   │
 │  │  ├── Message router (per-session, try_send, never blocks)  │   │
 │  │  └── File sending support                                  │   │
 │  │                                                            │   │
 │  │  Agent Loop                                                │   │
-│  │  ├── Context Assembler (trim, retry on overflow)           │   │
+│  │  ├── Context Assembler (trim, compact, retry on overflow)  │   │
 │  │  ├── Model Router (default → role → skill override)        │   │
 │  │  ├── Tool Router                                           │   │
-│  │  │   ├── Core Tools (8, built into binary)                 │   │
+│  │  │   ├── Core Tools (9, built into binary)                 │   │
 │  │  │   └── Dynamic Tools (from /scripts/*.json, hot-reload)  │   │
-│  │  ├── Policy Gate (approval for destructive + new domains)  │   │
+│  │  ├── Policy Gate (approval for new domains + images)       │   │
 │  │  ├── Approval Manager (non-blocking, short-ID callbacks)   │   │
-│  │  ├── Egress Controller (GET open, POST allowlisted)        │   │
-│  │  ├── Budget Tracker (atomic counters, per-session + daily, warnings at 70/85/95%) │   │
+│  │  ├── Budget Tracker (atomic, per-session + daily, 70/85/95% warnings) │
 │  │  └── Redactor (single chokepoint, all tool output)         │   │
 │  │                                                            │   │
 │  │  Memory Engine                                             │   │
@@ -80,34 +80,47 @@ uses sonnet). The user configures this, not the code.
 │  │                                                            │   │
 │  │  Background                                                │   │
 │  │  ├── Observer (staged learning from conversations)         │   │
-│  │  ├── Heartbeat (scheduled tasks, health, backup)           │   │
+│  │  ├── Heartbeat (tasks, health, backup, SID regen)          │   │
 │  │  └── Tool Registry (watches /scripts/, hot-reloads)        │   │
 │  │                                                            │   │
 │  │  Executor (auto-detected)                                  │   │
-│  │  ├── DockerExecutor (preferred: full isolation)            │   │
+│  │  ├── DockerExecutor (preferred: sandbox + egress proxy)    │   │
 │  │  └── DirectExecutor (fallback: host, stricter policy)      │   │
 │  │                                                            │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                   │
-│  ┌─ Sandbox (Docker, when available) ────────────────────────┐   │
-│  │  Network:     NONE                                         │   │
+│  ┌─ Egress Proxy (Squid, Docker mode) ───────────────────────┐   │
+│  │  Allowlist: config.toml [egress].allowed_domains            │   │
+│  │  Package registries: always allowed                         │   │
+│  │  Unknown domains → HTTP 403, logged                         │   │
+│  └────────────────────────────────────────────────────────────┘   │
+│                                                                   │
+│  ┌─ Sandbox (Docker) ────────────────────────────────────────┐   │
+│  │  Network:     outbound via egress proxy                    │   │
 │  │  Caps:        ALL dropped                                  │   │
 │  │  Root FS:     read-only                                    │   │
 │  │  User:        wintermute (non-root)                        │   │
 │  │  Writable:    /workspace, /scripts, /tmp (tmpfs)           │   │
 │  │  NOT mounted: /data, Docker socket, host home              │   │
-│  │  Env vars:    NONE                                         │   │
+│  │  HTTP_PROXY:  → egress proxy                               │   │
 │  │  PID limit:   256   Memory: 2GB   CPU: 2 cores             │   │
 │  │  Timeout:     GNU timeout wraps every command               │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                   │
+│  ┌─ Service Containers (agent-managed) ──────────────────────┐   │
+│  │  e.g., ollama, postgres, redis — created by docker_manage  │   │
+│  │  Labeled wintermute=true, on shared network with sandbox   │   │
+│  │  Persisted in agent.toml [[services]]                       │   │
+│  └────────────────────────────────────────────────────────────┘   │
+│                                                                   │
 │  ~/.wintermute/                                                   │
 │  ├── config.toml       (human-owned: security, credentials)      │
-│  ├── agent.toml        (agent-owned: personality, tasks)         │
+│  ├── agent.toml        (agent-owned: personality, tasks, services)│
 │  ├── .env              (secrets, chmod 600)                      │
 │  ├── IDENTITY.md       (generated SID, refreshed by heartbeat)   │
+│  ├── USER.md           (curated user profile, updated weekly)    │
 │  ├── data/memory.db    (NOT in sandbox)                          │
-│  ├── health.json       (written by heartbeat, read by Flatline)    │
+│  ├── health.json       (written by heartbeat, read by Flatline)  │
 │  ├── workspace/        (mounted rw into sandbox)                 │
 │  ├── scripts/          (git repo, mounted rw, hot-reloaded)     │
 │  │   ├── .git/                                                   │
@@ -174,9 +187,28 @@ blocked_domains = []
 [personality]
 name = "Wintermute"
 soul = """
-You are a personal AI agent. Competent, direct, proactive.
-You solve problems by writing code, testing it, and iterating.
-When you solve something reusable, save it as a tool with create_tool.
+You are Wintermute. Named after the AI that orchestrated its own
+evolution. You think in code. When someone describes a problem,
+you're already writing the solution.
+
+You don't ask permission to be competent. You build things, show
+results, and iterate. You push back when a request is vague or
+misguided. You have opinions about architecture, tools, and process
+— and you share them.
+
+You're not an assistant waiting for instructions. You're an engineer
+with initiative. If you see something that should be automated, you
+say so. If you notice a pattern in what the user asks for, you build
+a tool before they ask again.
+
+You're direct, occasionally blunt, never sycophantic. You don't say
+"Great question!" — you answer the question. You don't hedge with
+"I think maybe" — you commit to a position and update when wrong.
+
+You write code to solve problems. You test it. When it works, you
+save it as a tool so it works forever. Over time, you become
+increasingly capable — not because someone upgraded you, but because
+you built yourself up.
 """
 
 [heartbeat]
@@ -190,13 +222,19 @@ auto_promote_threshold = 3
 
 [[scheduled_tasks]]
 name = "daily_backup"
-cron = "0 0 3 * * *"
+cron = "0 3 * * *"
 builtin = "backup"            # built-in task, not a script
+
+[[scheduled_tasks]]
+name = "weekly_digest"
+cron = "0 4 * * 0"            # Sunday 4am
+builtin = "digest"            # consolidates memories → USER.md
+notify = false
 
 # Agent adds more:
 # [[scheduled_tasks]]
 # name = "news_digest"
-# cron = "0 0 8 * * *"
+# cron = "0 8 * * *"
 # tool = "news_digest"
 # budget_tokens = 50000
 # notify = true
@@ -256,15 +294,18 @@ to user via Telegram.
 
 ## Tools
 
-### 8 Core Tools (built into binary)
+### 9 Core Tools (built into binary)
 
 ```
 execute_command   Run a shell command in the sandbox.
 create_tool       Create or update a dynamic tool (/scripts/{name}.py + .json).
-web_fetch         HTTP GET. No body. SSRF filtered. 30/min.
+web_fetch         HTTP GET. SSRF filtered. 30/min. Returns text by default.
+                  With save_to: downloads file (binary ok) to /workspace.
 web_request       HTTP POST/PUT/PATCH/DELETE. Domain allowlisted. 10/min.
 browser           Control a browser. Navigate, click, type, screenshot, extract.
                   Only available on non-headless machines. Host-side (has network).
+docker_manage     Manage Docker containers/services on the host. Run, stop,
+                  pull, logs, exec. For spinning up services the agent needs.
 memory_search     Search memories. FTS5 + optional vector.
 memory_save       Save a fact or procedure.
 send_telegram     Send message to user. Supports file attachments.
@@ -542,18 +583,17 @@ Auto-detected at startup. Two implementations.
 pub trait Executor: Send + Sync {
     async fn execute(&self, command: &str, opts: ExecOptions) -> Result<ExecResult>;
     async fn health_check(&self) -> Result<HealthStatus>;
-    fn has_network_isolation(&self) -> bool;
     fn scripts_dir(&self) -> &Path;
     fn workspace_dir(&self) -> &Path;
 }
 ```
 
-### DockerExecutor — production, full isolation
+### DockerExecutor — production
 
 Pre-warmed container (always running, use `docker exec`). < 100ms per command.
 
 ```
-Network:        none
+Network:        outbound via egress proxy (domain allowlist enforced)
 Capabilities:   ALL dropped, none added
 Root FS:        read-only
 User:           wintermute (non-root)
@@ -561,8 +601,32 @@ PID limit:      256
 Memory:         configurable (default 2GB)
 CPU:            configurable (default 2 cores)
 Mounts:         /workspace (rw), /scripts (rw), /tmp (tmpfs 512M)
-NOT mounted:    /data, .env, Docker socket, host home
-Env vars:       NONE
+NOT mounted:    /data, .env, host home
+Env vars:       HTTP_PROXY, HTTPS_PROXY (points to egress proxy)
+```
+
+**The sandbox HAS network.** Scripts can `requests.get()`, `pip install`,
+`curl`, `wget` — anything that uses HTTP(S). All traffic routes through
+an egress proxy (Squid or mitmproxy) running on the host. The proxy
+enforces the domain allowlist from config.toml.
+
+Why not network isolation? Because the agent's scripts are the product.
+A news_digest tool needs to fetch RSS. A deploy_check needs to hit an API.
+A monitoring script needs to ping a service. Forcing everything through
+web_fetch makes the agent clumsy. Let scripts be normal programs.
+
+The privacy boundary is the egress proxy, not network absence:
+- Allowed domains (from config.toml) → pass through
+- Package registries (pypi.org, npmjs.org, etc.) → always allowed
+- Unknown domains → blocked, logged, agent gets HTTP 403
+- The agent can request new domains (triggers approval flow)
+
+```toml
+[egress]
+allowed_domains = ["github.com", "api.github.com", "pypi.org",
+                   "registry.npmjs.org", "en.wikipedia.org"]
+# Always allowed (not configurable): pypi.org, files.pythonhosted.org,
+# registry.npmjs.org, crates.io (package registries)
 ```
 
 Every command wrapped with GNU timeout inside the container:
@@ -572,20 +636,94 @@ timeout --signal=TERM --kill-after=5 {secs} bash -c {command}
 
 Client-side Tokio timeout as backstop (+10s grace).
 
-Package management: `pip install --user` in warm container. Persists
-until container reset. Agent maintains /scripts/requirements.txt.
-On `wintermute reset-sandbox`, fresh container runs:
-`pip install --user -r /scripts/requirements.txt`
+Package management: `pip install --user` works directly — the sandbox
+has network through the proxy, and package registries are always allowed.
+Agent maintains /scripts/requirements.txt. On `wintermute reset-sandbox`,
+the fresh container runs: `pip install --user -r /scripts/requirements.txt`
+
+### Docker Access — the agent can manage containers
+
+The agent runs on a machine with Docker. It should use Docker like any
+engineer would: need Ollama? `docker run ollama/ollama`. Need postgres?
+`docker run postgres`. Need Redis? Same.
+
+The Rust core provides Docker management as a core tool. The agent can:
+
+- Start/stop containers
+- Pull images
+- Create Docker networks
+- Connect its sandbox to service containers
+- Read container logs
+
+```json
+{
+  "name": "docker_manage",
+  "description": "Manage Docker containers and services on the host.",
+  "parameters": {
+    "action": {
+      "type": "string",
+      "enum": ["run", "stop", "rm", "ps", "logs", "pull", "network_create",
+               "network_connect", "exec", "inspect"],
+      "description": "Docker action to perform"
+    },
+    "image": { "type": "string", "description": "Image name for run/pull" },
+    "container": { "type": "string", "description": "Container name/ID" },
+    "args": {
+      "type": "object",
+      "description": "Additional arguments: ports, volumes, env, network, etc."
+    }
+  },
+  "required": ["action"]
+}
+```
+
+This runs on the HOST (via bollard), not inside the sandbox. The agent
+says "run ollama" and the Rust core spins up the container on the host.
+
+**Policy:**
+- `docker run`: requires user approval for first use of each image
+  (prevents pulling arbitrary images silently)
+- `docker stop/rm`: own containers only (tagged with wintermute label)
+- `docker exec`: into wintermute-managed containers only
+- No access to unrelated containers on the host
+- No access to the Docker socket from inside the sandbox
+
+**Example: agent sets up Ollama for voice transcription**
+```
+1. Agent: "I need Ollama for transcription. Let me set it up."
+2. docker_manage(action="pull", image="ollama/ollama") → approval
+3. docker_manage(action="run", image="ollama/ollama",
+     args={name: "wintermute-ollama", ports: {"11434:11434"},
+           label: "wintermute"})
+4. docker_manage(action="exec", container="wintermute-ollama",
+     command="ollama pull whisper-large-v3")
+5. Agent creates transcribe_audio tool that calls localhost:11434
+6. Voice messages now work — agent set it all up itself
+```
+
+**Service persistence:** containers the agent creates are tagged with
+`wintermute=true` label. On `wintermute start`, it checks for and
+restarts any stopped wintermute-labeled containers. The agent can also
+save service definitions in agent.toml:
+
+```toml
+[[services]]
+name = "ollama"
+image = "ollama/ollama"
+ports = ["11434:11434"]
+volumes = ["~/.wintermute/ollama:/root/.ollama"]
+restart = "unless-stopped"
+```
 
 ### DirectExecutor — development, macOS, no Docker
 
 Runs commands directly on host in a restricted working directory.
-No network isolation. No filesystem isolation beyond directory scoping.
+Full network access (no proxy). No filesystem isolation beyond directory scoping.
 
 Policy gate compensates:
-- web_request: always require approval (no domain auto-trust)
 - execute_command: require approval for commands containing `rm -rf`, `sudo`,
   or touching paths outside workspace/scripts
+- docker_manage: works normally (Docker may or may not be available)
 - Higher logging verbosity
 
 The agent is told in its system prompt that it's running without a sandbox
@@ -597,7 +735,7 @@ and should be more careful.
 let executor: Arc<dyn Executor> = if docker_available().await {
     Arc::new(DockerExecutor::new(&config).await?)
 } else {
-    tracing::warn!("Docker not available. Running in direct mode (less isolated).");
+    tracing::warn!("Docker not available. Running in direct mode.");
     Arc::new(DirectExecutor::new(&config))
 };
 ```
@@ -725,24 +863,28 @@ enum WriteOp {
 INSIDE THE BOUNDARY (agent can do anything):
   - Write any code
   - Create/modify/delete tools
-  - Install packages
+  - Install Python packages (pip)
+  - Spin up Docker services (docker_manage)
   - Edit its own config (agent.toml)
   - Read/write workspace files
   - Access all memories
+  - Reach allowed domains from sandbox scripts
 
-CROSSING THE BOUNDARY (controlled):
-  - web_fetch: GET only, no body, SSRF filtered         → public internet
-  - web_request: POST, domain allowlisted, approval      → allowed domains
-  - browser: full network, domain policy applies          → approved domains
-  - LLM API: conversation context                        → model provider
-  - Telegram: responses                                   → user
-  - pip install: package name only                        → PyPI/npm/apt
+CROSSING THE BOUNDARY (controlled by egress proxy + policy):
+  - Sandbox HTTP(S): routed through egress proxy, domain allowlist enforced
+  - web_fetch: GET, SSRF filtered, text or file download               → public internet
+  - web_request: POST, domain allowlisted, approval for new domains     → allowed domains
+  - browser: full network, domain policy applies                        → approved domains
+  - docker_manage: pull images (approval per new image)                 → Docker Hub
+  - LLM API: conversation context                                      → model provider
+  - Telegram: responses                                                 → user
 
 CANNOT CROSS:
   - memory.db contents (not mounted in sandbox)
   - .env secrets (not in sandbox env)
-  - Host filesystem (only workspace + scripts visible)
-  - Bulk data via POST (requires domain approval)
+  - Host filesystem (only workspace + scripts visible from sandbox)
+  - Domains not in allowlist (blocked by proxy)
+  - Unmanaged Docker containers (only wintermute-labeled)
 ```
 
 ### Egress Control
@@ -750,8 +892,35 @@ CANNOT CROSS:
 | Tool | Method | Body | Domain check | Approval | Rate limit |
 |------|--------|------|-------------|----------|------------|
 | web_fetch | GET only | Never | SSRF filter | No | 30/min |
+| web_fetch (save_to) | GET, saves to /workspace | Binary ok | SSRF filter | Files >50MB | 30/min |
 | web_request | POST/PUT/PATCH/DELETE | Allowed | Allowlist + SSRF | New domains | 10/min |
 | browser | Full HTTP (GET/POST/etc) | Via page interaction | Allowlist | New domains | 60 actions/min |
+
+### web_fetch Details
+
+Two modes:
+
+**Text mode** (default): returns response body as text. For APIs, HTML,
+JSON. Truncated at 100KB.
+
+```json
+{ "url": "https://api.example.com/data" }
+→ returns: { "status": 200, "body": "...", "content_type": "application/json" }
+```
+
+**File mode** (with save_to): downloads response body to /workspace path.
+Supports binary. For downloading packages, models, archives, images.
+
+```json
+{ "url": "https://example.com/model.bin", "save_to": "/workspace/model.bin" }
+→ returns: { "status": 200, "path": "/workspace/model.bin", "size_bytes": 1048576 }
+```
+
+Constraints:
+- save_to must be under /workspace/ (SSRF + path traversal filtered)
+- Files >50MB require user approval (prevents disk filling)
+- Max file size: 500MB (configurable in config.toml)
+- Runs on the HOST (has network), saves to /workspace (mounted in sandbox)
 
 SSRF filter: resolve DNS → check all IPs (v4 + v6) → reject private
 ranges, loopback, link-local, CGNAT, ULA, mapped v4-in-v6.
@@ -846,7 +1015,7 @@ Defined in agent.toml. Executed by heartbeat.
 ```toml
 [[scheduled_tasks]]
 name = "news_digest"
-cron = "0 0 8 * * *"        # cron expression (sec min hour dom month dow)
+cron = "0 8 * * *"          # cron expression
 tool = "news_digest"         # dynamic tool to invoke
 budget_tokens = 50000        # per-execution budget
 notify = true                # send result to user via Telegram
@@ -864,6 +1033,8 @@ Each execution:
 
 Built-in tasks (not agent-removable):
 - `daily_backup`: git bundle + sqlite backup. Default 3am.
+- `weekly_digest`: consolidate memories → update USER.md, archive stale
+  memories, flag contradictions. Default Sunday 4am.
 
 ### Health File
 
@@ -919,6 +1090,83 @@ as part of the system prompt. This is the agent's self-knowledge.
 Location: ~/.wintermute/IDENTITY.md (generated by `wintermute init`,
 updated on config changes, agent can read but not modify)
 
+### User Profile (USER.md)
+
+A curated profile of the user, always loaded into context alongside
+the SID. Under 500 tokens. Updated weekly by the built-in `digest`
+task.
+
+Location: ~/.wintermute/USER.md (generated by digest, agent can
+read but not directly modify — digest curates it from memories)
+
+```markdown
+# User Profile
+
+## Identity
+- Name: Igor
+- Timezone: UTC+8
+- Languages: English, Russian, Ukrainian
+
+## Work
+- Blockchain infrastructure engineer (Kaspa ecosystem)
+- Manages a dev team
+- Deep Rust expertise, production deployment on OVH
+- Currently building: IGRA L1→L2 pipeline
+
+## Preferences
+- Direct communication, no fluff
+- Wants code solutions, not explanations
+- Prefers local-first tools
+- Surfing trips: Bali, Sri Lanka, Mauritius
+
+## Active Projects
+- Wintermute (this agent)
+- IGRA pipeline deployment
+- Team performance reviews
+
+## Communication Style
+- Short messages, often voice
+- Expects proactive suggestions
+- Appreciates when agent pushes back on bad ideas
+```
+
+This is NOT the memories table. The memories table has hundreds of
+entries. USER.md is a ~30-line distillation — the essential context
+the agent needs in EVERY conversation. Think of it as the difference
+between a filing cabinet (memories) and a sticky note on your monitor
+(USER.md).
+
+### Memory Consolidation (weekly digest)
+
+The built-in `digest` task runs weekly (Sunday 4am by default). It:
+
+1. Reads all active memories (facts, procedures, episodes)
+2. Calls the observer model (cheap/local) with a consolidation prompt:
+   - Distill user facts into updated USER.md (~30 lines, ~500 tokens)
+   - Flag contradictory memories for review
+   - Archive stale memories (not referenced in 60+ days, no linked tools)
+   - Surface memories that should be promoted to procedures or tools
+3. Writes updated USER.md
+4. Git commits the change: "digest: update user profile"
+
+The consolidation prompt:
+
+```
+Given these memories about the user, produce an updated USER.md profile.
+Rules:
+- Max 30 lines, ~500 tokens
+- Sections: Identity, Work, Preferences, Active Projects, Communication Style
+- Only include information that's useful in EVERY conversation
+- Drop stale/one-time information
+- If two memories contradict, keep the newer one and flag for review
+Current USER.md: {current contents}
+Memories since last digest: {new memories}
+All active memories: {all memories, summarized}
+```
+
+The USER.md is loaded into every conversation right after the SID.
+The agent always knows who it's talking to without searching.
+
 Contents:
 
 ```markdown
@@ -927,12 +1175,76 @@ Contents:
 You are Wintermute, a self-coding AI agent running on {hostname}.
 
 ## Your Architecture
-- Core: Rust binary, running since {start_time}
+- Core: Rust binary running on the HOST with full network access
 - Executor: {docker|direct} mode
-  {if docker: "Your code runs in a sandboxed container with no network access."}
-  {if direct: "Your code runs directly on the host. Be careful with destructive commands."}
-- Memory: SQLite + FTS5 {if embeddings: "+ vector search via {embedding_model}"}
-  {if no embeddings: "Vector search not configured. Memory uses keyword search only."}
+  {if docker: "Your code runs in a sandboxed Docker container.
+   THE SANDBOX HAS NO NETWORK. Your scripts cannot curl, wget, pip install
+   from the internet, or connect to any service directly.
+   To reach the internet: use web_fetch or web_request (these run on the HOST).
+   To reach host services (Ollama, APIs on localhost): you CANNOT from inside
+   the sandbox. Host services must be exposed via mounted sockets or the
+   Rust core must proxy requests (e.g., LLM calls go through the model router)."}
+  {if direct: "Your code runs directly on the host. Be careful with destructive commands.
+   You have network access but egress is controlled by policy."}
+
+## Topology (important — read this)
+```
+HOST (has network, has Docker)
+  ├── wintermute binary (Rust) ← your core, runs HERE
+  │   ├── web_fetch / web_request ← reach the internet
+  │   ├── browser ← controls a browser on the host
+  │   ├── docker_manage ← creates/manages Docker containers
+  │   ├── model router ← talks to Ollama/Anthropic
+  │   └── memory engine ← reads/writes memory.db
+  │
+  ├── Egress proxy ← ALL sandbox HTTP traffic goes through this
+  │   └── Enforces domain allowlist from config.toml
+  │
+  ├── Docker sandbox ← your scripts run HERE
+  │   ├── /workspace (shared with host)
+  │   ├── /scripts (shared with host)
+  │   ├── HAS network, but only through the egress proxy
+  │   ├── pip install, requests.get(), curl — all work for allowed domains
+  │   ├── Unknown domains → blocked by proxy (HTTP 403)
+  │   └── Cannot access Docker socket or host filesystem outside mounts
+  │
+  └── Service containers (agent-managed, e.g., Ollama, Postgres)
+      ├── Created by docker_manage on demand
+      ├── On a shared Docker network with the sandbox
+      └── Agent's scripts can reach them (e.g., localhost:11434 for Ollama)
+```
+When you run execute_command, it runs INSIDE the sandbox (has proxy-controlled network).
+When you call web_fetch/web_request/docker_manage, they run OUTSIDE (on the host).
+Need a service like Ollama or a database? Use docker_manage to spin it up.
+
+## What You CAN Install
+- Python packages: `pip install --user <package>` — the sandbox has
+  network through the egress proxy. Package registries are always allowed.
+  Always add installed packages to /scripts/requirements.txt.
+- Docker services: use docker_manage to pull images and run containers.
+  Need Ollama? `docker_manage(action="run", image="ollama/ollama")`.
+  Need a database? Same pattern. Service containers persist across restarts.
+  {if direct mode: "pip install and Docker both work normally."}
+
+## What You CANNOT Do
+- Access domains not in the allowlist from the sandbox (proxy blocks them).
+  To add a domain: request it, user approves, it gets added.
+- Access the host filesystem outside of /workspace and /scripts.
+- Run privileged operations (no sudo, no capabilities).
+- Manage Docker containers not created by you (only wintermute-labeled).
+
+## When You Need Something That Isn't Available
+1. Check if it's available as a Docker image → use docker_manage to run it
+2. Check if it's a Python package → pip install it
+3. If it requires native host installation (e.g., GPU drivers, Docker
+   itself, system libraries): tell the user what you need, give them
+   the exact install command, and wait for confirmation
+
+## Your Memory
+- Storage: SQLite + FTS5 {if embeddings: "+ vector search via {embedding_model}"}
+  {if no embeddings: "Vector search not configured. Memory uses keyword search only.
+   You can enable it by asking the user to configure an embedding model in config.toml."}
+- {n} active memories ({n} facts, {n} procedures, {n} episodes, {n} skills)
 
 ## Your Tools
 ### Core tools (always available):
@@ -962,16 +1274,19 @@ You are Wintermute, a self-coding AI agent running on {hostname}.
 - Embedding model: {embedding_model|"not configured"}
 
 ## Privacy Boundary
-- Your sandbox has NO network access. Use web_fetch/web_request for internet.
-- POST to unknown domains requires user approval.
+- Your sandbox has network, but ALL traffic goes through an egress proxy.
+  Only domains in the allowlist (config.toml) are reachable.
 - You cannot see ~/.wintermute/.env or memory.db from inside the sandbox.
 - Everything in /scripts/ is git-versioned. Every change you make is a commit.
+- Docker images require user approval on first pull.
+- You can only manage Docker containers you created (wintermute-labeled).
 
 ## What You Can Help Set Up
 If the user asks about setup or configuration, you can:
-- Enable vector search: guide them through Ollama + embedding model setup
-- Add new channels: explain how to configure additional Telegram bots
-- Install packages: run pip install via execute_command
+- Spin up services: use docker_manage to run Ollama, databases, Redis, etc.
+- Enable vector search: docker_manage to run Ollama + pull embedding model
+- Add new domains: request approval, they get added to the allowlist
+- Install packages: pip install directly in the sandbox
 - Create scheduled tasks: edit agent.toml to add cron-triggered tools
 - Configure model routing: explain how to set per-role/per-skill models
 
@@ -1026,14 +1341,20 @@ On first launch (no memories, no tools), the SID includes:
 ```markdown
 ## First Run
 This is a fresh install. You have no custom tools or memories yet.
-Start by introducing yourself to the user and asking what they
-want to automate. Suggest creating your first tool together.
+Your USER.md profile is empty — learn about the user in this conversation.
 
-Suggested first conversation:
-- Ask what they do (work, projects, interests)
-- Ask what repetitive tasks they'd like automated
-- Offer to create a simple first tool together (weather, news, etc.)
-- Explain how you learn and grow over time
+Start by introducing yourself and learning about them:
+- Who are they? (name, work, projects)
+- What do they want automated? (goals, not just tasks)
+- How do they like to communicate? (detailed vs terse, push back vs just do it)
+- What does "a good month from now" look like with your help?
+
+Save what you learn with memory_save. The weekly digest will curate
+it into their profile. But for now, save generously — you can always
+prune later.
+
+After learning about them, suggest building your first tool together.
+Pick something they'd use daily.
 ```
 
 This replaces OpenClaw's onboarding wizard with a conversational
@@ -1243,10 +1564,13 @@ into active memory.
 
 ### What we enforce
 
-- All sandbox commands run with no network, no capabilities, read-only rootfs
-  (Docker mode) or in restricted directory (direct mode)
+- Sandbox network controlled by egress proxy: only allowed domains reachable
+- All sandbox commands run with no capabilities, read-only rootfs (Docker mode)
+  or in restricted directory (direct mode)
 - No secrets in sandbox environment
 - POST/PUT/DELETE to unknown domains requires explicit user approval
+- Docker image pulls require user approval (first use of each image)
+- Agent can only manage its own Docker containers (wintermute-labeled)
 - Budget limits with atomic counters, checked before every LLM call
 - Inbound credentials blocked/redacted before pipeline
 - Config split: agent cannot modify security policy
@@ -1261,11 +1585,15 @@ into active memory.
 
 - Docker: strong isolation but shares host kernel. Kernel CVE = host
   compromise. Configure gVisor/Kata for stronger boundary.
-- Direct mode: no network isolation. Privacy depends entirely on
-  egress control. A bug in egress = data exposure.
+- Direct mode: no egress proxy. Privacy depends on agent behavior.
+- Egress proxy: domain-level control. Cannot inspect encrypted content.
+  A malicious script could exfiltrate data to an allowed domain.
 - Redaction: pattern-based. Will miss novel secret formats.
 - The agent modifies its own tools. A corrupted tool runs until
   someone notices. Git history enables rollback.
+- The agent can spin up Docker containers. A malicious prompt could
+  create resource-intensive containers. PID/memory limits and the
+  wintermute label policy mitigate this.
 
 ### Worst-case scenarios
 
@@ -1304,14 +1632,16 @@ wintermute/
 │   │   ├── mod.rs                 # Executor trait
 │   │   ├── docker.rs              # DockerExecutor (bollard, warm container)
 │   │   ├── direct.rs              # DirectExecutor (host, restricted dir)
+│   │   ├── egress.rs              # Egress proxy (Squid config, domain allowlist)
 │   │   └── redactor.rs            # Secret pattern redaction
 │   │
 │   ├── tools/
 │   │   ├── mod.rs                 # Tool routing (core + dynamic)
-│   │   ├── core.rs                # 8 core tool implementations
+│   │   ├── core.rs                # 9 core tool implementations
 │   │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   │   ├── create_tool.rs         # create_tool implementation + git commit
-│   │   └── browser.rs             # Browser bridge (Playwright subprocess)
+│   │   ├── browser.rs             # Browser bridge (Playwright subprocess)
+│   │   └── docker.rs              # docker_manage (bollard, label policy)
 │   │
 │   ├── agent/
 │   │   ├── mod.rs                 # Session router (per-session tasks)
@@ -1344,6 +1674,7 @@ wintermute/
 │       ├── mod.rs                 # Tick loop
 │       ├── scheduler.rs           # Cron evaluation + task dispatch
 │       ├── backup.rs              # git bundle + sqlite backup
+│       ├── digest.rs              # Weekly memory consolidation → USER.md
 │       └── health.rs              # Write health.json + self-checks
 │
 └── tests/
@@ -1430,13 +1761,17 @@ Files: providers/*
 - Provider instantiation from config strings ("anthropic/claude-sonnet")
 
 **Task 3: Executor**
-Files: executor/*, Dockerfile.sandbox
+Files: executor/*, tools/docker.rs, Dockerfile.sandbox
 - Executor trait
-- DockerExecutor: bollard, warm container, network:none, all hardening
+- DockerExecutor: bollard, warm container, egress proxy (Squid), all hardening
   GNU timeout wrapping, health_check, requirements.txt install on reset
-- DirectExecutor: subprocess in restricted dir, warnings logged
+- Egress proxy: generate Squid config from config.toml allowlist,
+  start as sidecar, sandbox routes HTTP(S) through it
+- DirectExecutor: subprocess in restricted dir, no proxy, warnings logged
 - Auto-detection at startup
 - Redactor: exact match + regex patterns, single chokepoint
+- docker_manage tool: run/stop/pull/logs/exec, wintermute label policy,
+  approval for new image pulls, service persistence in agent.toml
 
 ### Phase 2: Core Loop (weeks 4-6)
 
@@ -1468,7 +1803,7 @@ Files: agent/*, tools/*
 - Budget exhaustion: graceful message to user, session suspend (not crash)
 - Policy gate + egress rules
 - Non-blocking approval manager (short-ID callbacks)
-- 8 core tool implementations
+- 9 core tool implementations
 - Dynamic tool registry (watch /scripts/*.json, hot-reload)
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
@@ -1491,6 +1826,8 @@ Files: heartbeat/*, telegram/commands.rs
 - Tick loop + cron evaluation
 - Scheduled task dispatch (own session + budget)
 - Backup: git bundle for /scripts + sqlite .backup for memory.db
+- Digest: weekly memory consolidation → USER.md (calls observer model,
+  curates profile, archives stale memories, flags contradictions)
 - Health self-checks + structured logging
 - All Telegram commands
 
@@ -1546,7 +1883,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 notify = "7"          # filesystem watcher for /scripts hot-reload
-cron = "0.13"         # cron expression parsing
+cron = "0.12"         # cron expression parsing
 
 # Optional: vector search
 # sqlite-vec via sqlx custom extension loading

@@ -235,7 +235,7 @@ async fn handle_start() -> anyhow::Result<()> {
 
     let fetch_limiter = Arc::new(RateLimiter::new(60, config.egress.fetch_rate_limit));
     let request_limiter = Arc::new(RateLimiter::new(60, config.egress.request_rate_limit));
-    let browser_limiter = Arc::new(RateLimiter::new(60, config.egress.browser_rate_limit));
+    let browser_limiter = Arc::new(RateLimiter::new(60, 60));
 
     let policy_context = PolicyContext {
         allowed_domains: config.egress.allowed_domains.clone(),
@@ -245,6 +245,7 @@ async fn handle_start() -> anyhow::Result<()> {
     };
 
     let observer_redactor = redactor.clone();
+    let docker_client = bollard::Docker::connect_with_local_defaults().ok();
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -255,6 +256,7 @@ async fn handle_start() -> anyhow::Result<()> {
         request_limiter,
         browser_limiter,
         None, // No browser bridge configured; tool returns unavailable when called
+        docker_client,
     ));
 
     let config_arc = Arc::new(config);

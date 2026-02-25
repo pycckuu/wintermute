@@ -11,7 +11,6 @@ fn sample_snapshot() -> IdentitySnapshot {
     IdentitySnapshot {
         model_id: "anthropic/claude-sonnet-4-5-20250929".to_owned(),
         executor_kind: ExecutorKind::Docker,
-        has_network_isolation: true,
         core_tool_count: 8,
         dynamic_tool_count: 3,
         active_memory_count: 42,
@@ -28,6 +27,7 @@ fn render_identity_contains_all_sections() {
     let doc = render_identity(&sample_snapshot());
     assert!(doc.contains("# Wintermute"));
     assert!(doc.contains("## Your Architecture"));
+    assert!(doc.contains("## Topology"));
     assert!(doc.contains("## Your Tools"));
     assert!(doc.contains("## Your Memory"));
     assert!(doc.contains("## Budget"));
@@ -51,7 +51,6 @@ fn render_identity_shows_docker_executor() {
 fn render_identity_shows_direct_executor() {
     let mut snap = sample_snapshot();
     snap.executor_kind = ExecutorKind::Direct;
-    snap.has_network_isolation = false;
     let doc = render_identity(&snap);
     assert!(doc.contains("Direct mode"));
     assert!(doc.contains("without network isolation"));
@@ -102,6 +101,35 @@ fn load_identity_returns_none_for_missing_file() {
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join("DOES_NOT_EXIST.md");
     assert!(load_identity(&path).is_none());
+}
+
+#[test]
+fn render_identity_lists_docker_manage_and_save_to() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(
+        doc.contains("docker_manage"),
+        "should list docker_manage in tools"
+    );
+    assert!(doc.contains("save_to"), "should mention web_fetch save_to");
+}
+
+#[test]
+fn render_identity_shows_topology_for_docker() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("egress-proxy"));
+    assert!(doc.contains("sandbox"));
+    assert!(doc.contains("service containers"));
+}
+
+#[test]
+fn render_identity_omits_topology_for_direct() {
+    let mut snap = sample_snapshot();
+    snap.executor_kind = ExecutorKind::Direct;
+    let doc = render_identity(&snap);
+    assert!(
+        !doc.contains("## Topology"),
+        "direct mode should not show topology"
+    );
 }
 
 #[test]

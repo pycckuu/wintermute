@@ -63,6 +63,7 @@ fn make_agent_config() -> AgentConfig {
         heartbeat: HeartbeatConfig::default(),
         learning: LearningConfig::default(),
         scheduled_tasks: vec![],
+        services: vec![],
     }
 }
 
@@ -219,6 +220,7 @@ async fn run_session_completes_on_shutdown() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let cfg = SessionConfig {
@@ -235,6 +237,7 @@ async fn run_session_completes_on_shutdown() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     // Spawn the session task
@@ -311,6 +314,7 @@ async fn run_session_completes_on_channel_close() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let cfg = SessionConfig {
@@ -327,6 +331,7 @@ async fn run_session_completes_on_channel_close() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -588,6 +593,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -605,6 +611,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -695,6 +702,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -712,6 +720,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -808,6 +817,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -825,6 +835,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -915,6 +926,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         request_limiter,
         browser_limiter,
         None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -932,6 +944,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        user_md_content: None,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -1007,10 +1020,6 @@ impl wintermute::executor::Executor for TestExecutor {
             kind: ExecutorKind::Direct,
             details: "test executor".to_owned(),
         })
-    }
-
-    fn has_network_isolation(&self) -> bool {
-        false
     }
 
     fn scripts_dir(&self) -> &std::path::Path {
