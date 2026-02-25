@@ -24,6 +24,9 @@ const SANDBOX_CONTAINER_NAME: &str = "wintermute-sandbox";
 const RESET_REQUIREMENTS_COMMAND: &str =
     "if [ -f /scripts/requirements.txt ]; then pip install --user -r /scripts/requirements.txt; fi";
 
+/// Embedded sandbox Dockerfile for local build fallback when registry pull fails.
+const SANDBOX_DOCKERFILE: &str = include_str!("../../Dockerfile.sandbox");
+
 /// Pre-redaction execution result used internally.
 #[doc(hidden)]
 pub struct RawExecResult {
@@ -174,6 +177,13 @@ impl DockerExecutor {
     }
 
     async fn create_container(&self, config: &Config) -> Result<(), ExecutorError> {
+        super::ensure_image(
+            &self.docker,
+            &config.sandbox.image,
+            Some(SANDBOX_DOCKERFILE),
+        )
+        .await?;
+
         let container_config = build_container_config(
             &self.workspace_dir,
             &self.scripts_dir,

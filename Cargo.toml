@@ -38,6 +38,7 @@ teloxide = { version = "0.13", features = ["macros"] }
 
 # Docker
 bollard = "0.18"
+bytes = "1"
 
 # Logging
 tracing = "0.1"
