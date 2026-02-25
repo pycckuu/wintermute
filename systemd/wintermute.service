@@ -1,3 +1,5 @@
+# User-level unit. Install to ~/.config/systemd/user/
+# Manage with: systemctl --user enable --now wintermute
 [Unit]
 Description=Wintermute AI Agent
 After=docker.service network-online.target
