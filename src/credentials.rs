@@ -225,11 +225,16 @@ impl std::fmt::Debug for OpenAiAuth {
 }
 
 impl OpenAiAuth {
+    /// Returns the bearer token string regardless of auth variant.
+    pub fn token(&self) -> &str {
+        match self {
+            Self::OAuthToken(token) | Self::ApiKey(token) => token,
+        }
+    }
+
     /// Returns secret values for redactor registration.
     pub fn secret_values(&self) -> Vec<String> {
-        match self {
-            Self::OAuthToken(token) | Self::ApiKey(token) => vec![token.clone()],
-        }
+        vec![self.token().to_owned()]
     }
 }
 

@@ -56,6 +56,7 @@ impl Redactor {
 pub fn default_credential_patterns() -> Vec<Regex> {
     let patterns = [
         r"sk-ant-[A-Za-z0-9_\-]{10,}",
+        r"sk-proj-[A-Za-z0-9_\-]{20,}",
         r"sk-[A-Za-z0-9]{32,}",
         r"ghp_[A-Za-z0-9]{20,}",
         r"glpat-[A-Za-z0-9_\-]{16,}",

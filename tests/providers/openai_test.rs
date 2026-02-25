@@ -189,3 +189,26 @@ fn parse_response_defaults_usage_to_zero() {
     assert_eq!(resp.usage.input_tokens, 0);
     assert_eq!(resp.usage.output_tokens, 0);
 }
+
+#[test]
+fn parse_response_content_filter_maps_to_other() {
+    let body = json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "I can't help with that."},
+            "finish_reason": "content_filter"
+        }],
+        "model": "gpt-5",
+        "usage": {"prompt_tokens": 5, "completion_tokens": 8}
+    });
+
+    let resp = parse_response(&body.to_string()).expect("should parse");
+    assert_eq!(
+        resp.stop_reason,
+        StopReason::Other("content_filter".to_owned())
+    );
+}
+
+#[test]
+fn parse_response_rejects_non_json() {
+    assert!(parse_response("not json at all").is_err());
+}

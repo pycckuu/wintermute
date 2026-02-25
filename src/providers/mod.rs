@@ -3,7 +3,7 @@
 //! Defines the [`LlmProvider`] trait and the shared request/response types
 //! used by all provider implementations.
 //!
-//! Two providers are implemented:
+//! Three providers are implemented:
 //! - [`anthropic::AnthropicProvider`] — Anthropic `/v1/messages` API
 //! - [`openai::OpenAiProvider`] — OpenAI `/v1/chat/completions` API
 //! - [`ollama::OllamaProvider`] — Ollama `/api/chat` API
@@ -12,7 +12,6 @@
 //! based on context (skill override → role override → default).
 
 use async_trait::async_trait;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
@@ -236,20 +235,15 @@ pub async fn check_http_response(response: reqwest::Response) -> Result<String, 
 }
 
 fn sanitize_http_error_body(raw: &str) -> String {
+    use crate::executor::redactor::{default_credential_patterns, REDACTION_MARKER};
+
     let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
     let mut sanitized = collapsed;
-    for pattern in [
-        r"sk-ant-[A-Za-z0-9_\-]{10,}",
-        r"sk-[A-Za-z0-9]{32,}",
-        r"ghp_[A-Za-z0-9]{20,}",
-        r"glpat-[A-Za-z0-9_\-]{16,}",
-        r"xoxb-[A-Za-z0-9\-]{20,}",
-        r"eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}",
-    ] {
-        if let Ok(regex) = Regex::new(pattern) {
-            sanitized = regex.replace_all(&sanitized, "[REDACTED]").into_owned();
-        }
+    for pattern in default_credential_patterns() {
+        sanitized = pattern
+            .replace_all(&sanitized, REDACTION_MARKER)
+            .into_owned();
     }
 
     const MAX_ERROR_BODY_CHARS: usize = 256;
