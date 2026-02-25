@@ -17,7 +17,7 @@ See `DESIGN.md` for full architecture documentation.
 - **Memory Engine** — SQLite with write-serialization actor, FTS5 search, optional vector (sqlite-vec)
 - **Observer** — staged learning with configurable promotion (auto/suggest/off)
 - **Heartbeat** — scheduled tasks, health checks, daily backup, weekly digest
-- **Model Router** — default model, per-role and per-skill overrides (Anthropic + Ollama providers)
+- **Model Router** — default model, per-role and per-skill overrides (Anthropic + OpenAI + Ollama providers)
 
 ## Project Structure
 
@@ -29,6 +29,7 @@ src/
 ├── providers/
 │   ├── mod.rs                 # LlmProvider trait
 │   ├── anthropic.rs           # Anthropic API + native tool calling
+│   ├── openai.rs              # OpenAI Chat Completions API + native tool calling
 │   ├── ollama.rs              # Ollama API + native tool calling
 │   └── router.rs              # ModelRouter (default → role → skill)
 ├── executor/
