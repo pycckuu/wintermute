@@ -1,8 +1,9 @@
 //! Provider capability contract tests.
 
-use wintermute::credentials::AnthropicAuth;
+use wintermute::credentials::{AnthropicAuth, OpenAiAuth};
 use wintermute::providers::anthropic::AnthropicProvider;
 use wintermute::providers::ollama::OllamaProvider;
+use wintermute::providers::openai::OpenAiProvider;
 use wintermute::providers::LlmProvider;
 
 #[test]
@@ -23,4 +24,16 @@ fn ollama_provider_reports_capabilities_and_model_id() {
     assert!(provider.supports_tool_calling());
     assert!(provider.supports_streaming());
     assert_eq!(provider.model_id(), "ollama/qwen3:8b");
+}
+
+#[test]
+fn openai_provider_reports_capabilities_and_model_id() {
+    let provider = OpenAiProvider::new(
+        "openai/gpt-5".to_owned(),
+        "gpt-5".to_owned(),
+        OpenAiAuth::ApiKey("test-api-key".to_owned()),
+    );
+    assert!(provider.supports_tool_calling());
+    assert!(provider.supports_streaming());
+    assert_eq!(provider.model_id(), "openai/gpt-5");
 }

@@ -5,6 +5,7 @@
 //!
 //! Two providers are implemented:
 //! - [`anthropic::AnthropicProvider`] — Anthropic `/v1/messages` API
+//! - [`openai::OpenAiProvider`] — OpenAI `/v1/chat/completions` API
 //! - [`ollama::OllamaProvider`] — Ollama `/api/chat` API
 //!
 //! The [`router::ModelRouter`] resolves the correct provider for each call
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod ollama;
+pub mod openai;
 pub mod router;
 
 // ---------------------------------------------------------------------------

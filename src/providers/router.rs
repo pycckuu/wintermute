@@ -6,10 +6,11 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::config::{all_model_specs, ModelsConfig};
-use crate::credentials::{resolve_anthropic_auth, Credentials};
+use crate::credentials::{resolve_anthropic_auth, resolve_openai_auth, Credentials};
 
 use super::anthropic::AnthropicProvider;
 use super::ollama::OllamaProvider;
+use super::openai::OpenAiProvider;
 use super::LlmProvider;
 
 /// Provider routing errors.
@@ -211,6 +212,18 @@ fn instantiate_provider(
             model_spec.to_owned(),
             model.to_owned(),
         ))),
+        "openai" => {
+            let auth =
+                resolve_openai_auth(credentials).ok_or_else(|| RouterError::MissingCredential {
+                    provider: provider.to_owned(),
+                    key: "OPENAI_OAUTH_TOKEN or OPENAI_API_KEY".to_owned(),
+                })?;
+            Ok(Arc::new(OpenAiProvider::new(
+                model_spec.to_owned(),
+                model.to_owned(),
+                auth,
+            )))
+        }
         _ => Err(RouterError::UnsupportedProvider {
             provider: provider.to_owned(),
         }),
