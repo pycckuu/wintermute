@@ -1,5 +1,6 @@
 //! Tests for `src/heartbeat/digest.rs` — weekly memory digest.
 
+use wintermute::executor::redactor::Redactor;
 use wintermute::heartbeat::digest::{build_consolidation_prompt, load_user_md, write_user_md};
 
 // ---------------------------------------------------------------------------
@@ -8,26 +9,32 @@ use wintermute::heartbeat::digest::{build_consolidation_prompt, load_user_md, wr
 
 #[test]
 fn prompt_includes_current_user_md_content() {
-    let prompt =
-        build_consolidation_prompt("# Existing Content\n- Some notes", &["New fact".to_owned()]);
+    let redactor = Redactor::new(Vec::new());
+    let prompt = build_consolidation_prompt(
+        "# Existing Content\n- Some notes",
+        &["New fact".to_owned()],
+        &redactor,
+    );
     assert!(prompt.contains("# Existing Content"));
     assert!(prompt.contains("Some notes"));
 }
 
 #[test]
 fn prompt_handles_empty_user_md() {
-    let prompt = build_consolidation_prompt("", &["Memory one".to_owned()]);
+    let redactor = Redactor::new(Vec::new());
+    let prompt = build_consolidation_prompt("", &["Memory one".to_owned()], &redactor);
     assert!(prompt.contains("first digest"));
 }
 
 #[test]
 fn prompt_includes_all_memories() {
+    let redactor = Redactor::new(Vec::new());
     let memories = vec![
         "Fact A".to_owned(),
         "Fact B".to_owned(),
         "Fact C".to_owned(),
     ];
-    let prompt = build_consolidation_prompt("existing content", &memories);
+    let prompt = build_consolidation_prompt("existing content", &memories, &redactor);
     assert!(prompt.contains("1. Fact A"));
     assert!(prompt.contains("2. Fact B"));
     assert!(prompt.contains("3. Fact C"));
@@ -35,16 +42,33 @@ fn prompt_includes_all_memories() {
 
 #[test]
 fn prompt_handles_empty_memories() {
-    let prompt = build_consolidation_prompt("existing content", &[]);
+    let redactor = Redactor::new(Vec::new());
+    let prompt = build_consolidation_prompt("existing content", &[], &redactor);
     assert!(prompt.contains("no new memories"));
 }
 
 #[test]
 fn prompt_contains_rules() {
-    let prompt = build_consolidation_prompt("", &[]);
+    let redactor = Redactor::new(Vec::new());
+    let prompt = build_consolidation_prompt("", &[], &redactor);
     assert!(prompt.contains("under 200 lines"));
     assert!(prompt.contains("Remove duplicates"));
     assert!(prompt.contains("contradictions"));
+}
+
+#[test]
+fn prompt_redacts_memory_secret_values() {
+    let secret = "notion_secret_token_abc123";
+    let redactor = Redactor::new(vec![secret.to_owned()]);
+    let memories = vec![
+        format!("Store this token for later: {secret}"),
+        "anthropic key sk-ant-1234567890abcdef".to_owned(),
+    ];
+    let prompt = build_consolidation_prompt("", &memories, &redactor);
+
+    assert!(!prompt.contains(secret));
+    assert!(!prompt.contains("sk-ant-1234567890abcdef"));
+    assert!(prompt.contains("[REDACTED]"));
 }
 
 // ---------------------------------------------------------------------------
