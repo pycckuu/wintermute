@@ -29,9 +29,13 @@ detect_target() {
 }
 
 latest_version() {
-    curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"tag_name"' \
-        | sed -E 's/.*"v([^"]+)".*/\1/'
+    local json
+    json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+    if command -v jq &>/dev/null; then
+        echo "$json" | jq -r '.tag_name' | sed 's/^v//'
+    else
+        echo "$json" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/'
+    fi
 }
 
 main() {
@@ -71,7 +75,7 @@ main() {
         fi
         info "Checksum verified."
     else
-        warn "No checksum found for ${archive}, skipping verification."
+        error "No checksum found for ${archive} in checksums.txt. Aborting."
     fi
 
     info "Installing to ${INSTALL_DIR}..."

@@ -80,9 +80,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: |
-            wintermute-*.tar.gz
-            wintermute-*.tar.gz.sha256
+          path: wintermute-*.tar.gz
 
   sandbox-image:
     name: Publish sandbox image
@@ -113,7 +111,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build, sandbox-image]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,7 +125,7 @@ jobs:
 
       - name: Create checksums file
         working-directory: dist
-        run: cat *.sha256 > checksums.txt
+        run: sha256sum wintermute-*.tar.gz > checksums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
