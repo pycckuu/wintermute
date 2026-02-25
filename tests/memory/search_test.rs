@@ -235,6 +235,36 @@ async fn search_no_fts_matches_falls_back_to_recent_active() {
 }
 
 #[tokio::test]
+async fn search_fallback_respects_limit() {
+    let engine = setup_engine().await;
+
+    seed_and_wait(
+        &engine,
+        vec![
+            test_memory("memory one", MemoryKind::Fact),
+            test_memory("memory two", MemoryKind::Fact),
+            test_memory("memory three", MemoryKind::Fact),
+            test_memory("memory four", MemoryKind::Fact),
+            test_memory("memory five", MemoryKind::Fact),
+        ],
+    )
+    .await;
+
+    // Query that won't match any memory, triggering fallback.
+    let results = engine
+        .search("zzzznonexistent", 2)
+        .await
+        .expect("search should succeed");
+    assert!(
+        results.len() <= 2,
+        "fallback should respect limit, got {}",
+        results.len()
+    );
+
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn search_handles_special_characters_gracefully() {
     let engine = setup_engine().await;
 
