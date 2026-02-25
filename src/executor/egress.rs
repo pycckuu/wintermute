@@ -238,7 +238,11 @@ async fn ensure_squid_container(docker: &Docker, squid_config: &str) -> Result<(
 }
 
 /// Create the Squid proxy container.
+///
+/// Pulls the image first if it is not available locally.
 async fn create_squid_container(docker: &Docker, squid_config: &str) -> Result<(), ExecutorError> {
+    super::ensure_image(docker, SQUID_IMAGE, None).await?;
+
     let mut labels = HashMap::new();
     labels.insert("wintermute".to_owned(), "true".to_owned());
 

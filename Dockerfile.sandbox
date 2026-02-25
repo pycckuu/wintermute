@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git jq bc timeout coreutils \
+    curl git jq bc coreutils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash wintermute
