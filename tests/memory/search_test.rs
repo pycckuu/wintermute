@@ -1,9 +1,10 @@
-//! Tests for `src/memory/search.rs` — FTS5 search and RRF merge.
+//! Tests for `src/memory/search.rs` — FTS5 search, fallback behaviour, and RRF merge.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 use wintermute::memory::{Memory, MemoryEngine, MemoryKind, MemorySource, MemoryStatus};
 
+/// Create an in-memory [`MemoryEngine`] with all migrations applied.
 async fn setup_engine() -> MemoryEngine {
     let opts = SqliteConnectOptions::new()
         .filename(":memory:")
@@ -31,6 +32,7 @@ async fn setup_engine() -> MemoryEngine {
         .expect("engine should initialise")
 }
 
+/// Build an active memory with the given content and kind (other fields defaulted).
 fn test_memory(content: &str, kind: MemoryKind) -> Memory {
     Memory {
         id: None,
@@ -44,11 +46,12 @@ fn test_memory(content: &str, kind: MemoryKind) -> Memory {
     }
 }
 
+/// Save all memories and wait for the writer actor to flush.
 async fn seed_and_wait(engine: &MemoryEngine, memories: Vec<Memory>) {
     for m in memories {
         engine.save_memory(m).await.expect("save should succeed");
     }
-    // Let the writer actor flush.
+    // Give the writer actor time to flush (writes are async via mpsc).
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
 
@@ -152,20 +155,63 @@ async fn search_respects_limit() {
     engine.shutdown().await;
 }
 
+// ---------------------------------------------------------------------------
+// Fallback to recent active memories (cognitive cold start prevention)
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn search_empty_query_returns_empty() {
+async fn search_empty_query_falls_back_to_recent_active() {
     let engine = setup_engine().await;
 
     seed_and_wait(&engine, vec![test_memory("some content", MemoryKind::Fact)]).await;
 
     let results = engine.search("", 10).await.expect("search should succeed");
-    assert!(results.is_empty(), "empty query should return no results");
+    assert_eq!(
+        results.len(),
+        1,
+        "empty query should fall back to recent active memories"
+    );
+    assert_eq!(results[0].content, "some content");
 
     engine.shutdown().await;
 }
 
 #[tokio::test]
-async fn search_no_matches_returns_empty() {
+async fn search_empty_query_with_no_memories_returns_empty() {
+    let engine = setup_engine().await;
+
+    let results = engine.search("", 10).await.expect("search should succeed");
+    assert!(
+        results.is_empty(),
+        "empty query with no memories should return empty"
+    );
+
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_wildcard_falls_back_to_recent_active() {
+    let engine = setup_engine().await;
+
+    seed_and_wait(
+        &engine,
+        vec![test_memory("important user fact", MemoryKind::Fact)],
+    )
+    .await;
+
+    // "*" gets stripped by sanitise_fts5_query → empty → fallback to recent
+    let results = engine.search("*", 10).await.expect("search should succeed");
+    assert_eq!(
+        results.len(),
+        1,
+        "wildcard query should fall back to recent active memories"
+    );
+
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_no_fts_matches_falls_back_to_recent_active() {
     let engine = setup_engine().await;
 
     seed_and_wait(
@@ -178,7 +224,12 @@ async fn search_no_matches_returns_empty() {
         .search("quantum", 10)
         .await
         .expect("search should succeed");
-    assert!(results.is_empty(), "non-matching query should return empty");
+    assert_eq!(
+        results.len(),
+        1,
+        "non-matching query should fall back to recent active memories"
+    );
+    assert_eq!(results[0].content, "cats and dogs");
 
     engine.shutdown().await;
 }
