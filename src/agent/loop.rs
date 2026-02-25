@@ -668,8 +668,8 @@ fn merge_bootstrap_memories(memories: &mut Vec<Memory>, bootstrap: &mut Vec<Memo
     }
 
     // Both query results and bootstrap memories come from the database and
-    // always have Some(id). Deduplicate on the id value, skipping None to
-    // avoid accidentally collapsing unpersisted entries.
+    // always have Some(id). Deduplicate on the id value; entries without an
+    // id are always included to avoid silently dropping unpersisted entries.
     let existing_ids: std::collections::HashSet<i64> =
         memories.iter().filter_map(|m| m.id).collect();
 
