@@ -179,10 +179,7 @@ pub fn build_request(model: &str, request: &CompletionRequest) -> OpenAiRequest 
                     match part {
                         ContentPart::Text { text } => text_parts.push(text.clone()),
                         ContentPart::ToolUse { id, name, input } => {
-                            let arguments = match serde_json::to_string(input) {
-                                Ok(serialized) => serialized,
-                                Err(_) => "{}".to_owned(),
-                            };
+                            let arguments = input.to_string();
                             tool_calls.push(OpenAiToolCall {
                                 id: id.clone(),
                                 kind: "function".to_owned(),
@@ -300,22 +297,20 @@ pub fn parse_response(body: &str) -> Result<CompletionResponse, ProviderError> {
         Some("stop") => StopReason::EndTurn,
         Some("tool_calls") => StopReason::ToolUse,
         Some("length") => StopReason::MaxTokens,
-        Some("content_filter") => StopReason::StopSequence,
+        // content_filter is a safety/policy stop, not a user stop sequence.
         Some(other) => StopReason::Other(other.to_owned()),
         None => StopReason::EndTurn,
     };
 
-    let usage = UsageStats {
-        input_tokens: resp
-            .usage
-            .as_ref()
-            .and_then(|u| u.prompt_tokens)
-            .unwrap_or(0),
-        output_tokens: resp
-            .usage
-            .as_ref()
-            .and_then(|u| u.completion_tokens)
-            .unwrap_or(0),
+    let usage = match resp.usage {
+        Some(u) => UsageStats {
+            input_tokens: u.prompt_tokens.unwrap_or(0),
+            output_tokens: u.completion_tokens.unwrap_or(0),
+        },
+        None => UsageStats {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
     };
 
     Ok(CompletionResponse {
@@ -346,15 +341,12 @@ impl LlmProvider for OpenAiProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         let api_request = build_request(&self.model_name, &request);
-        let bearer_token = match &self.auth {
-            OpenAiAuth::OAuthToken(token) | OpenAiAuth::ApiKey(token) => token,
-        };
 
         let response = self
             .client
             .post(OPENAI_API_BASE)
             .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {bearer_token}"))
+            .header("authorization", format!("Bearer {}", self.auth.token()))
             .json(&api_request)
             .send()
             .await?;
@@ -368,6 +360,9 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn supports_streaming(&self) -> bool {
+        // OpenAI Chat Completions API supports streaming, but this provider
+        // currently uses non-streaming requests. Returns true to indicate
+        // API capability for future implementation.
         true
     }
 
