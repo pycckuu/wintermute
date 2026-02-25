@@ -1,4 +1,4 @@
-//! Credential loading from runtime `.env` and external OAuth sources.
+//! Credential loading from runtime `.env` and OAuth token refresh.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -6,9 +6,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use serde::Deserialize;
-use tracing::{debug, warn};
-
-use crate::config::runtime_paths;
+use tracing::{debug, info};
 
 /// Runtime credentials loaded from the `.env` file.
 #[derive(Clone, Default)]
@@ -98,7 +96,7 @@ pub fn load_credentials(path: &Path) -> anyhow::Result<Credentials> {
 /// Returns an error when runtime paths cannot be resolved or the credentials
 /// file is invalid.
 pub fn load_default_credentials() -> anyhow::Result<Credentials> {
-    let paths = runtime_paths()?;
+    let paths = crate::config::runtime_paths()?;
     load_credentials(&paths.env_file)
 }
 
@@ -151,11 +149,11 @@ fn validate_private_permissions(_path: &Path) -> anyhow::Result<()> {
 /// How Wintermute authenticates with the Anthropic API.
 #[derive(Clone, PartialEq, Eq)]
 pub enum AnthropicAuth {
-    /// OAuth Bearer token (from Claude CLI or env var).
+    /// OAuth Bearer token from `.env`.
     OAuth {
         /// The access token sent as `Authorization: Bearer`.
         access_token: String,
-        /// Optional refresh token (stored for potential future use).
+        /// Refresh token for obtaining new access tokens on expiry.
         refresh_token: Option<String>,
         /// Expiry timestamp in milliseconds since epoch. `None` if unknown.
         expires_at: Option<i64>,
@@ -263,41 +261,35 @@ pub fn resolve_openai_auth(credentials: &Credentials) -> Option<OpenAiAuth> {
     None
 }
 
-/// Resolve Anthropic authentication using a priority chain.
+/// Resolve Anthropic authentication from `.env` credentials.
 ///
 /// Resolution order:
-/// 1. Claude CLI keychain (macOS only)
-/// 2. Claude CLI credentials file (`~/.claude/.credentials.json`)
-/// 3. `ANTHROPIC_OAUTH_TOKEN` from loaded `.env` credentials
-/// 4. `ANTHROPIC_API_KEY` from loaded `.env` credentials
+/// 1. `ANTHROPIC_OAUTH_TOKEN` (+ optional `ANTHROPIC_OAUTH_REFRESH_TOKEN`,
+///    `ANTHROPIC_OAUTH_EXPIRES_AT`) from loaded `.env` credentials
+/// 2. `ANTHROPIC_API_KEY` from loaded `.env` credentials
 ///
 /// Returns `None` if no credential source provides a value.
 pub fn resolve_anthropic_auth(credentials: &Credentials) -> Option<AnthropicAuth> {
-    // 1. Try macOS keychain
-    if let Some(auth) = read_claude_cli_keychain() {
-        check_token_expiry(&auth, "keychain");
-        return Some(auth);
-    }
-
-    // 2. Try ~/.claude/.credentials.json
-    if let Some(auth) = read_claude_cli_file() {
-        check_token_expiry(&auth, "credentials file");
-        return Some(auth);
-    }
-
-    // 3. Try ANTHROPIC_OAUTH_TOKEN env
+    // 1. Try ANTHROPIC_OAUTH_TOKEN from .env
     if let Some(token) = credentials.get("ANTHROPIC_OAUTH_TOKEN") {
         if !token.trim().is_empty() {
+            let refresh_token = credentials
+                .get("ANTHROPIC_OAUTH_REFRESH_TOKEN")
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned);
+            let expires_at = credentials
+                .get("ANTHROPIC_OAUTH_EXPIRES_AT")
+                .and_then(|s| s.trim().parse::<i64>().ok());
             debug!("using ANTHROPIC_OAUTH_TOKEN from .env");
             return Some(AnthropicAuth::OAuth {
                 access_token: token.to_owned(),
-                refresh_token: None,
-                expires_at: None,
+                refresh_token,
+                expires_at,
             });
         }
     }
 
-    // 4. Try ANTHROPIC_API_KEY env
+    // 2. Try ANTHROPIC_API_KEY from .env
     if let Some(key) = credentials.get("ANTHROPIC_API_KEY") {
         if !key.trim().is_empty() {
             debug!("using ANTHROPIC_API_KEY from .env");
@@ -308,131 +300,194 @@ pub fn resolve_anthropic_auth(credentials: &Credentials) -> Option<AnthropicAuth
     None
 }
 
-/// Parse Claude CLI JSON credentials into an [`AnthropicAuth`].
-///
-/// Expects the format: `{ "claudeAiOauth": { "accessToken": "...", ... } }`.
-/// Exported for testing.
-#[doc(hidden)]
-pub fn parse_claude_cli_json(json_str: &str) -> Option<AnthropicAuth> {
-    let parsed: ClaudeCliCredentials = serde_json::from_str(json_str)
-        .map_err(|e| {
-            debug!(error = %e, "failed to parse Claude CLI credentials JSON");
-        })
-        .ok()?;
+// ---------------------------------------------------------------------------
+// OAuth token refresh
+// ---------------------------------------------------------------------------
 
-    let oauth = parsed.claude_ai_oauth?;
-    if oauth.access_token.is_empty() {
-        return None;
-    }
+/// Anthropic OAuth token endpoint used for refresh grants.
+const ANTHROPIC_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 
-    Some(AnthropicAuth::OAuth {
-        access_token: oauth.access_token,
-        refresh_token: oauth.refresh_token.filter(|s| !s.is_empty()),
-        expires_at: oauth.expires_at,
-    })
+/// Client ID registered for Claude CLI OAuth flows.
+const CLAUDE_CLI_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+/// Buffer before actual expiry at which we consider a token expired (60 s).
+const EXPIRY_BUFFER_MS: i64 = 60_000;
+
+/// Errors that can occur during credential refresh.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    /// No refresh token is available to obtain a new access token.
+    #[error("no refresh token available")]
+    NoRefreshToken,
+    /// The OAuth token endpoint returned an error.
+    #[error("token refresh failed: {0}")]
+    RefreshFailed(String),
+    /// Network-level failure during the refresh request.
+    #[error("refresh request failed: {0}")]
+    Network(#[from] reqwest::Error),
 }
 
-/// Stored OAuth credential structure matching Claude Code's JSON format.
+/// Response from the Anthropic OAuth token endpoint.
 #[derive(Debug, Deserialize)]
-struct ClaudeCliCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<ClaudeAiOauth>,
-}
-
-/// Inner OAuth fields from Claude Code's credential store.
-#[derive(Debug, Deserialize)]
-struct ClaudeAiOauth {
-    #[serde(rename = "accessToken")]
+struct OAuthRefreshResponse {
     access_token: String,
-    #[serde(rename = "refreshToken")]
+    expires_in: i64,
+    #[serde(default)]
     refresh_token: Option<String>,
-    #[serde(rename = "expiresAt")]
-    expires_at: Option<i64>,
 }
 
-/// Keychain service name used by Claude Code to store OAuth credentials.
-const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
-
-/// Keychain account name used by Claude Code.
-const CLAUDE_KEYCHAIN_ACCOUNT: &str = "Claude Code";
-
-/// Read Claude CLI credentials from macOS Keychain.
-#[cfg(target_os = "macos")]
-fn read_claude_cli_keychain() -> Option<AnthropicAuth> {
-    use security_framework::passwords::get_generic_password;
-
-    let password_bytes = get_generic_password(CLAUDE_KEYCHAIN_SERVICE, CLAUDE_KEYCHAIN_ACCOUNT)
-        .map_err(|e| {
-            debug!(error = %e, "Claude CLI keychain entry not found");
-        })
-        .ok()?;
-
-    let json_str = std::str::from_utf8(&password_bytes)
-        .map_err(|e| {
-            warn!(error = %e, "Claude CLI keychain entry is not valid UTF-8");
-        })
-        .ok()?;
-
-    let result = parse_claude_cli_json(json_str);
-    if result.is_some() {
-        debug!("loaded Anthropic OAuth from Claude CLI keychain");
-    }
-    result
-}
-
-/// Keychain is not available on non-macOS platforms.
-#[cfg(not(target_os = "macos"))]
-fn read_claude_cli_keychain() -> Option<AnthropicAuth> {
-    None
-}
-
-/// Read Claude CLI credentials from `~/.claude/.credentials.json`.
-fn read_claude_cli_file() -> Option<AnthropicAuth> {
-    let base_dirs = directories::BaseDirs::new()?;
-    let cred_path = base_dirs
-        .home_dir()
-        .join(".claude")
-        .join(".credentials.json");
-
-    let content = fs::read_to_string(&cred_path)
-        .map_err(|e| {
-            debug!(
-                path = %cred_path.display(),
-                error = %e,
-                "Claude CLI credentials file not readable"
-            );
-        })
-        .ok()?;
-
-    let result = parse_claude_cli_json(&content);
-    if result.is_some() {
-        debug!(path = %cred_path.display(), "loaded Anthropic OAuth from Claude CLI file");
-    }
-    result
-}
-
-/// Log a warning if an OAuth token is expired or expiring soon.
-fn check_token_expiry(auth: &AnthropicAuth, source: &str) {
+/// Returns `true` when an OAuth token is expired or expires within 60 seconds.
+///
+/// Returns `false` for API keys or when `expires_at` is unknown.
+#[must_use]
+pub fn is_token_expired(auth: &AnthropicAuth) -> bool {
     if let AnthropicAuth::OAuth {
         expires_at: Some(exp),
         ..
     } = auth
     {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        if *exp <= now_ms {
-            warn!(
-                source,
-                expires_at = exp,
-                "Anthropic OAuth token has expired; API requests may fail"
-            );
-        } else if *exp <= now_ms.saturating_add(300_000) {
-            warn!(
-                source,
-                expires_at = exp,
-                "Anthropic OAuth token expires within 5 minutes"
-            );
-        } else {
-            debug!(source, expires_at = exp, "Anthropic OAuth token valid");
+        *exp <= now_ms.saturating_add(EXPIRY_BUFFER_MS)
+    } else {
+        false
+    }
+}
+
+/// Attempt to refresh an expired Anthropic OAuth token.
+///
+/// Sends a `grant_type=refresh_token` POST to the Anthropic OAuth endpoint.
+/// On success returns a new [`AnthropicAuth::OAuth`] with updated tokens.
+///
+/// # Errors
+///
+/// Returns [`CredentialError`] when no refresh token is available, the
+/// endpoint returns an error, or a network failure occurs.
+pub async fn refresh_anthropic_token(
+    auth: &AnthropicAuth,
+) -> Result<AnthropicAuth, CredentialError> {
+    let old_refresh = match auth {
+        AnthropicAuth::OAuth {
+            refresh_token: Some(rt),
+            ..
+        } if !rt.is_empty() => rt,
+        _ => return Err(CredentialError::NoRefreshToken),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(CredentialError::Network)?;
+    let response = client
+        .post(ANTHROPIC_OAUTH_TOKEN_URL)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", old_refresh),
+            ("client_id", CLAUDE_CLI_CLIENT_ID),
+        ])
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body = response.text().await?;
+
+    if !status.is_success() {
+        // Truncate body to avoid leaking sensitive data in logs.
+        let safe_len = body.len().min(200);
+        return Err(CredentialError::RefreshFailed(format!(
+            "HTTP {status}: {}",
+            &body[..safe_len]
+        )));
+    }
+
+    let parsed: OAuthRefreshResponse = serde_json::from_str(&body)
+        .map_err(|e| CredentialError::RefreshFailed(format!("parse error: {e}")))?;
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expires_at = now_ms.saturating_add(parsed.expires_in.saturating_mul(1000));
+
+    // Keep the old refresh token if the server did not issue a new one.
+    let new_refresh = parsed.refresh_token.unwrap_or_else(|| old_refresh.clone());
+
+    Ok(AnthropicAuth::OAuth {
+        access_token: parsed.access_token,
+        refresh_token: Some(new_refresh),
+        expires_at: Some(expires_at),
+    })
+}
+
+/// Persist refreshed OAuth tokens back into a `.env` file.
+///
+/// Reads the existing file, replaces the three `ANTHROPIC_OAUTH_*` lines, and
+/// writes it back. Private permissions are preserved.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or written.
+pub fn update_env_credentials(env_path: &Path, auth: &AnthropicAuth) -> anyhow::Result<()> {
+    let (access_token, refresh_token, expires_at) = match auth {
+        AnthropicAuth::OAuth {
+            access_token,
+            refresh_token,
+            expires_at,
+        } => (access_token, refresh_token, expires_at),
+        AnthropicAuth::ApiKey(_) => return Ok(()),
+    };
+
+    let content = fs::read_to_string(env_path)
+        .with_context(|| format!("cannot read {}", env_path.display()))?;
+
+    let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+
+    upsert_env_line(&mut lines, "ANTHROPIC_OAUTH_TOKEN", access_token);
+    if let Some(rt) = refresh_token {
+        upsert_env_line(&mut lines, "ANTHROPIC_OAUTH_REFRESH_TOKEN", rt);
+    }
+    if let Some(exp) = expires_at {
+        upsert_env_line(&mut lines, "ANTHROPIC_OAUTH_EXPIRES_AT", &exp.to_string());
+    }
+
+    // Ensure trailing newline
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    // Atomic write: write to a temporary file in the same directory, then rename.
+    let parent = env_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine parent dir of {}", env_path.display()))?;
+    let tmp_path = parent.join(".env.tmp");
+    fs::write(&tmp_path, &output)
+        .with_context(|| format!("cannot write {}", tmp_path.display()))?;
+    enforce_private_file_permissions(&tmp_path)?;
+    fs::rename(&tmp_path, env_path).with_context(|| {
+        format!(
+            "cannot rename {} to {}",
+            tmp_path.display(),
+            env_path.display()
+        )
+    })?;
+
+    info!(path = %env_path.display(), "persisted refreshed OAuth tokens to .env");
+    Ok(())
+}
+
+/// Insert or replace all `KEY=value` lines in a list of `.env` lines.
+///
+/// Every line starting with `KEY=` or `# KEY=` is replaced with the new value.
+/// If no matching line exists, a new line is appended.
+fn upsert_env_line(lines: &mut Vec<String>, key: &str, value: &str) {
+    let prefix_active = format!("{key}=");
+    let prefix_comment = format!("# {key}=");
+
+    let mut found = false;
+    for line in lines.iter_mut() {
+        if line.starts_with(&prefix_active) || line.starts_with(&prefix_comment) {
+            *line = format!("{key}={value}");
+            found = true;
         }
+    }
+    if !found {
+        lines.push(format!("{key}={value}"));
     }
 }
