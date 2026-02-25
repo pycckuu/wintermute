@@ -140,6 +140,57 @@ fn get_string_array(args: &Value, key: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Volume mount validation
+// ---------------------------------------------------------------------------
+
+/// Paths that must never be bind-mounted into service containers.
+const BLOCKED_MOUNT_PATHS: &[&str] = &["/var/run/docker.sock", "/run/docker.sock"];
+
+/// Directory prefixes that must never be bind-mounted.
+const BLOCKED_MOUNT_PREFIXES: &[&str] = &["/etc/", "/root/", "/proc/", "/sys/"];
+
+/// File suffixes that indicate sensitive files.
+const BLOCKED_MOUNT_SUFFIXES: &[&str] = &[".env", "config.toml", "credentials.json"];
+
+/// Validate that a volume mount does not expose sensitive host paths.
+#[doc(hidden)]
+pub fn validate_volume_mount(mount: &str) -> Result<(), ToolError> {
+    let host_path = mount.split(':').next().unwrap_or(mount);
+
+    for blocked in BLOCKED_MOUNT_PATHS {
+        if host_path == *blocked {
+            return Err(ToolError::ExecutionFailed(format!(
+                "volume mount blocked: {host_path} is a sensitive path"
+            )));
+        }
+    }
+
+    for prefix in BLOCKED_MOUNT_PREFIXES {
+        if host_path.starts_with(prefix) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "volume mount blocked: {host_path} is under a protected directory"
+            )));
+        }
+    }
+
+    for suffix in BLOCKED_MOUNT_SUFFIXES {
+        if host_path.ends_with(suffix) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "volume mount blocked: {host_path} may contain secrets"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Maximum output size for `action_logs` (100 KB).
+const MAX_LOG_OUTPUT_BYTES: usize = 100 * 1024;
+
+/// Default timeout for `action_exec` in seconds.
+const EXEC_TIMEOUT_SECS: u64 = 60;
+
+// ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 
@@ -182,8 +233,11 @@ async fn action_run(docker: &Docker, input: &Value) -> Result<String, ToolError>
         Some(bindings)
     };
 
-    // Volume mounts
+    // Volume mounts — validate against sensitive host paths.
     let volumes = get_string_array(args, "volumes");
+    for vol in &volumes {
+        validate_volume_mount(vol)?;
+    }
 
     // Env vars
     let env = get_string_array(args, "env");
@@ -212,6 +266,9 @@ async fn action_run(docker: &Docker, input: &Value) -> Result<String, ToolError>
         },
         network_mode: network.map(ToOwned::to_owned),
         restart_policy,
+        // Defense-in-depth: service containers don't get elevated privileges.
+        privileged: Some(false),
+        cap_drop: Some(vec!["ALL".to_owned()]),
         ..Default::default()
     };
 
@@ -328,7 +385,14 @@ async fn action_logs(docker: &Docker, input: &Value) -> Result<String, ToolError
     let mut output = String::new();
     while let Some(chunk) = stream.next().await {
         match chunk {
-            Ok(log) => output.push_str(&log.to_string()),
+            Ok(log) => {
+                output.push_str(&log.to_string());
+                if output.len() > MAX_LOG_OUTPUT_BYTES {
+                    output.truncate(MAX_LOG_OUTPUT_BYTES);
+                    output.push_str("\n...[truncated]");
+                    break;
+                }
+            }
             Err(e) => {
                 return Err(ToolError::ExecutionFailed(format!(
                     "failed to read logs: {e}"
@@ -469,16 +533,28 @@ async fn action_exec(docker: &Docker, input: &Value) -> Result<String, ToolError
         ..
     } = started
     {
-        while let Some(chunk) = exec_stream.next().await {
-            match chunk {
-                Ok(log) => {
-                    output.push_str(&log.to_string());
+        let timeout = std::time::Duration::from_secs(EXEC_TIMEOUT_SECS);
+        let collect_result = tokio::time::timeout(timeout, async {
+            while let Some(chunk) = exec_stream.next().await {
+                match chunk {
+                    Ok(log) => output.push_str(&log.to_string()),
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "failed to read exec output: {e}"
+                        )));
+                    }
                 }
-                Err(e) => {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "failed to read exec output: {e}"
-                    )));
-                }
+            }
+            Ok(())
+        })
+        .await;
+
+        match collect_result {
+            Ok(inner) => inner?,
+            Err(_) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "exec timed out after {EXEC_TIMEOUT_SECS}s"
+                )));
             }
         }
     }

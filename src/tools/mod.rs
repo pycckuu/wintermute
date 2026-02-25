@@ -124,6 +124,8 @@ pub struct ToolRouter {
     browser_bridge: Option<Arc<dyn BrowserBridge>>,
     /// Optional Docker client for docker_manage; when None, tool returns unavailable.
     docker_client: Option<bollard::Docker>,
+    /// Maximum file download size in bytes for web_fetch save_to mode.
+    max_download_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for ToolRouter {
@@ -148,6 +150,7 @@ impl ToolRouter {
         browser_limiter: Arc<RateLimiter>,
         browser_bridge: Option<Arc<dyn BrowserBridge>>,
         docker_client: Option<bollard::Docker>,
+        max_download_bytes: Option<u64>,
     ) -> Self {
         Self {
             executor,
@@ -160,6 +163,7 @@ impl ToolRouter {
             browser_limiter,
             browser_bridge,
             docker_client,
+            max_download_bytes,
         }
     }
 
@@ -204,7 +208,9 @@ impl ToolRouter {
             "execute_command" => {
                 into_tool_result(core::execute_command(&*self.executor, input).await)
             }
-            "web_fetch" => into_tool_result(core::web_fetch(input, &self.fetch_limiter).await),
+            "web_fetch" => into_tool_result(
+                core::web_fetch(input, &self.fetch_limiter, self.max_download_bytes).await,
+            ),
             "web_request" => {
                 into_tool_result(core::web_request(input, &self.request_limiter).await)
             }
