@@ -24,8 +24,9 @@ use wintermute::config::{
     load_default_agent_config, load_default_config, runtime_paths, RuntimePaths,
 };
 use wintermute::credentials::{
-    enforce_private_file_permissions, load_default_credentials, resolve_anthropic_auth,
-    resolve_openai_auth, AnthropicAuth, Credentials, OpenAiAuth,
+    enforce_private_file_permissions, is_token_expired, load_default_credentials,
+    refresh_anthropic_token, resolve_anthropic_auth, resolve_openai_auth, update_env_credentials,
+    AnthropicAuth, Credentials, OpenAiAuth,
 };
 use wintermute::executor::direct::DirectExecutor;
 use wintermute::executor::docker::DockerExecutor;
@@ -157,27 +158,13 @@ async fn handle_start() -> anyhow::Result<()> {
     let telegram_token = credentials.require(token_key)?;
 
     // Resolve auth once so the router and redactor use the same token.
+    // If an OAuth token is expired and a refresh token is available, attempt
+    // to refresh before building the provider.
     let mut all_secrets = credentials.known_secrets();
-    if let Some(auth) = resolve_anthropic_auth(&credentials) {
-        match &auth {
-            AnthropicAuth::OAuth { .. } => info!("anthropic auth resolved: OAuth token"),
-            AnthropicAuth::ApiKey(_) => info!("anthropic auth resolved: API key"),
-        }
-        all_secrets.extend(auth.secret_values());
-    } else {
-        warn!("no Anthropic credentials found; provider will be unavailable");
-    }
-    if let Some(auth) = resolve_openai_auth(&credentials) {
-        match &auth {
-            OpenAiAuth::OAuthToken(_) => info!("openai auth resolved: OAuth token"),
-            OpenAiAuth::ApiKey(_) => info!("openai auth resolved: API key"),
-        }
-        all_secrets.extend(auth.secret_values());
-    } else {
-        warn!("no OpenAI credentials found; provider will be unavailable");
-    }
+    let anthropic_auth = resolve_and_refresh_anthropic_auth(&credentials, &paths.env_file).await;
+    collect_auth_secrets(&anthropic_auth, &credentials, &mut all_secrets);
 
-    let router = ModelRouter::from_config(&config.models, &credentials)?;
+    let router = ModelRouter::from_config_with_auth(&config.models, &credentials, anthropic_auth)?;
     if !router.has_model(&config.models.default) {
         return Err(anyhow::anyhow!(
             "default model '{}' is not available",
@@ -518,6 +505,67 @@ fn credentials_or_default() -> Credentials {
     load_default_credentials().unwrap_or_else(|_| Credentials::default())
 }
 
+/// Resolve Anthropic auth from credentials and refresh an expired OAuth token.
+///
+/// Returns the (possibly refreshed) auth, or `None` if no Anthropic
+/// credentials are configured.
+async fn resolve_and_refresh_anthropic_auth(
+    credentials: &Credentials,
+    env_path: &Path,
+) -> Option<AnthropicAuth> {
+    let auth = resolve_anthropic_auth(credentials)?;
+
+    if !is_token_expired(&auth) {
+        return Some(auth);
+    }
+
+    warn!("Anthropic OAuth token is expired, attempting refresh");
+    match refresh_anthropic_token(&auth).await {
+        Ok(refreshed) => {
+            info!("Anthropic OAuth token refreshed successfully");
+            if let Err(e) = update_env_credentials(env_path, &refreshed) {
+                warn!(error = %e, "failed to persist refreshed credentials to .env");
+            }
+            Some(refreshed)
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "token refresh failed; set ANTHROPIC_API_KEY in .env or re-run wintermute init"
+            );
+            // Return None so the router falls back to ANTHROPIC_API_KEY if available.
+            None
+        }
+    }
+}
+
+/// Log resolved auth methods and collect their secret values for the redactor.
+fn collect_auth_secrets(
+    anthropic_auth: &Option<AnthropicAuth>,
+    credentials: &Credentials,
+    secrets: &mut Vec<String>,
+) {
+    if let Some(auth) = anthropic_auth {
+        match auth {
+            AnthropicAuth::OAuth { .. } => info!("anthropic auth resolved: OAuth token"),
+            AnthropicAuth::ApiKey(_) => info!("anthropic auth resolved: API key"),
+        }
+        secrets.extend(auth.secret_values());
+    } else {
+        warn!("no Anthropic credentials found; provider will be unavailable");
+    }
+
+    if let Some(auth) = resolve_openai_auth(credentials) {
+        match &auth {
+            OpenAiAuth::OAuthToken(_) => info!("openai auth resolved: OAuth token"),
+            OpenAiAuth::ApiKey(_) => info!("openai auth resolved: API key"),
+        }
+        secrets.extend(auth.secret_values());
+    } else {
+        warn!("no OpenAI credentials found; provider will be unavailable");
+    }
+}
+
 fn ensure_runtime_layout(paths: &RuntimePaths) -> anyhow::Result<()> {
     fs::create_dir_all(&paths.root)?;
     fs::create_dir_all(&paths.scripts_dir)?;
@@ -642,7 +690,7 @@ builtin = "backup"
 }
 
 fn default_env_file() -> &'static str {
-    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\nOPENAI_API_KEY=\n# OPENAI_OAUTH_TOKEN=\n"
+    "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\n# ANTHROPIC_OAUTH_REFRESH_TOKEN=\n# ANTHROPIC_OAUTH_EXPIRES_AT=\nOPENAI_API_KEY=\n# OPENAI_OAUTH_TOKEN=\n"
 }
 
 fn list_backups(backups_dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {

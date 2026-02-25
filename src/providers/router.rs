@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use crate::config::{all_model_specs, ModelsConfig};
-use crate::credentials::{resolve_anthropic_auth, resolve_openai_auth, Credentials};
+use crate::credentials::{resolve_anthropic_auth, resolve_openai_auth, AnthropicAuth, Credentials};
 
 use super::anthropic::AnthropicProvider;
 use super::ollama::OllamaProvider;
@@ -62,18 +62,42 @@ pub struct ModelRouter {
 impl ModelRouter {
     /// Build a router from model config and loaded credentials.
     ///
+    /// Delegates to [`Self::from_config_with_auth`] without pre-resolved auth.
+    ///
     /// # Errors
     ///
     /// Returns an error if the default provider cannot be instantiated.
     pub fn from_config(models: &ModelsConfig, credentials: &Credentials) -> anyhow::Result<Self> {
+        Self::from_config_with_auth(models, credentials, None)
+    }
+
+    /// Build a router, optionally using a pre-resolved Anthropic auth.
+    ///
+    /// When `anthropic_auth` is `Some`, the router uses it directly instead of
+    /// calling [`resolve_anthropic_auth`]. This allows callers to refresh an
+    /// expired token before the router is built.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the default provider cannot be instantiated.
+    pub fn from_config_with_auth(
+        models: &ModelsConfig,
+        credentials: &Credentials,
+        anthropic_auth: Option<AnthropicAuth>,
+    ) -> anyhow::Result<Self> {
         let mut providers: HashMap<String, Arc<dyn LlmProvider>> = HashMap::new();
         let specs = all_model_specs(models);
 
         for spec in specs {
             let parsed = parse_model_spec(&spec)
                 .with_context(|| format!("failed to parse model spec '{spec}'"))?;
-            let instance =
-                instantiate_provider(&spec, &parsed.provider, &parsed.model, credentials);
+            let instance = instantiate_provider(
+                &spec,
+                &parsed.provider,
+                &parsed.model,
+                credentials,
+                anthropic_auth.as_ref(),
+            );
             if let Ok(provider) = instance {
                 providers.insert(spec.clone(), provider);
             }
@@ -167,16 +191,20 @@ impl ModelRouter {
     }
 }
 
+/// Decomposed `"provider/model"` spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedModelSpec {
     provider: String,
     model: String,
 }
 
+/// Split a `"provider/model"` spec into its two components.
 fn parse_model_spec(spec: &str) -> Result<ParsedModelSpec, RouterError> {
-    let mut split = spec.splitn(2, '/');
-    let provider = split.next().unwrap_or_default();
-    let model = split.next().unwrap_or_default();
+    let (provider, model) = spec
+        .split_once('/')
+        .ok_or_else(|| RouterError::InvalidModelSpec {
+            spec: spec.to_owned(),
+        })?;
     if provider.is_empty() || model.is_empty() {
         return Err(RouterError::InvalidModelSpec {
             spec: spec.to_owned(),
@@ -188,20 +216,23 @@ fn parse_model_spec(spec: &str) -> Result<ParsedModelSpec, RouterError> {
     })
 }
 
+/// Create a provider instance for the given spec, using pre-resolved auth when available.
 fn instantiate_provider(
     model_spec: &str,
     provider: &str,
     model: &str,
     credentials: &Credentials,
+    anthropic_auth: Option<&AnthropicAuth>,
 ) -> Result<Arc<dyn LlmProvider>, RouterError> {
     match provider {
         "anthropic" => {
-            let auth = resolve_anthropic_auth(credentials).ok_or_else(|| {
-                RouterError::MissingCredential {
+            let auth = anthropic_auth
+                .cloned()
+                .or_else(|| resolve_anthropic_auth(credentials))
+                .ok_or_else(|| RouterError::MissingCredential {
                     provider: provider.to_owned(),
                     key: "ANTHROPIC_API_KEY or OAuth token".to_owned(),
-                }
-            })?;
+                })?;
             Ok(Arc::new(AnthropicProvider::new(
                 model_spec.to_owned(),
                 model.to_owned(),
