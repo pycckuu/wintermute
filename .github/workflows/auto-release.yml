@@ -1,0 +1,67 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-release:
+    # Skip version bump commits to prevent infinite loop.
+    # Belt-and-suspenders: check both commit message AND author identity.
+    # IMPORTANT: The message guard must match the commit on the "Commit and
+    # tag" step below. If you change one, change both.
+    if: >-
+      !contains(github.event.head_commit.message, 'chore: bump version')
+      && github.event.head_commit.author.username != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Get current version
+        id: version
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+
+          # Validate version format.
+          if ! echo "$CURRENT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version format in Cargo.toml: '$CURRENT'"
+            exit 1
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Always bump minor version, reset patch to 0.
+          # We use minor bumps for every PR for simplicity; patch bumps are
+          # not used. Semantic versioning by commit type may be added later.
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          NEW="${MAJOR}.$((MINOR + 1)).0"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+
+      - name: Update versions
+        run: |
+          NEW="${{ steps.version.outputs.new }}"
+          # Update root Cargo.toml [package] version (first occurrence only).
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${NEW}\"/}" Cargo.toml
+          # Update flatline/Cargo.toml [package] version (first occurrence only).
+          sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${NEW}\"/}" flatline/Cargo.toml
+
+      - name: Install Rust (for lockfile update)
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+
+      - name: Update lockfile
+        run: cargo generate-lockfile
+
+      - name: Commit and tag
+        run: |
+          NEW="${{ steps.version.outputs.new }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml flatline/Cargo.toml Cargo.lock
+          # IMPORTANT: This message must contain "chore: bump version" to
+          # match the job-level `if` guard that prevents infinite loops.
+          git commit -m "chore: bump version to ${NEW} [skip ci]"
+          git tag "v${NEW}"
+          git push origin main "v${NEW}"

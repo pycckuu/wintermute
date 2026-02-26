@@ -173,7 +173,7 @@ Execute in order (**all mandatory**):
 
    **Types:** `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `ci`
 
-   **Scopes:** `providers`, `executor`, `tools`, `agent`, `memory`, `telegram`, `observer`, `heartbeat`, `config`
+   **Scopes:** `providers`, `executor`, `tools`, `agent`, `memory`, `telegram`, `observer`, `heartbeat`, `config`, `flatline`
 
    **Example:**
    ```
@@ -183,6 +183,12 @@ Execute in order (**all mandatory**):
    agent loop indefinitely. GNU timeout ensures reliable process kill,
    with a Tokio backstop as secondary protection.
    ```
+
+   **Note on versioning:** Version bumping is automated via GitHub Actions.
+   When your PR is merged to `main`, the `auto-release.yml` workflow
+   automatically increments the minor version, commits the change, creates
+   a git tag, and triggers a full release build. You do NOT need to manually
+   bump versions in `Cargo.toml`.
 
 2. **Verify**: **STOP** and present the draft to the user.
    ```text

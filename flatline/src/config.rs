@@ -35,6 +35,10 @@ pub struct FlatlineConfig {
     #[serde(default)]
     pub reports: ReportsConfig,
 
+    /// Auto-update checking and application settings.
+    #[serde(default)]
+    pub update: UpdateConfig,
+
     /// Telegram notification targets.
     #[serde(default)]
     pub telegram: TelegramConfig,
@@ -155,10 +159,6 @@ pub struct AutoFixConfig {
     #[serde(default = "default_true")]
     pub restart_on_crash: bool,
 
-    /// Start Wintermute automatically when Flatline boots, if not already running.
-    #[serde(default = "default_true")]
-    pub start_on_boot: bool,
-
     /// Auto-quarantine tools exceeding the failure threshold.
     #[serde(default = "default_true")]
     pub quarantine_failing_tools: bool,
@@ -181,7 +181,6 @@ impl Default for AutoFixConfig {
         Self {
             enabled: true,
             restart_on_crash: true,
-            start_on_boot: true,
             quarantine_failing_tools: true,
             disable_failing_tasks: true,
             revert_recent_changes: true,
@@ -237,6 +236,57 @@ impl Default for TelegramConfig {
     }
 }
 
+/// Auto-update checking and application settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateConfig {
+    /// Master switch for update checking.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Update channel: "stable" or "nightly".
+    #[serde(default = "default_channel")]
+    pub channel: String,
+
+    /// Time of day to check for updates (HH:MM, local time).
+    #[serde(default = "default_check_time")]
+    pub check_time: String,
+
+    /// If true, apply updates without user confirmation.
+    #[serde(default)]
+    pub auto_apply: bool,
+
+    /// Hours to wait for an idle window before nagging the user.
+    #[serde(default = "default_idle_patience_hours")]
+    pub idle_patience_hours: u64,
+
+    /// Seconds to monitor health after applying an update.
+    #[serde(default = "default_health_watch_secs")]
+    pub health_watch_secs: u64,
+
+    /// GitHub "owner/repo" for release checks.
+    #[serde(default = "default_repo")]
+    pub repo: String,
+
+    /// If set, pin to this exact version and skip updates.
+    #[serde(default)]
+    pub pinned_version: Option<String>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel: default_channel(),
+            check_time: default_check_time(),
+            auto_apply: false,
+            idle_patience_hours: default_idle_patience_hours(),
+            health_watch_secs: default_health_watch_secs(),
+            repo: default_repo(),
+            pinned_version: None,
+        }
+    }
+}
+
 /// Resolved filesystem paths for Flatline's own state.
 #[derive(Debug, Clone)]
 pub struct FlatlinePaths {
@@ -251,6 +301,12 @@ pub struct FlatlinePaths {
 
     /// Directory for proposed and applied fix patches.
     pub patches_dir: PathBuf,
+
+    /// Directory for downloaded updates and rollback binaries.
+    pub updates_dir: PathBuf,
+
+    /// Subdirectory for pending (downloaded but not applied) updates.
+    pub pending_dir: PathBuf,
 }
 
 impl FlatlineConfig {
@@ -276,6 +332,41 @@ impl FlatlineConfig {
             self.auto_fix.max_auto_restarts_per_hour <= 20,
             "max_auto_restarts_per_hour must be <= 20"
         );
+        anyhow::ensure!(
+            self.update.channel == "stable" || self.update.channel == "nightly",
+            "update.channel must be 'stable' or 'nightly'"
+        );
+        anyhow::ensure!(
+            self.update.idle_patience_hours >= 1,
+            "update.idle_patience_hours must be >= 1"
+        );
+        anyhow::ensure!(
+            self.update.health_watch_secs >= 60,
+            "update.health_watch_secs must be >= 60"
+        );
+        // Validate repo format to prevent URL/image injection.
+        anyhow::ensure!(
+            self.update.repo.contains('/')
+                && self.update.repo.chars().all(|c| c.is_ascii_alphanumeric()
+                    || c == '/'
+                    || c == '.'
+                    || c == '-'
+                    || c == '_')
+                && self.update.repo.split('/').count() == 2,
+            "update.repo must be 'owner/repo' format"
+        );
+        // Validate check_time format (HH:MM).
+        {
+            let parts: Vec<&str> = self.update.check_time.split(':').collect();
+            anyhow::ensure!(
+                parts.len() == 2
+                    && parts[0].len() == 2
+                    && parts[1].len() == 2
+                    && parts[0].parse::<u32>().is_ok_and(|h| h < 24)
+                    && parts[1].parse::<u32>().is_ok_and(|m| m < 60),
+                "update.check_time must be HH:MM format (00:00 - 23:59)"
+            );
+        }
         Ok(())
     }
 }
@@ -306,11 +397,16 @@ pub fn flatline_paths() -> anyhow::Result<FlatlinePaths> {
     let diagnoses_dir = root.join("diagnoses");
     let patches_dir = root.join("patches");
 
+    let updates_dir = root.join("updates");
+    let pending_dir = updates_dir.join("pending");
+
     Ok(FlatlinePaths {
         root,
         state_db,
         diagnoses_dir,
         patches_dir,
+        updates_dir,
+        pending_dir,
     })
 }
 
@@ -382,4 +478,24 @@ fn default_telegram_prefix() -> String {
 
 fn default_bot_token_env() -> String {
     "WINTERMUTE_TELEGRAM_TOKEN".to_owned()
+}
+
+fn default_channel() -> String {
+    "stable".to_owned()
+}
+
+fn default_check_time() -> String {
+    "04:00".to_owned()
+}
+
+fn default_idle_patience_hours() -> u64 {
+    6
+}
+
+fn default_health_watch_secs() -> u64 {
+    300
+}
+
+fn default_repo() -> String {
+    "pycckuu/wintermute".to_owned()
 }

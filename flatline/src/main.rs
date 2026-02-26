@@ -16,6 +16,7 @@ use flatline::config::{flatline_paths, load_flatline_config};
 use flatline::db::StateDb;
 use flatline::reporter::Reporter;
 use flatline::stats::StatsEngine;
+use flatline::updater::{self, Updater};
 use flatline::watcher::Watcher;
 use flatline::{diagnosis, fixer, patterns};
 
@@ -61,6 +62,10 @@ async fn handle_start() -> anyhow::Result<()> {
         .with_context(|| format!("failed to create {}", fl_paths.diagnoses_dir.display()))?;
     std::fs::create_dir_all(&fl_paths.patches_dir)
         .with_context(|| format!("failed to create {}", fl_paths.patches_dir.display()))?;
+    std::fs::create_dir_all(&fl_paths.updates_dir)
+        .with_context(|| format!("failed to create {}", fl_paths.updates_dir.display()))?;
+    std::fs::create_dir_all(&fl_paths.pending_dir)
+        .with_context(|| format!("failed to create {}", fl_paths.pending_dir.display()))?;
 
     // Set up production logging (JSON file + stderr).
     let logs_dir = fl_paths.root.join("logs");
@@ -118,20 +123,30 @@ async fn handle_start() -> anyhow::Result<()> {
         "flatline supervisor started"
     );
 
-    // Start Wintermute on boot if configured and not already running.
+    // Start Wintermute on boot if auto-fix restart is enabled and not already running.
     if config.auto_fix.enabled
-        && config.auto_fix.start_on_boot
+        && config.auto_fix.restart_on_crash
         && !patterns::is_pid_alive(&wm_paths.pid_file)
     {
-        info!("wintermute not running, starting on boot (start_on_boot = true)");
+        info!("wintermute not running, starting on boot");
         match fixer::start_wintermute(&wm_paths).await {
             Ok(()) => info!("wintermute start issued successfully"),
             Err(e) => warn!(error = %e, "failed to start wintermute on boot"),
         }
     }
 
+    // Create the Updater.
+    let updater = Updater::new(config.update.clone(), fl_paths.clone(), wm_paths.clone());
+
     // Track restart timestamps for rate-limiting.
     let mut restart_times: Vec<chrono::DateTime<chrono::Utc>> = Vec::new();
+
+    // Update tracking state.
+    let mut last_update_check: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut pending_release: Option<updater::ReleaseInfo> = None;
+    let mut pending_db_id: i64 = 0;
+    let mut update_approved: bool = false;
+    let mut idle_wait_start: Option<chrono::DateTime<chrono::Utc>> = None;
 
     // Main daemon loop.
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
@@ -206,6 +221,148 @@ async fn handle_start() -> anyhow::Result<()> {
                     Err(e) => {
                         debug!(error = %e, "LLM diagnosis failed (non-fatal)");
                     }
+                }
+            }
+        }
+
+        // Step 8: Update check (daily at configured time).
+        if config.update.enabled {
+            let should_check = last_update_check
+                .map(|t| chrono::Utc::now().signed_duration_since(t).num_hours() >= 20)
+                .unwrap_or(true);
+
+            if should_check
+                && updater::is_check_time(&config.update.check_time, config.checks.interval_secs)
+            {
+                match updater.check_for_update().await {
+                    Ok(Some(release)) => {
+                        info!(version = %release.version, "new version available");
+
+                        // Record in DB.
+                        let record = flatline::db::UpdateRecord {
+                            id: 0,
+                            checked_at: chrono::Utc::now().to_rfc3339(),
+                            from_version: env!("CARGO_PKG_VERSION").to_owned(),
+                            to_version: release.version.clone(),
+                            status: "pending".to_owned(),
+                            started_at: None,
+                            completed_at: None,
+                            rollback_reason: None,
+                            migration_log: None,
+                        };
+                        match db.insert_update(&record).await {
+                            Ok(id) => pending_db_id = id,
+                            Err(e) => warn!(error = %e, "failed to record update in DB"),
+                        }
+
+                        // Download the release.
+                        match updater.download_release(&release).await {
+                            Ok(_paths) => {
+                                info!(version = %release.version, "release downloaded");
+
+                                // Notify user.
+                                if let Err(e) = reporter
+                                    .send_update_available(
+                                        env!("CARGO_PKG_VERSION"),
+                                        &release.version,
+                                        &release.changelog,
+                                        config.update.auto_apply,
+                                    )
+                                    .await
+                                {
+                                    warn!(error = %e, "failed to notify about update");
+                                }
+
+                                pending_release = Some(release);
+                                if config.update.auto_apply {
+                                    update_approved = true;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "failed to download release");
+                            }
+                        }
+
+                        last_update_check = Some(chrono::Utc::now());
+                    }
+                    Ok(None) => {
+                        debug!("no update available");
+                        last_update_check = Some(chrono::Utc::now());
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "update check failed");
+                        last_update_check = Some(chrono::Utc::now());
+                    }
+                }
+            }
+        }
+
+        // Step 9: Apply pending update if approved and idle.
+        if pending_release.is_some() && update_approved {
+            let idle = health.as_ref().map(|h| updater.is_idle(h)).unwrap_or(false);
+
+            if idle {
+                // Clone release only when actually applying.
+                let release = pending_release.clone().expect("checked is_some above");
+                info!(version = %release.version, "applying update (idle window found)");
+                match updater
+                    .apply_update(&release, pending_db_id, &db, &mut reporter, &watcher)
+                    .await
+                {
+                    Ok(true) => {
+                        // Wintermute healthy with new version — self-update flatline.
+                        if let Err(e) = reporter
+                            .send_update_result(
+                                env!("CARGO_PKG_VERSION"),
+                                &release.version,
+                                true,
+                                None,
+                            )
+                            .await
+                        {
+                            warn!(error = %e, "failed to send update success notification");
+                        }
+                        if let Err(e) = updater.self_update(&release).await {
+                            warn!(error = %e, "flatline self-update failed");
+                        }
+                        // self_update calls process::exit on success
+                    }
+                    Ok(false) => {
+                        // Rolled back.
+                        pending_release = None;
+                        update_approved = false;
+                        idle_wait_start = None;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "update application failed");
+                        pending_release = None;
+                        update_approved = false;
+                        idle_wait_start = None;
+                    }
+                }
+            } else if let Some(release) = pending_release.as_ref() {
+                // Not idle — track wait time.
+                let wait_start = idle_wait_start.get_or_insert(chrono::Utc::now());
+                let waited_hours = chrono::Utc::now()
+                    .signed_duration_since(*wait_start)
+                    .num_hours();
+
+                let patience = i64::try_from(config.update.idle_patience_hours).unwrap_or(i64::MAX);
+
+                if waited_hours >= patience {
+                    info!("idle patience exhausted, deferring update");
+                    if let Err(e) = reporter
+                        .send_update_progress(
+                            &release.version,
+                            "waiting for idle window (patience exhausted, will retry tomorrow)",
+                        )
+                        .await
+                    {
+                        warn!(error = %e, "failed to send idle patience notification");
+                    }
+                    pending_release = None;
+                    update_approved = false;
+                    idle_wait_start = None;
                 }
             }
         }

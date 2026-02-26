@@ -22,15 +22,16 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
 }
 
 /// `std::process::Command` and `tokio::process::Command` must ONLY appear
-/// in `fixer.rs` and `patterns.rs`. No other module should use process execution.
+/// in `fixer.rs`, `patterns.rs`, and `updater.rs`. No other module should
+/// use process execution.
 #[test]
-fn process_command_confined_to_fixer_and_patterns() {
+fn process_command_confined_to_allowed_modules() {
     let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut rust_files = Vec::new();
     collect_rust_files(&src_dir, &mut rust_files).expect("failed to collect Rust source files");
 
     let forbidden = ["std::process::Command", "tokio::process::Command"];
-    let allowed_files: &[&str] = &["fixer.rs", "patterns.rs"];
+    let allowed_files: &[&str] = &["fixer.rs", "patterns.rs", "updater.rs"];
 
     for path in &rust_files {
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -45,7 +46,7 @@ fn process_command_confined_to_fixer_and_patterns() {
         for pattern in &forbidden {
             assert!(
                 !content.contains(pattern),
-                "process command API '{pattern}' found in {} — only fixer.rs and patterns.rs may use process execution",
+                "process command API '{pattern}' found in {} — only fixer.rs, patterns.rs, and updater.rs may use process execution",
                 path.display()
             );
         }

@@ -5,10 +5,6 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,6 +12,8 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -34,11 +32,11 @@ jobs:
             cross: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust toolchain
         if: ${{ !matrix.cross }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -59,47 +57,62 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           TARGET="${{ matrix.target }}"
-          ARCHIVE="wintermute-${VERSION}-${TARGET}"
 
-          mkdir -p "${ARCHIVE}"
-          cp "target/${TARGET}/release/wintermute" "${ARCHIVE}/"
-          cp "target/${TARGET}/release/flatline" "${ARCHIVE}/"
-          cp config.example.toml "${ARCHIVE}/"
-          cp flatline.toml.example "${ARCHIVE}/"
-          cp LICENSE "${ARCHIVE}/"
-          cp README.md "${ARCHIVE}/"
+          # Combined distribution archive (for install.sh)
+          DIST_DIR="wintermute-${VERSION}-${TARGET}"
+          mkdir -p "${DIST_DIR}"
+          cp "target/${TARGET}/release/wintermute" "${DIST_DIR}/"
+          cp "target/${TARGET}/release/flatline" "${DIST_DIR}/"
+          cp config.example.toml "${DIST_DIR}/"
+          cp flatline.toml.example "${DIST_DIR}/"
+          cp LICENSE "${DIST_DIR}/"
+          cp README.md "${DIST_DIR}/"
 
           if [ -d systemd ]; then
-            cp -r systemd "${ARCHIVE}/"
+            cp -r systemd "${DIST_DIR}/"
           fi
 
-          tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
-          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+          tar czf "wintermute-dist-${VERSION}-${TARGET}.tar.gz" "${DIST_DIR}"
+
+          # Per-binary archives (for auto-updater)
+          tar czf "wintermute-${VERSION}-${TARGET}.tar.gz" \
+            -C "target/${TARGET}/release" wintermute
+          tar czf "flatline-${VERSION}-${TARGET}.tar.gz" \
+            -C "target/${TARGET}/release" flatline
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: dist-${{ matrix.target }}
-          path: wintermute-*.tar.gz
+          # wintermute-dist-* = combined distribution archive (for install.sh)
+          # wintermute-[0-9]* = per-binary archive (for auto-updater, starts with version digit)
+          # flatline-*        = per-binary archive (for auto-updater)
+          path: |
+            wintermute-dist-*.tar.gz
+            wintermute-[0-9]*.tar.gz
+            flatline-*.tar.gz
 
   sandbox-image:
     name: Publish sandbox image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Build and push sandbox image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
           context: .
           file: Dockerfile.sandbox
@@ -111,13 +124,15 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [build]
+    needs: [build, sandbox-image]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           path: dist
           pattern: dist-*
@@ -125,12 +140,12 @@ jobs:
 
       - name: Create checksums file
         working-directory: dist
-        run: sha256sum wintermute-*.tar.gz > checksums.txt
+        run: sha256sum *.tar.gz > checksums-sha256.txt
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2
         with:
           generate_release_notes: true
           files: |
-            dist/wintermute-*.tar.gz
-            dist/checksums.txt
+            dist/*.tar.gz
+            dist/checksums-sha256.txt

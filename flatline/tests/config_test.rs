@@ -30,7 +30,6 @@ disk_warning_gb = 10.0
 [auto_fix]
 enabled = false
 restart_on_crash = false
-start_on_boot = false
 quarantine_failing_tools = false
 disable_failing_tasks = false
 revert_recent_changes = false
@@ -70,7 +69,6 @@ notify_users = [111, 222]
     assert!((config.thresholds.disk_warning_gb - 10.0).abs() < f64::EPSILON);
     assert!(!config.auto_fix.enabled);
     assert!(!config.auto_fix.restart_on_crash);
-    assert!(!config.auto_fix.start_on_boot);
     assert!(!config.auto_fix.quarantine_failing_tools);
     assert!(!config.auto_fix.disable_failing_tasks);
     assert!(!config.auto_fix.revert_recent_changes);
@@ -154,23 +152,123 @@ fn parse_example_config_file() {
     let config: FlatlineConfig = toml::from_str(example).expect("parse example config");
     assert_eq!(config.model.default, "ollama/qwen3:8b");
     assert_eq!(config.checks.interval_secs, 300);
-    assert!(config.auto_fix.start_on_boot);
+    assert!(config.update.enabled);
+    assert_eq!(config.update.channel, "stable");
+    assert_eq!(config.update.repo, "pycckuu/wintermute");
 }
 
 #[test]
-fn start_on_boot_defaults_to_true() {
+fn update_config_defaults() {
     let config: FlatlineConfig = toml::from_str("").expect("default config");
-    assert!(config.auto_fix.start_on_boot);
+    assert!(config.update.enabled);
+    assert_eq!(config.update.channel, "stable");
+    assert_eq!(config.update.check_time, "04:00");
+    assert!(!config.update.auto_apply);
+    assert_eq!(config.update.idle_patience_hours, 6);
+    assert_eq!(config.update.health_watch_secs, 300);
+    assert_eq!(config.update.repo, "pycckuu/wintermute");
+    assert!(config.update.pinned_version.is_none());
 }
 
 #[test]
-fn start_on_boot_can_be_disabled() {
+fn parse_update_config_section() {
     let config: FlatlineConfig = toml::from_str(
         r#"
-        [auto_fix]
-        start_on_boot = false
+        [update]
+        enabled = false
+        channel = "nightly"
+        check_time = "03:00"
+        auto_apply = true
+        idle_patience_hours = 12
+        health_watch_secs = 600
+        repo = "myorg/wintermute"
+        pinned_version = "0.3.2"
         "#,
     )
     .expect("parse config");
-    assert!(!config.auto_fix.start_on_boot);
+    assert!(!config.update.enabled);
+    assert_eq!(config.update.channel, "nightly");
+    assert_eq!(config.update.check_time, "03:00");
+    assert!(config.update.auto_apply);
+    assert_eq!(config.update.idle_patience_hours, 12);
+    assert_eq!(config.update.health_watch_secs, 600);
+    assert_eq!(config.update.repo, "myorg/wintermute");
+    assert_eq!(config.update.pinned_version.as_deref(), Some("0.3.2"));
+}
+
+#[test]
+fn validate_rejects_invalid_channel() {
+    let config: FlatlineConfig = toml::from_str(
+        r#"
+        [update]
+        channel = "beta"
+        "#,
+    )
+    .expect("parse config");
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result
+        .expect_err("should fail")
+        .to_string()
+        .contains("channel"));
+}
+
+#[test]
+fn validate_rejects_low_health_watch_secs() {
+    let config: FlatlineConfig = toml::from_str(
+        r#"
+        [update]
+        health_watch_secs = 10
+        "#,
+    )
+    .expect("parse config");
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result
+        .expect_err("should fail")
+        .to_string()
+        .contains("health_watch_secs"));
+}
+
+#[test]
+fn validate_rejects_invalid_repo_format() {
+    let config: FlatlineConfig = toml::from_str(
+        r#"
+        [update]
+        repo = "../../../evil"
+        "#,
+    )
+    .expect("parse config");
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result
+        .expect_err("should fail")
+        .to_string()
+        .contains("repo"));
+}
+
+#[test]
+fn validate_rejects_bad_check_time() {
+    let config: FlatlineConfig = toml::from_str(
+        r#"
+        [update]
+        check_time = "4:00"
+        "#,
+    )
+    .expect("parse config");
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result
+        .expect_err("should fail")
+        .to_string()
+        .contains("check_time"));
+}
+
+#[test]
+fn flatline_paths_includes_updates_dirs() {
+    let paths = flatline_paths().expect("resolve paths");
+    assert!(paths.updates_dir.ends_with("updates"));
+    assert!(paths.pending_dir.ends_with("pending"));
+    assert!(paths.updates_dir.starts_with(&paths.root));
+    assert!(paths.pending_dir.starts_with(&paths.updates_dir));
 }

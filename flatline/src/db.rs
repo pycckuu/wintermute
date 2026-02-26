@@ -30,6 +30,29 @@ pub struct ToolStatRow {
     pub avg_duration_ms: Option<i64>,
 }
 
+/// A row from the `updates` table tracking an update attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateRecord {
+    /// Auto-increment row ID.
+    pub id: i64,
+    /// When the update was checked (ISO 8601).
+    pub checked_at: String,
+    /// Version before the update.
+    pub from_version: String,
+    /// Target version.
+    pub to_version: String,
+    /// Current status of this update attempt.
+    pub status: String,
+    /// When the update application started (ISO 8601).
+    pub started_at: Option<String>,
+    /// When the update completed — success or failure (ISO 8601).
+    pub completed_at: Option<String>,
+    /// Reason for rollback, if any.
+    pub rollback_reason: Option<String>,
+    /// Captured stdout/stderr from migration scripts.
+    pub migration_log: Option<String>,
+}
+
 /// A record tracking a proposed or applied fix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixRecord {
@@ -321,6 +344,147 @@ impl StateDb {
         .context("failed to add suppression")?;
 
         Ok(())
+    }
+
+    // -- Update tracking methods --
+
+    /// Insert a new update record. Returns the assigned row ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn insert_update(&self, record: &UpdateRecord) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO updates (checked_at, from_version, to_version, status, started_at, completed_at, rollback_reason, migration_log)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(&record.checked_at)
+        .bind(&record.from_version)
+        .bind(&record.to_version)
+        .bind(&record.status)
+        .bind(&record.started_at)
+        .bind(&record.completed_at)
+        .bind(&record.rollback_reason)
+        .bind(&record.migration_log)
+        .execute(&self.pool)
+        .await
+        .context("failed to insert update record")?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Update the status and optional fields of an existing update record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn set_update_status(
+        &self,
+        id: i64,
+        status: &str,
+        started_at: Option<&str>,
+        completed_at: Option<&str>,
+        rollback_reason: Option<&str>,
+        migration_log: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE updates SET
+                status = ?2,
+                started_at = COALESCE(?3, started_at),
+                completed_at = COALESCE(?4, completed_at),
+                rollback_reason = COALESCE(?5, rollback_reason),
+                migration_log = COALESCE(?6, migration_log)
+             WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(started_at)
+        .bind(completed_at)
+        .bind(rollback_reason)
+        .bind(migration_log)
+        .execute(&self.pool)
+        .await
+        .context("failed to update update record")?;
+
+        Ok(())
+    }
+
+    /// Get the most recent update record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn latest_update(&self) -> anyhow::Result<Option<UpdateRecord>> {
+        let row: Option<UpdateRow> = sqlx::query_as(
+            "SELECT id, checked_at, from_version, to_version, status, started_at, completed_at, rollback_reason, migration_log
+             FROM updates
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to query latest update")?;
+
+        Ok(row.map(update_row_into_record))
+    }
+
+    /// Get any pending update (status = 'pending' or 'downloading').
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn pending_update(&self) -> anyhow::Result<Option<UpdateRecord>> {
+        let row: Option<UpdateRow> = sqlx::query_as(
+            "SELECT id, checked_at, from_version, to_version, status, started_at, completed_at, rollback_reason, migration_log
+             FROM updates
+             WHERE status IN ('pending', 'downloading')
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to query pending update")?;
+
+        Ok(row.map(update_row_into_record))
+    }
+}
+
+/// Raw row tuple from the `updates` table.
+type UpdateRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Convert a raw `updates` row tuple into an [`UpdateRecord`].
+fn update_row_into_record(row: UpdateRow) -> UpdateRecord {
+    let (
+        id,
+        checked_at,
+        from_version,
+        to_version,
+        status,
+        started_at,
+        completed_at,
+        rollback_reason,
+        migration_log,
+    ) = row;
+    UpdateRecord {
+        id,
+        checked_at,
+        from_version,
+        to_version,
+        status,
+        started_at,
+        completed_at,
+        rollback_reason,
+        migration_log,
     }
 }
 

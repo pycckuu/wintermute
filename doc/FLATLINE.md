@@ -64,9 +64,10 @@ Quarantine a tool, not delete it.
 │  ├── Tools + executor            ├── Health checker          │
 │  ├── Memory engine               ├── Diagnostic engine       │
 │  ├── Telegram adapter            ├── Fix proposer            │
-│  └── writes → logs/              └── Fix applier             │
-│               ↓                         ↓ reads               │
-│                                                               │
+│  └── writes → logs/              ├── Fix applier             │
+│               ↓                  ├── Updater                 │
+│                                  └── Reporter                 │
+│                                         ↓ reads + writes      │
 │  ~/.wintermute/                                              │
 │  ├── logs/*.jsonl          ← Flatline reads these              │
 │  ├── scripts/.git/         ← Flatline inspects + reverts       │
@@ -75,8 +76,16 @@ Quarantine a tool, not delete it.
 │  ├── flatline/                                                  │
 │  │   ├── state.db          ← Flatline's own state              │
 │  │   ├── diagnoses/        ← Diagnosis reports               │
-│  │   └── patches/          ← Proposed + applied fixes        │
+│  │   ├── patches/          ← Proposed + applied fixes        │
+│  │   └── updates/          ← Downloaded binaries + rollback  │
+│  │       ├── pending/      ← Downloaded, not yet applied     │
+│  │       ├── wintermute.prev ← Rollback binary               │
+│  │       ├── flatline.prev   ← Rollback binary               │
+│  │       └── last_update.json ← Update log                    │
 │  └── flatline.toml           ← Flatline config                   │
+│                                                               │
+│  GitHub Releases API ← Flatline checks daily                   │
+│  Docker Registry     ← Flatline pulls images                   │
 │                                                               │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -515,6 +524,19 @@ CREATE TABLE suppressions (
     suppressed_until TEXT,
     reason TEXT
 );
+
+-- Update history
+CREATE TABLE updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at TEXT NOT NULL,
+    from_version TEXT NOT NULL,
+    to_version TEXT NOT NULL,
+    status TEXT NOT NULL,         -- pending | downloading | applying | healthy | rolled_back | failed | skipped | pinned
+    started_at TEXT,
+    completed_at TEXT,
+    rollback_reason TEXT,         -- NULL if successful
+    migration_log TEXT            -- stdout/stderr from migration script
+);
 ```
 
 ---
@@ -534,6 +556,9 @@ through the filesystem and signals.
 | Restart Wintermute | SIGTERM → wait → SIGKILL if needed → start |
 | Reset sandbox | wintermute reset (CLI command) |
 | Edit agent.toml | Direct file write (e.g., disable scheduled task) |
+| Update binaries | Download from GitHub, swap, restart |
+| Pull Docker images | docker pull (sandbox + browser sidecar) |
+| Rollback update | Restore .prev binaries, retag old images |
 | Notify user | Telegram bot API (same token, [🩺 Flatline] prefix) |
 
 Wintermute picks up changes:
@@ -541,6 +566,299 @@ Wintermute picks up changes:
 - agent.toml changes → picked up on next heartbeat cycle
 - Container reset → Wintermute reconnects to new container
 - Process restart → Wintermute starts fresh, loads latest state
+
+---
+
+## Auto-Update
+
+Flatline checks for new releases daily and manages the full update
+lifecycle: download, verify, swap, restart, health-check, rollback if
+broken. The user stays informed and in control.
+
+### What Gets Updated
+
+Four artifacts, in this order:
+
+```
+1. Sandbox image       docker pull (wintermute-sandbox)
+2. Browser sidecar     docker pull (wintermute-browser)
+3. Wintermute binary   download + swap + restart
+4. Flatline binary     download + swap + exit (systemd restarts)
+```
+
+Order matters: images first (can be pulled while Wintermute is still
+running), then Wintermute (requires restart), then Flatline last (after
+Wintermute is confirmed healthy with the new version).
+
+### Update Source
+
+GitHub Releases. Each release contains:
+- Platform binaries: `wintermute-{version}-{target}.tar.gz`
+  (e.g. `wintermute-0.4.0-x86_64-unknown-linux-gnu.tar.gz`)
+- Checksum file: `checksums-sha256.txt`
+- Docker image tags matching the release version
+- Changelog in release body
+
+```rust
+// Compiled into both binaries at build time
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const TARGET: &str = env!("TARGET"); // set by build.rs
+```
+
+Version check:
+```
+GET https://api.github.com/repos/{owner}/wintermute/releases/latest
+→ tag_name: "v0.4.0"
+→ compare with current VERSION using semver
+→ if newer: proceed
+```
+
+### Channels
+
+```toml
+[update]
+channel = "stable"   # stable | nightly
+```
+
+**stable** (default): Tagged releases only. Most users. Tested.
+**nightly**: Latest commit on main. Builds published to
+`ghcr.io/{owner}/wintermute:nightly` and as GitHub release
+marked "pre-release". For development/testing.
+
+### Update Flow
+
+```
+Daily timer (default 04:00, configurable)
+    │
+    ▼
+Check GitHub Releases API
+    │
+    ├── No new version → done
+    │
+    └── New version found
+            │
+            ▼
+        Download binary + checksum (to ~/.wintermute/flatline/updates/)
+            │
+            ▼
+        Verify SHA256 checksum
+            │
+            ├── Mismatch → alert user, abort
+            │
+            └── Checksum OK
+                    │
+                    ▼
+                Notify user via Telegram:
+                "🩺 Flatline: Update available v0.3.2 → v0.4.0
+                 Changes: [summary from changelog]
+                 Reply /update to install, /skip to defer"
+                    │
+                    ├── auto_apply = true → skip approval, proceed
+                    │
+                    └── User replies /update (or auto_apply)
+                            │
+                            ▼
+                        Wait for idle window
+                        (no active Wintermute sessions)
+                            │
+                            ▼
+                        ┌── UPDATE SEQUENCE ──────────────┐
+                        │                                  │
+                        │ 1. Pull Docker images            │
+                        │    docker pull sandbox:v0.4.0    │
+                        │    docker pull browser:v0.4.0    │
+                        │                                  │
+                        │ 2. Stop Wintermute (SIGTERM)     │
+                        │    Wait for graceful shutdown     │
+                        │                                  │
+                        │ 3. Backup current binary         │
+                        │    cp wintermute wintermute.prev │
+                        │    cp flatline flatline.prev     │
+                        │                                  │
+                        │ 4. Replace wintermute binary     │
+                        │    mv wintermute.new wintermute  │
+                        │    chmod +x wintermute           │
+                        │                                  │
+                        │ 5. Recreate sandbox container    │
+                        │    (new image, same volumes)     │
+                        │                                  │
+                        │ 6. Start Wintermute              │
+                        │                                  │
+                        │ 7. Health watch (5 min)          │
+                        │    Monitor health.json           │
+                        │    Check process alive           │
+                        │    Check container healthy       │
+                        │                                  │
+                        │ 8a. HEALTHY:                     │
+                        │     Replace flatline binary      │
+                        │     Exit (systemd restarts new)  │
+                        │     Notify: "✅ Updated to 0.4.0"│
+                        │                                  │
+                        │ 8b. UNHEALTHY:                   │
+                        │     → Rollback (see below)       │
+                        │                                  │
+                        └──────────────────────────────────┘
+```
+
+### Idle Window Detection
+
+Updates should not interrupt active work. Flatline waits for an idle
+window before applying:
+
+```rust
+fn is_idle(health: &HealthFile) -> bool {
+    health.active_sessions == 0
+        && health.last_heartbeat.elapsed() < Duration::from_secs(60)
+        // Agent is alive but not doing anything
+}
+```
+
+If no idle window within the configured patience period (default 6
+hours), Flatline notifies the user:
+"Update pending but Wintermute has been busy. Reply /update-now to
+force, or I'll try again tomorrow."
+
+### Rollback
+
+If Wintermute fails health checks within 5 minutes of an update:
+
+```
+Health check fails
+    │
+    ▼
+Stop broken Wintermute (SIGKILL if needed)
+    │
+    ▼
+Restore previous binary:  mv wintermute.prev wintermute
+    │
+    ▼
+Restore previous image:   retag old image
+    │
+    ▼
+Recreate container with old image
+    │
+    ▼
+Start Wintermute (old version)
+    │
+    ▼
+Verify health (old version works?)
+    │
+    ├── Yes → Notify: "⚠️ Update to v0.4.0 failed, rolled back to v0.3.2.
+    │          Error: [health check details]. Will retry on next release."
+    │
+    └── No → CRITICAL: Both versions broken
+             Notify: "🚨 Update rollback also failed. Manual intervention needed."
+             Do NOT retry. Leave in failed state for user to debug.
+```
+
+Rollback artifacts stored in `~/.wintermute/flatline/updates/`:
+```
+updates/
+├── wintermute.prev          # previous binary
+├── flatline.prev            # previous binary
+├── last_update.json         # update log with timestamps + result
+└── pending/                 # downloaded but not yet applied
+    ├── wintermute-0.4.0     # new binary
+    ├── flatline-0.4.0       # new binary
+    └── checksums-sha256.txt
+```
+
+### Self-Update (Flatline Updating Itself)
+
+This is the classic "binary replacing itself" problem. The approach:
+
+1. Flatline replaces its own binary on disk (the running process
+   keeps the old file descriptor open — Unix allows this)
+2. Flatline exits with a special code (exit code 10)
+3. systemd restarts the service → new binary starts
+4. New Flatline runs a self-check: can it read config, connect to
+   logs, access state.db?
+5. If self-check fails: the binary is already replaced, so systemd
+   will keep restarting the broken version. The old binary is at
+   `flatline.prev` — the user (or a cron job) can restore it.
+
+```ini
+# systemd addition for clean self-update
+[Service]
+RestartForceExitStatus=10    # treat exit 10 as "please restart me"
+```
+
+Flatline ONLY self-updates after Wintermute's update is confirmed
+healthy. If Wintermute's update fails and gets rolled back, Flatline
+does NOT update itself (versions might be coupled).
+
+### What Triggers an Update
+
+| Trigger | Behavior |
+|---------|----------|
+| Daily timer (04:00) | Check + notify (or auto-apply) |
+| User sends `/check-update` | Check immediately, report result |
+| User sends `/update` | Apply pending update now |
+| User sends `/update-now` | Apply even if not idle |
+| User sends `/skip` | Defer this version, check again tomorrow |
+| User sends `/pin` | Stay on current version until `/unpin` |
+| Flatline restart | Check if interrupted update needs cleanup |
+
+### Migration Support
+
+Some updates need more than a binary swap. A release can include a
+migration script that runs between steps 4 and 5:
+
+```
+Release v0.5.0:
+  assets:
+    - wintermute-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+    - flatline-0.5.0-x86_64-unknown-linux-gnu.tar.gz
+    - checksums-sha256.txt
+    - migrate-0.4-to-0.5.sh    ← optional migration
+```
+
+Migration scripts run with limited scope:
+- Can modify files in `~/.wintermute/` (config, db schema)
+- Cannot modify config.toml (security policy stays human-only)
+- Cannot access the network
+- Run AFTER the binary is swapped but BEFORE Wintermute starts
+- Logged in full to `updates/last_update.json`
+- If migration fails: rollback the binary too
+
+Example migrations:
+- Database schema changes (ALTER TABLE in memory.db/state.db)
+- Config format changes (add new fields to agent.toml)
+- Rename directories
+- Convert log format
+
+### Version Pinning & Compatibility
+
+```rust
+// In both binaries
+const MIN_COMPATIBLE_FLATLINE: &str = "0.3.0";
+const MIN_COMPATIBLE_WINTERMUTE: &str = "0.3.0";
+```
+
+On startup, each binary checks the other's version:
+- Wintermute reads Flatline's version from `flatline --version`
+- Flatline reads Wintermute's version from `wintermute --version`
+- If incompatible: alert user, refuse to start (don't silently break)
+
+This prevents partial updates from causing mysterious failures.
+
+### Docker Image Updates
+
+Docker images (sandbox + browser sidecar) are pulled before the binary
+swap. This means:
+
+1. `docker pull` can happen while Wintermute is still running
+2. Old containers keep running on old images until restart
+3. After binary swap, Wintermute's startup recreates the sandbox
+   container from the new image (same volumes, new code)
+4. Browser sidecar uses the new image on next launch (on-demand)
+
+If `docker pull` fails (network, registry down), the update is deferred.
+Binaries are NOT swapped without their matching images.
+
+Image tags follow the release version: `ghcr.io/{owner}/wintermute-sandbox:v0.4.0`.
+The `latest` tag also moves, but Flatline always pulls the specific
+version tag for reproducibility.
 
 ---
 
@@ -552,13 +870,12 @@ Wintermute picks up changes:
 - **Cannot change budget limits** — that's config.toml
 - **Cannot approve things on behalf of the user** — only Wintermute's
   approval flow handles that
-- **Cannot modify Wintermute's binary** — only operates on data/config
 - **Cannot install packages** — that's Wintermute's job
-- **Cannot access the sandbox** — no Docker interaction
+- **Cannot access the sandbox** — no Docker interaction (except image pulls for updates)
 
 Flatline is deliberately less powerful than Wintermute. It can roll back,
-restart, quarantine, disable, and report. It cannot create, install,
-configure, or grant permissions.
+restart, quarantine, disable, update binaries/images, and report. It
+cannot create, install, configure, or grant permissions.
 
 ---
 
@@ -579,6 +896,7 @@ wintermute/
 │   │   ├── diagnosis.rs    # LLM-based diagnosis (novel problems)
 │   │   ├── fixer.rs        # Fix proposal + application + verification
 │   │   ├── reporter.rs     # Telegram notifications + daily reports
+│   │   ├── updater.rs      # Auto-update: check, download, swap, rollback
 │   │   └── db.rs           # state.db management
 │   └── Cargo.toml
 ├── Cargo.toml              # workspace
@@ -591,56 +909,16 @@ cargo build --release -p wintermute
 cargo build --release -p flatline
 ```
 
+Or as a single install:
+```bash
+wintermute start            # starts the agent
+wintermute flatline start     # starts the supervisor (could be subcommand)
+```
+
 ### Process Management
 
-#### Recommended: Single Command
-
-With `start_on_boot = true` (the default), Flatline starts Wintermute
-automatically if it is not already running:
-
-```bash
-flatline start
-```
-
-This is the recommended way to run the full stack. Flatline checks
-for a live Wintermute process on startup. If Wintermute isn't running,
-Flatline spawns it immediately before entering the monitoring loop.
-If Wintermute is already running, Flatline skips the start and begins
-monitoring.
-
-Set `start_on_boot = false` in `flatline.toml` for monitoring-only
-mode (Flatline watches but does not start Wintermute on boot).
-
-#### Manual: Two Processes
-
-Run both independently in separate terminal sessions or tmux panes:
-
-```bash
-wintermute start     # Terminal 1: start the agent
-flatline start       # Terminal 2: start the supervisor
-```
-
-#### Production: systemd (Linux)
-
-With `start_on_boot = true`, a single systemd unit is sufficient:
-
-```ini
-# /etc/systemd/system/flatline.service
-[Unit]
-Description=Wintermute Flatline (Supervisor + Agent Launcher)
-After=network.target docker.service
-
-[Service]
-ExecStart=/usr/local/bin/flatline start
-Restart=always
-RestartSec=5
-User=wintermute
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Alternatively, manage both as separate units for finer control:
+Both processes managed by systemd (Linux) or launchd (macOS),
+or just run in separate terminal sessions / tmux panes.
 
 ```ini
 # /etc/systemd/system/wintermute.service
@@ -663,6 +941,7 @@ WantedBy=multi-user.target
 [Unit]
 Description=Wintermute Flatline (Supervisor)
 After=wintermute.service
+BindsTo=wintermute.service
 
 [Service]
 ExecStart=/usr/local/bin/flatline start
@@ -674,8 +953,9 @@ User=wintermute
 WantedBy=multi-user.target
 ```
 
-If Wintermute crashes, Flatline detects it via the `ProcessDown` pattern
-and restarts it (when `restart_on_crash = true`).
+Flatline starts after Wintermute. If Wintermute's service is stopped
+intentionally, Flatline stops too (BindsTo). But if Wintermute crashes,
+Flatline stays running and handles the restart.
 
 ---
 
@@ -707,7 +987,6 @@ disk_warning_gb = 5                # warn when ~/.wintermute > 5GB
 [auto_fix]
 enabled = true
 restart_on_crash = true            # auto-restart Wintermute
-start_on_boot = true              # start Wintermute when Flatline boots
 quarantine_failing_tools = true    # auto-quarantine after threshold
 disable_failing_tasks = true       # auto-disable after 3 consecutive failures
 revert_recent_changes = true       # auto-revert if correlated with failure
@@ -717,6 +996,16 @@ max_auto_restarts_per_hour = 3     # stop retrying after N restarts
 daily_health = "08:00"             # daily health summary
 alert_cooldown_mins = 30           # don't repeat same alert within window
 telegram_prefix = "🩺 Flatline"
+
+[update]
+enabled = true                     # check for updates
+channel = "stable"                 # stable | nightly
+check_time = "04:00"               # daily check time (local)
+auto_apply = false                 # true = update without asking, false = notify + wait for /update
+idle_patience_hours = 6            # how long to wait for idle before nagging
+health_watch_secs = 300            # monitor health for 5 min after update
+repo = "pycckuu/wintermute"        # GitHub owner/repo
+# pinned_version = "0.3.2"         # uncomment to pin to specific version
 
 [telegram]
 bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"  # same bot
@@ -760,11 +1049,23 @@ Flatline dependencies:
 - Approval flow: propose → user approves → apply
 - State database: tool stats, fix history, suppressions
 
-**Week 4: Hardening**
-- Edge cases: Flatline crashes during fix application
+**Week 4: Auto-Update**
+- GitHub Releases API client: check latest, compare semver
+- Download + SHA256 verification
+- Binary swap: backup → replace → restart → health watch
+- Rollback: detect unhealthy post-update, restore .prev
+- Self-update: replace on disk, exit with code 10
+- Docker image pulls: sandbox + browser sidecar
+- Migration script support: run between swap and restart
+- Telegram commands: /update, /skip, /pin, /check-update
+
+**Week 5: Hardening**
+- Edge cases: Flatline crashes during fix or update application
 - Idempotency: same fix not applied twice
+- Interrupted update recovery: detect partial state on restart
 - Cooldowns: don't spam alerts, don't restart in a loop
-- Testing: simulate failure scenarios
+- Version compatibility checks between binaries
+- Testing: simulate failure scenarios + failed update rollbacks
 
 ---
 
