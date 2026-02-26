@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  User-level agent. Install to ~/Library/LaunchAgents/
+  Manage with:
+    launchctl load   ~/Library/LaunchAgents/com.wintermute.flatline.plist
+    launchctl unload ~/Library/LaunchAgents/com.wintermute.flatline.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.wintermute.flatline</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>-c</string>
+		<string>set -a; source "$HOME/.wintermute/.env" 2>/dev/null; set +a; exec "$HOME/.wintermute/bin/flatline" start</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>/tmp/flatline.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/flatline.err.log</string>
+</dict>
+</plist>

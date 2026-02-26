@@ -77,6 +77,22 @@ systemctl --user enable --now wintermute
 systemctl --user enable --now flatline
 ```
 
+## Running as a launchd service (macOS)
+
+```bash
+cp launchd/com.wintermute.agent.plist ~/Library/LaunchAgents/
+cp launchd/com.wintermute.flatline.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.wintermute.agent.plist
+launchctl load ~/Library/LaunchAgents/com.wintermute.flatline.plist
+```
+
+To stop:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.wintermute.agent.plist
+launchctl unload ~/Library/LaunchAgents/com.wintermute.flatline.plist
+```
+
 ## License
 
 Apache 2.0
