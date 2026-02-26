@@ -29,13 +29,18 @@ detect_target() {
 }
 
 latest_version() {
-    local json
+    local json version
     json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
     if command -v jq &>/dev/null; then
-        echo "$json" | jq -r '.tag_name' | sed 's/^v//'
+        version="$(echo "$json" | jq -r '.tag_name' | sed 's/^v//')"
     else
-        echo "$json" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/'
+        version="$(echo "$json" | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')"
     fi
+    # Validate version format to prevent injection.
+    if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        error "Parsed version '${version}' does not match expected semver format"
+    fi
+    echo "$version"
 }
 
 main() {
@@ -53,9 +58,9 @@ main() {
     fi
     info "Latest version: v${version}"
 
-    archive="wintermute-${version}-${target}.tar.gz"
+    archive="wintermute-dist-${version}-${target}.tar.gz"
     url="https://github.com/${REPO}/releases/download/v${version}/${archive}"
-    checksum_url="https://github.com/${REPO}/releases/download/v${version}/checksums.txt"
+    checksum_url="https://github.com/${REPO}/releases/download/v${version}/checksums-sha256.txt"
 
     local tmpdir
     tmpdir="$(mktemp -d)"
@@ -66,16 +71,22 @@ main() {
         || error "Download failed. Check that a release exists for ${target}."
 
     info "Verifying checksum..."
-    curl -fsSL -o "${tmpdir}/checksums.txt" "$checksum_url"
-    expected="$(grep "${archive}" "${tmpdir}/checksums.txt" | awk '{print $1}')"
+    curl -fsSL -o "${tmpdir}/checksums-sha256.txt" "$checksum_url"
+    expected="$(grep -F "${archive}" "${tmpdir}/checksums-sha256.txt" | awk '{print $1}')"
     if [ -n "$expected" ]; then
-        actual="$(shasum -a 256 "${tmpdir}/${archive}" | awk '{print $1}')"
+        if command -v sha256sum &>/dev/null; then
+            actual="$(sha256sum "${tmpdir}/${archive}" | awk '{print $1}')"
+        elif command -v shasum &>/dev/null; then
+            actual="$(shasum -a 256 "${tmpdir}/${archive}" | awk '{print $1}')"
+        else
+            error "No sha256 tool found. Install coreutils or perl."
+        fi
         if [ "$expected" != "$actual" ]; then
             error "Checksum mismatch! Expected ${expected}, got ${actual}"
         fi
         info "Checksum verified."
     else
-        error "No checksum found for ${archive} in checksums.txt. Aborting."
+        error "No checksum found for ${archive} in checksums-sha256.txt. Aborting."
     fi
 
     info "Installing to ${INSTALL_DIR}..."
@@ -101,7 +112,7 @@ main() {
     esac
 
     # Check Docker
-    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
         info "Docker detected."
     else
         warn "Docker not found or not running."

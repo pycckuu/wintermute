@@ -21,5 +21,7 @@ pub mod patterns;
 pub mod reporter;
 /// Rolling statistics engine for tool health and budget tracking.
 pub mod stats;
+/// Auto-update: check, download, verify, swap, rollback.
+pub mod updater;
 /// Log tailing and health file monitoring.
 pub mod watcher;

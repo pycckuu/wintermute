@@ -24,7 +24,6 @@ disk_warning_gb = 5.0
 [auto_fix]
 enabled = true
 restart_on_crash = true
-start_on_boot = true
 quarantine_failing_tools = true
 disable_failing_tasks = true
 revert_recent_changes = true
@@ -34,6 +33,16 @@ max_auto_restarts_per_hour = 3
 daily_health = "08:00"
 alert_cooldown_mins = 30
 telegram_prefix = "🩺 Flatline"
+
+[update]
+enabled = true
+channel = "stable"
+check_time = "04:00"
+auto_apply = false
+idle_patience_hours = 6
+health_watch_secs = 300
+repo = "pycckuu/wintermute"
+# pinned_version = "0.3.2"
 
 [telegram]
 bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"

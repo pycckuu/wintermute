@@ -23,3 +23,15 @@ CREATE TABLE IF NOT EXISTS suppressions (
     suppressed_until TEXT,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS updates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at TEXT NOT NULL,
+    from_version TEXT NOT NULL,
+    to_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    rollback_reason TEXT,
+    migration_log TEXT
+);

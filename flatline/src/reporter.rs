@@ -179,6 +179,95 @@ impl Reporter {
         self.send_to_all(&text).await
     }
 
+    /// Notify that a new version is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Telegram API call fails.
+    pub async fn send_update_available(
+        &mut self,
+        from_version: &str,
+        to_version: &str,
+        changelog: &str,
+        auto_apply: bool,
+    ) -> anyhow::Result<()> {
+        let action_note = if auto_apply {
+            "Auto-apply is enabled. Will install when idle."
+        } else {
+            "Reply /update to install, /skip to defer."
+        };
+
+        let text = format!(
+            "<b>{prefix} \u{2014} Update Available</b>\n\n\
+             {from} \u{2192} <b>{to}</b>\n\n\
+             {changelog}\n\n\
+             {action}",
+            prefix = html_escape(&self.prefix),
+            from = html_escape(from_version),
+            to = html_escape(to_version),
+            changelog = html_escape(changelog),
+            action = html_escape(action_note),
+        );
+
+        self.send_to_all(&text).await
+    }
+
+    /// Notify about update progress (downloading, applying, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Telegram API call fails.
+    pub async fn send_update_progress(
+        &mut self,
+        to_version: &str,
+        stage: &str,
+    ) -> anyhow::Result<()> {
+        let text = format!(
+            "<b>{prefix} \u{2014} Updating</b>\n\n\
+             Updating to <b>{to}</b>: {stage}",
+            prefix = html_escape(&self.prefix),
+            to = html_escape(to_version),
+            stage = html_escape(stage),
+        );
+
+        self.send_to_all(&text).await
+    }
+
+    /// Notify about update result (success, failure, or rollback).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Telegram API call fails.
+    pub async fn send_update_result(
+        &mut self,
+        from_version: &str,
+        to_version: &str,
+        success: bool,
+        rollback_reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let text = if success {
+            format!(
+                "<b>{prefix} \u{2014} Update Complete</b>\n\n\
+                 \u{2705} Updated to <b>{to}</b>",
+                prefix = html_escape(&self.prefix),
+                to = html_escape(to_version),
+            )
+        } else {
+            let reason = rollback_reason.unwrap_or("health checks failed");
+            format!(
+                "<b>{prefix} \u{2014} Update Rolled Back</b>\n\n\
+                 \u{26a0}\u{fe0f} Update to {to} failed, rolled back to {from}.\n\
+                 Reason: {reason}",
+                prefix = html_escape(&self.prefix),
+                to = html_escape(to_version),
+                from = html_escape(from_version),
+                reason = html_escape(reason),
+            )
+        };
+
+        self.send_to_all(&text).await
+    }
+
     /// Check if an alert for this pattern is in cooldown.
     pub fn is_in_cooldown(&self, key: &str) -> bool {
         let Some(last_sent) = self.cooldowns.get(key) else {

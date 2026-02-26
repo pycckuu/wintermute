@@ -1,6 +1,6 @@
 //! Tests for the Flatline state database.
 
-use flatline::db::{FixRecord, StateDb};
+use flatline::db::{FixRecord, StateDb, UpdateRecord};
 
 async fn open_temp_db() -> (StateDb, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -213,4 +213,146 @@ async fn distinct_tool_names() {
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"alpha".to_owned()));
     assert!(names.contains(&"beta".to_owned()));
+}
+
+// -- Update record tests --
+
+fn make_update_record(to_version: &str, status: &str) -> UpdateRecord {
+    UpdateRecord {
+        id: 0,
+        checked_at: "2026-02-19T04:00:00Z".to_owned(),
+        from_version: "0.1.0".to_owned(),
+        to_version: to_version.to_owned(),
+        status: status.to_owned(),
+        started_at: None,
+        completed_at: None,
+        rollback_reason: None,
+        migration_log: None,
+    }
+}
+
+#[tokio::test]
+async fn insert_and_query_update_record() {
+    let (db, _dir) = open_temp_db().await;
+
+    let record = make_update_record("0.2.0", "pending");
+    let id = db.insert_update(&record).await.expect("insert update");
+    assert!(id > 0);
+
+    let latest = db.latest_update().await.expect("latest").expect("some");
+    assert_eq!(latest.id, id);
+    assert_eq!(latest.from_version, "0.1.0");
+    assert_eq!(latest.to_version, "0.2.0");
+    assert_eq!(latest.status, "pending");
+}
+
+#[tokio::test]
+async fn update_status_transition() {
+    let (db, _dir) = open_temp_db().await;
+
+    let record = make_update_record("0.3.0", "pending");
+    let id = db.insert_update(&record).await.expect("insert");
+
+    // Transition to downloading.
+    db.set_update_status(id, "downloading", None, None, None, None)
+        .await
+        .expect("update to downloading");
+
+    let r = db.latest_update().await.expect("query").expect("some");
+    assert_eq!(r.status, "downloading");
+
+    // Transition to applying.
+    db.set_update_status(
+        id,
+        "applying",
+        Some("2026-02-19T04:05:00Z"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("update to applying");
+
+    let r = db.latest_update().await.expect("query").expect("some");
+    assert_eq!(r.status, "applying");
+    assert_eq!(r.started_at.as_deref(), Some("2026-02-19T04:05:00Z"));
+
+    // Transition to healthy.
+    db.set_update_status(
+        id,
+        "healthy",
+        None,
+        Some("2026-02-19T04:10:00Z"),
+        None,
+        None,
+    )
+    .await
+    .expect("update to healthy");
+
+    let r = db.latest_update().await.expect("query").expect("some");
+    assert_eq!(r.status, "healthy");
+    assert_eq!(r.completed_at.as_deref(), Some("2026-02-19T04:10:00Z"));
+}
+
+#[tokio::test]
+async fn pending_update_returns_active_record() {
+    let (db, _dir) = open_temp_db().await;
+
+    // No pending updates initially.
+    let pending = db.pending_update().await.expect("query");
+    assert!(pending.is_none());
+
+    // Insert a pending update.
+    let record = make_update_record("0.4.0", "pending");
+    db.insert_update(&record).await.expect("insert");
+
+    let pending = db.pending_update().await.expect("query").expect("some");
+    assert_eq!(pending.to_version, "0.4.0");
+
+    // Insert a healthy (completed) update — should not be returned by pending.
+    let mut record2 = make_update_record("0.5.0", "healthy");
+    record2.completed_at = Some("2026-02-20T04:00:00Z".to_owned());
+    db.insert_update(&record2).await.expect("insert 2");
+
+    let pending = db.pending_update().await.expect("query").expect("some");
+    // Should still find the pending 0.4.0, not the healthy 0.5.0.
+    assert_eq!(pending.to_version, "0.4.0");
+}
+
+#[tokio::test]
+async fn latest_update_returns_most_recent() {
+    let (db, _dir) = open_temp_db().await;
+
+    let r1 = make_update_record("0.2.0", "healthy");
+    db.insert_update(&r1).await.expect("insert 1");
+
+    let r2 = make_update_record("0.3.0", "pending");
+    db.insert_update(&r2).await.expect("insert 2");
+
+    let latest = db.latest_update().await.expect("query").expect("some");
+    assert_eq!(latest.to_version, "0.3.0");
+}
+
+#[tokio::test]
+async fn update_rollback_records_reason() {
+    let (db, _dir) = open_temp_db().await;
+
+    let record = make_update_record("0.6.0", "applying");
+    let id = db.insert_update(&record).await.expect("insert");
+
+    db.set_update_status(
+        id,
+        "rolled_back",
+        None,
+        Some("2026-02-19T04:15:00Z"),
+        Some("health checks failed"),
+        Some("migration: ok"),
+    )
+    .await
+    .expect("rollback update");
+
+    let r = db.latest_update().await.expect("query").expect("some");
+    assert_eq!(r.status, "rolled_back");
+    assert_eq!(r.rollback_reason.as_deref(), Some("health checks failed"));
+    assert_eq!(r.migration_log.as_deref(), Some("migration: ok"));
 }
