@@ -230,9 +230,10 @@ impl ToolRouter {
                 let resolved_user_id =
                     session_user_id.or_else(|| input.get("user_id").and_then(|v| v.as_i64()));
                 match (&self.telegram_tx, resolved_user_id) {
-                    (Some(tx), Some(user_id)) => {
-                        into_tool_result(core::send_telegram(tx, user_id, input).await)
-                    }
+                    (Some(tx), Some(user_id)) => into_tool_result(
+                        core::send_telegram(tx, user_id, input, self.executor.workspace_dir())
+                            .await,
+                    ),
                     (Some(_), None) => {
                         ToolResult::error("send_telegram requires a session user context")
                     }
