@@ -5,6 +5,7 @@
 //! Tool definitions (name, description, JSON Schema) are returned by
 //! [`core_tool_definitions`].
 
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
@@ -486,14 +487,19 @@ pub async fn memory_save(
 
 /// Send a message to the user via Telegram.
 ///
+/// Container paths starting with `/workspace/` are automatically resolved to
+/// the host-side workspace directory so that files created inside Docker
+/// (e.g. browser screenshots) can be sent as attachments.
+///
 /// # Errors
 ///
-/// Returns [`ToolError::InvalidInput`] if `text` is missing, or
-/// [`ToolError::ExecutionFailed`] if sending fails.
+/// Returns [`ToolError::InvalidInput`] if `text` is missing or the file path
+/// is outside the workspace, or [`ToolError::ExecutionFailed`] if sending fails.
 pub async fn send_telegram(
     tx: &mpsc::Sender<TelegramOutbound>,
     user_id: i64,
     input: &serde_json::Value,
+    workspace_dir: &Path,
 ) -> Result<String, ToolError> {
     let text = input
         .get("text")
@@ -502,10 +508,37 @@ pub async fn send_telegram(
 
     let file = input.get("file").and_then(|v| v.as_str());
 
+    // Map container paths (/workspace/...) to host paths. Reject paths that
+    // don't use the /workspace/ prefix to prevent host filesystem probing.
+    let resolved_file = if let Some(f) = file {
+        let relative = f.strip_prefix("/workspace/").ok_or_else(|| {
+            ToolError::InvalidInput("file path must start with /workspace/".to_owned())
+        })?;
+        Some(workspace_dir.join(relative).to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
+    // Validate the file exists and is within the workspace directory.
+    // Both paths are canonicalized to prevent symlink-based escapes.
+    if let Some(ref path) = resolved_file {
+        let canonical = Path::new(path)
+            .canonicalize()
+            .map_err(|e| ToolError::InvalidInput(format!("file not accessible: {e}")))?;
+        let canonical_workspace = workspace_dir
+            .canonicalize()
+            .map_err(|e| ToolError::ExecutionFailed(format!("workspace not accessible: {e}")))?;
+        if !canonical.starts_with(&canonical_workspace) {
+            return Err(ToolError::InvalidInput(
+                "file path must be within the workspace directory".to_owned(),
+            ));
+        }
+    }
+
     let outbound = TelegramOutbound {
         user_id,
         text: Some(text.to_owned()),
-        file_path: file.map(ToOwned::to_owned),
+        file_path: resolved_file,
         approval_keyboard: None,
     };
 
@@ -700,7 +733,7 @@ pub fn core_tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Optional file path to send as attachment."
+                        "description": "Optional file path to send as attachment. Container paths (/workspace/...) are resolved automatically."
                     }
                 },
                 "required": ["text"]
