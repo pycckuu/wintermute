@@ -12,6 +12,8 @@ mod exec_result_test;
 mod health_status_test;
 #[path = "executor/path_traversal_test.rs"]
 mod path_traversal_test;
+#[path = "executor/playwright_test.rs"]
+mod playwright_test;
 #[path = "executor/redact_result_test.rs"]
 mod redact_result_test;
 #[path = "executor/redactor_test.rs"]

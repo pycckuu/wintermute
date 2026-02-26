@@ -5,6 +5,7 @@
 //! ensuring no secrets leak into LLM context.
 
 pub mod browser;
+pub mod browser_bridge;
 pub mod core;
 pub mod create_tool;
 pub mod docker;

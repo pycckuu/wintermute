@@ -20,7 +20,7 @@ use super::ExecutorError;
 
 const SQUID_IMAGE: &str = "ubuntu/squid:latest";
 const SQUID_CONTAINER_NAME: &str = "wintermute-egress";
-const NETWORK_NAME: &str = "wintermute-net";
+pub(crate) const NETWORK_NAME: &str = "wintermute-net";
 const PROXY_PORT: u16 = 3128;
 
 /// Package registries that are always allowed regardless of user config.
@@ -151,7 +151,7 @@ pub fn generate_squid_config(allowed_domains: &[String]) -> String {
 }
 
 /// Ensure the `wintermute-net` Docker bridge network exists.
-async fn ensure_network(docker: &Docker) -> Result<(), ExecutorError> {
+pub(crate) async fn ensure_network(docker: &Docker) -> Result<(), ExecutorError> {
     let inspect = docker.inspect_network::<&str>(NETWORK_NAME, None).await;
     if inspect.is_ok() {
         return Ok(());

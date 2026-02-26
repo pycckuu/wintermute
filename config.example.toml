@@ -29,6 +29,7 @@ allowed_domains = ["github.com", "api.github.com", "pypi.org",
                    "en.wikipedia.org"]
 fetch_rate_limit = 30
 request_rate_limit = 10
+browser_rate_limit = 60
 max_file_download_mb = 500
 
 [privacy]
@@ -36,3 +37,7 @@ max_file_download_mb = 500
 always_approve_domains = []
 # Block outbound requests to these domains entirely
 blocked_domains = []
+
+[browser]
+# enabled = true
+# image = "ghcr.io/pycckuu/wintermute-browser:latest"

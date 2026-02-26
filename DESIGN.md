@@ -468,26 +468,34 @@ type, extract, screenshot. This is essential for tasks like checking
 dashboards, filling forms, scraping JS-rendered content, or monitoring
 pages that don't have APIs.
 
-### Implementation: Playwright via subprocess
+### Implementation: Playwright via Docker sidecar
 
-Playwright (Python) controlled via a long-running subprocess. The Rust
-core sends commands over stdin/stdout (JSON protocol), Playwright executes
-them in a real browser.
+Playwright (Python) runs inside a Docker container (`wintermute-browser`)
+on the default bridge network. The Rust core sends browser actions as
+HTTP POST requests to a Flask bridge server inside the container.
 
 ```
-Wintermute (Rust)
+Wintermute (Rust, HOST)
     │
-    │  JSON commands via stdin/stdout
+    │  HTTP POST to 127.0.0.1:9222/execute
     ▼
-browser_bridge.py (long-running Python subprocess)
+wintermute-browser container (Flask + Playwright)
     │
-    │  Playwright API
+    │  Playwright sync API
     ▼
-Chromium (or Firefox/WebKit)
+Chromium (headless)
 ```
 
-browser_bridge.py ships with the binary (embedded or in /scripts/_system/).
-It's NOT agent-modifiable — it's part of core infrastructure.
+The bridge server is embedded in the Dockerfile (not agent-modifiable).
+The container uses the official `mcr.microsoft.com/playwright/python`
+image with browsers pre-installed. The sidecar is NOT on `wintermute-net`
+— it is isolated from the sandbox to prevent the sandbox from bypassing
+Rust-layer policy enforcement. The host accesses it via a published port
+bound to `127.0.0.1:9222`.
+
+This approach was chosen over a subprocess because security invariant #1
+forbids `std::process::Command` in `src/`. The Docker sidecar uses bollard
+(pure Rust Docker API) and follows the same pattern as the egress proxy.
 
 ### Tool Definition
 
@@ -551,22 +559,13 @@ channel in the system. Privacy controls:
 
 ### Auto-detection
 
-```rust
-async fn detect_browser() -> Option<BrowserCapability> {
-    // 1. Check if Playwright is installed
-    //    python3 -c "import playwright; print('ok')"
-    // 2. Check if display is available
-    //    Linux: DISPLAY or WAYLAND_DISPLAY env var
-    //    macOS: always available (Quartz)
-    // 3. Check if browsers are installed
-    //    playwright install --dry-run chromium
-    // If all pass: return Some(BrowserCapability)
-    // If any fail: return None, tool not registered
-}
-```
+At startup, if `config.browser.enabled` is true and Docker is available,
+Wintermute starts the `wintermute-browser` sidecar container. If the
+container fails to start or the health check fails, the browser tool is
+silently omitted from the tool list. The agent never knows it exists.
 
-On headless servers: browser tool simply doesn't appear in the tool list.
-The agent never knows it exists. No error, no degraded mode.
+No display server or host-side Playwright installation is needed — the
+browser runs headless inside the Docker container.
 
 ### Rate Limiting
 
@@ -576,15 +575,15 @@ Screenshot: max 10/min (disk space protection).
 
 ### Setup
 
-Not required. On first use, if Playwright isn't installed:
-```
-pip install playwright && playwright install chromium
-```
+Not required. The Playwright Docker image is pulled (or built locally
+from the embedded Dockerfile) automatically on first startup when
+`config.browser.enabled = true`. Configure the image in `config.toml`:
 
-The agent can do this itself via execute_command when it needs browser
-access. Or the user pre-installs during `wintermute init`.
-
-Auto-detected at startup. Two implementations.
+```toml
+[browser]
+enabled = true
+image = "ghcr.io/pycckuu/wintermute-browser:latest"
+```
 
 ```rust
 #[async_trait]
@@ -1683,6 +1682,7 @@ wintermute/
 │   │   ├── docker.rs              # DockerExecutor (bollard, warm container)
 │   │   ├── direct.rs              # DirectExecutor (host, restricted dir)
 │   │   ├── egress.rs              # Egress proxy (Squid config, domain allowlist)
+│   │   ├── playwright.rs          # Playwright browser sidecar lifecycle
 │   │   └── redactor.rs            # Secret pattern redaction
 │   │
 │   ├── tools/
@@ -1690,7 +1690,8 @@ wintermute/
 │   │   ├── core.rs                # 9 core tool implementations
 │   │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   │   ├── create_tool.rs         # create_tool implementation + git commit
-│   │   ├── browser.rs             # Browser bridge (Playwright subprocess)
+│   │   ├── browser.rs             # Browser bridge trait + validation
+│   │   ├── browser_bridge.rs      # PlaywrightBridge (HTTP client)
 │   │   └── docker.rs              # docker_manage (bollard, label policy)
 │   │
 │   ├── agent/
@@ -1858,8 +1859,8 @@ Files: agent/*, tools/*
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
 - Dynamic tool selection (top N by relevance/recency)
-- Browser bridge: Playwright subprocess, auto-detection, domain policy
-  (skip if headless — tool not registered)
+- Browser bridge: Playwright Docker sidecar, auto-detection, domain policy
+  (skip if Docker unavailable — tool not registered)
 
 ### Phase 3: Intelligence (weeks 7-8)
 

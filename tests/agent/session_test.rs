@@ -45,6 +45,7 @@ fn make_config() -> Config {
         },
         egress: EgressConfig::default(),
         privacy: PrivacyConfig::default(),
+        browser: wintermute::config::BrowserConfig::default(),
     }
 }
 

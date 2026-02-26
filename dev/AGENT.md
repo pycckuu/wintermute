@@ -37,6 +37,7 @@ src/
 │   ├── docker.rs              # DockerExecutor (bollard, warm container)
 │   ├── direct.rs              # DirectExecutor (host, restricted dir)
 │   ├── egress.rs              # Egress proxy (Squid sidecar for sandbox outbound)
+│   ├── playwright.rs          # Playwright browser sidecar (Docker lifecycle + embedded Python bridge)
 │   └── redactor.rs            # Secret pattern redaction
 ├── tools/
 │   ├── mod.rs                 # Tool routing (core + dynamic)
@@ -44,7 +45,8 @@ src/
 │   ├── docker.rs              # docker_manage tool (host-side Docker management)
 │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   ├── create_tool.rs         # create_tool implementation + git commit
-│   └── browser.rs             # Browser bridge (Playwright subprocess)
+│   ├── browser.rs             # Browser tool validation (SSRF, rate-limit, domain policy)
+│   └── browser_bridge.rs      # PlaywrightBridge — HTTP client for browser sidecar
 ├── agent/
 │   ├── mod.rs                 # Session router (per-session tasks)
 │   ├── loop.rs                # Agent loop (assemble → LLM → route → execute)
