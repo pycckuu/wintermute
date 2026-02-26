@@ -266,6 +266,47 @@ builtin = "backup"
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI base_url
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_config_with_openai_base_url() {
+    let toml_str = r#"
+[models]
+default = "openai/gpt-5"
+openai_base_url = "https://api.deepseek.com/v1"
+
+[channels.telegram]
+bot_token_env = "WINTERMUTE_TELEGRAM_TOKEN"
+allowed_users = [123456789]
+"#;
+    let config: Config =
+        toml::from_str(toml_str).expect("config with openai_base_url should parse");
+    assert_eq!(
+        config.models.openai_base_url,
+        Some("https://api.deepseek.com/v1".to_owned())
+    );
+}
+
+#[test]
+fn parse_config_without_openai_base_url_defaults_none() {
+    let toml_str = r#"
+[models]
+default = "ollama/qwen3:8b"
+
+[channels.telegram]
+bot_token_env = "TOK"
+allowed_users = [1]
+"#;
+    let config: Config =
+        toml::from_str(toml_str).expect("config without openai_base_url should parse");
+    assert!(
+        config.models.openai_base_url.is_none(),
+        "openai_base_url should default to None"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // all_model_specs
 // ---------------------------------------------------------------------------
 
@@ -275,6 +316,7 @@ fn all_model_specs_deduplicates() {
         default: "ollama/qwen3:8b".to_owned(),
         roles: HashMap::from([("observer".to_owned(), "ollama/qwen3:8b".to_owned())]),
         skills: HashMap::new(),
+        openai_base_url: None,
     };
     let specs = all_model_specs(&models);
     assert_eq!(specs.len(), 1);
@@ -287,6 +329,7 @@ fn all_model_specs_preserves_order() {
         default: "ollama/qwen3:8b".to_owned(),
         roles: HashMap::from([("observer".to_owned(), "anthropic/claude-haiku".to_owned())]),
         skills: HashMap::from([("deploy".to_owned(), "anthropic/claude-sonnet".to_owned())]),
+        openai_base_url: None,
     };
     let specs = all_model_specs(&models);
     assert_eq!(specs[0], "ollama/qwen3:8b");

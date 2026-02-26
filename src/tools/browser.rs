@@ -44,19 +44,55 @@ pub enum BrowserMode {
 /// convenience in code that only depends on `tools::browser`.
 pub const SIDECAR_PORT: u16 = BRIDGE_PORT;
 
+/// Timeout for the CDP probe HTTP request.
+const CDP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Probe a Chrome DevTools Protocol endpoint to check if a browser is running.
+///
+/// Sends `GET http://localhost:{port}/json` and verifies the response is a
+/// JSON array (the CDP tab list format). Returns `true` only when Chrome is
+/// confirmed running with remote debugging enabled.
+pub async fn cdp_probe(port: u16) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(CDP_PROBE_TIMEOUT)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let url = format!("http://localhost:{port}/json");
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            // CDP returns a JSON array of tab descriptors.
+            resp.json::<Vec<serde_json::Value>>().await.is_ok()
+        }
+        Ok(resp) => {
+            debug!(port, status = %resp.status(), "CDP probe: non-success status");
+            false
+        }
+        Err(e) => {
+            debug!(port, error = %e, "CDP probe: connection failed");
+            false
+        }
+    }
+}
+
 /// Detect the available browser mode.
 ///
-/// Tries CDP connection first (not yet implemented), then falls back to
-/// Docker sidecar if `standalone_fallback` is enabled, otherwise returns
-/// [`BrowserMode::None`].
+/// Resolution order:
+/// 1. Try CDP connection to user's Chrome on `config.cdp_port`
+/// 2. Fall back to Docker sidecar if `standalone_fallback` is enabled
+/// 3. Return [`BrowserMode::None`]
 pub async fn detect_browser(config: &crate::config::BrowserConfig) -> BrowserMode {
-    // TODO: Phase 2 — try CDP connection to config.cdp_port
-    // if let Ok(_tabs) = cdp_list_tabs(config.cdp_port).await {
-    //     return BrowserMode::Attached { port: config.cdp_port };
-    // }
+    if cdp_probe(config.cdp_port).await {
+        return BrowserMode::Attached {
+            port: config.cdp_port,
+        };
+    }
 
     if config.standalone_fallback {
-        return BrowserMode::Standalone { port: BRIDGE_PORT };
+        return BrowserMode::Standalone { port: SIDECAR_PORT };
     }
 
     BrowserMode::None
@@ -265,6 +301,7 @@ pub fn browser_tool_definition() -> ToolDefinition {
                 "text": { "type": "string", "description": "Text for type action" },
                 "javascript": { "type": "string", "description": "JS code for evaluate action" },
                 "wait_for": { "type": "string", "description": "Selector or 'networkidle' for wait action" },
+                "direction": { "type": "string", "enum": ["up", "down"], "description": "Scroll direction (default: down)" },
                 "tab_id": { "type": "string", "description": "Target tab (from list_tabs). Default: active tab." },
                 "timeout_ms": { "type": "integer", "default": 30000, "description": "Timeout in milliseconds" }
             },

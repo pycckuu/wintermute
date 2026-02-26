@@ -89,11 +89,19 @@ pub struct ModelsConfig {
 
     /// Per-role model overrides (observer, embedding, etc.).
     #[serde(default)]
-    pub roles: std::collections::HashMap<String, String>,
+    pub roles: HashMap<String, String>,
 
     /// Per-skill model overrides.
     #[serde(default)]
-    pub skills: std::collections::HashMap<String, String>,
+    pub skills: HashMap<String, String>,
+
+    /// Optional custom base URL for OpenAI-compatible APIs.
+    ///
+    /// When set, all `openai/*` model specs use this endpoint instead of the
+    /// default OpenAI API. Useful for DeepSeek, Groq, Together, and other
+    /// OpenAI-compatible providers.
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
 }
 
 /// Channel configuration.

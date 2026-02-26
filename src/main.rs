@@ -246,41 +246,21 @@ async fn handle_start() -> anyhow::Result<()> {
     let docker_client = bollard::Docker::connect_with_local_defaults().ok();
 
     // Browser bridge: detect mode and start sidecar if needed.
-    let browser_mode = detect_browser(&config.browser).await;
+    // Both attached and standalone modes use the Playwright sidecar — the
+    // difference is whether CDP_TARGET is passed to connect to user's Chrome.
+    let detected_mode = detect_browser(&config.browser).await;
     let (browser_mode, browser_bridge): (BrowserMode, Option<Arc<dyn BrowserBridge>>) =
-        match browser_mode {
-            BrowserMode::Attached { port } => {
-                // TODO: Phase 2 — create CDP bridge client
-                warn!(port, "CDP attached mode detected but not yet implemented");
-                (BrowserMode::None, None)
-            }
-            BrowserMode::Standalone { port: _ } => {
-                if let Some(ref docker) = docker_client {
-                    match wintermute::executor::playwright::PlaywrightSidecar::ensure(
-                        docker,
-                        &config.browser.image,
-                        &paths.workspace_dir,
-                    )
-                    .await
-                    {
-                        Ok(sidecar) => {
-                            info!("browser bridge: Playwright sidecar ready");
-                            let bridge: Option<Arc<dyn BrowserBridge>> = Some(Arc::new(
-                                PlaywrightBridge::new(sidecar.base_url().to_owned()),
-                            ));
-                            (BrowserMode::Standalone { port: 9223 }, bridge)
-                        }
-                        Err(e) => {
-                            warn!("browser bridge unavailable: {e}");
-                            (BrowserMode::None, None)
-                        }
-                    }
-                } else {
-                    warn!("browser bridge unavailable: Docker client not connected");
-                    (BrowserMode::None, None)
-                }
-            }
+        match detected_mode {
             BrowserMode::None => (BrowserMode::None, None),
+            mode => {
+                start_browser_sidecar(
+                    mode,
+                    docker_client.as_ref(),
+                    &config.browser.image,
+                    &paths.workspace_dir,
+                )
+                .await
+            }
         };
     info!(mode = ?browser_mode, "browser detection complete");
 
@@ -606,6 +586,48 @@ fn collect_auth_secrets(
         secrets.extend(auth.secret_values());
     } else {
         warn!("no OpenAI credentials found; provider will be unavailable");
+    }
+}
+
+/// Start the Playwright sidecar for the given browser mode.
+///
+/// Returns the confirmed `BrowserMode` and an optional bridge. Falls back to
+/// `(BrowserMode::None, None)` when Docker is unavailable or sidecar startup fails.
+async fn start_browser_sidecar(
+    mode: BrowserMode,
+    docker: Option<&bollard::Docker>,
+    image: &str,
+    workspace_dir: &Path,
+) -> (BrowserMode, Option<Arc<dyn BrowserBridge>>) {
+    let Some(docker) = docker else {
+        warn!("browser bridge unavailable: Docker client not connected");
+        return (BrowserMode::None, None);
+    };
+
+    let cdp_target = match mode {
+        BrowserMode::Attached { port } => Some(format!("http://host.docker.internal:{port}")),
+        BrowserMode::Standalone { .. } => None,
+        BrowserMode::None => return (BrowserMode::None, None),
+    };
+
+    match wintermute::executor::playwright::PlaywrightSidecar::ensure(
+        docker,
+        image,
+        workspace_dir,
+        cdp_target.as_deref(),
+    )
+    .await
+    {
+        Ok(sidecar) => {
+            info!(mode = ?mode, "browser bridge: sidecar ready");
+            let bridge: Arc<dyn BrowserBridge> =
+                Arc::new(PlaywrightBridge::new(sidecar.base_url().to_owned()));
+            (mode, Some(bridge))
+        }
+        Err(e) => {
+            warn!(mode = ?mode, "browser bridge sidecar failed: {e}");
+            (BrowserMode::None, None)
+        }
     }
 }
 

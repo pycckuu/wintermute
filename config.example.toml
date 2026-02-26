@@ -1,5 +1,6 @@
 [models]
 default = "anthropic/claude-sonnet-4-5-20250929"
+# openai_base_url = "https://api.deepseek.com/v1"  # override for OpenAI-compatible APIs
 
 [models.roles]
 observer = "ollama/qwen3:8b"

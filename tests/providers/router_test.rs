@@ -11,6 +11,7 @@ fn ollama_default_config() -> ModelsConfig {
         default: "ollama/qwen3:8b".to_owned(),
         roles: HashMap::new(),
         skills: HashMap::new(),
+        openai_base_url: None,
     }
 }
 
@@ -19,6 +20,7 @@ fn openai_default_config() -> ModelsConfig {
         default: "openai/gpt-5".to_owned(),
         roles: HashMap::new(),
         skills: HashMap::new(),
+        openai_base_url: None,
     }
 }
 
@@ -30,6 +32,7 @@ fn multi_provider_config() -> (ModelsConfig, Credentials) {
             "deploy_check".to_owned(),
             "anthropic/claude-haiku-4-5-20251001".to_owned(),
         )]),
+        openai_base_url: None,
     };
     let mut vars = BTreeMap::new();
     vars.insert("ANTHROPIC_API_KEY".to_owned(), "test-key".to_owned());
@@ -69,6 +72,7 @@ fn falls_back_to_default_when_skill_provider_unavailable() {
             "deploy_check".to_owned(),
             "anthropic/claude-haiku-4-5-20251001".to_owned(),
         )]),
+        openai_base_url: None,
     };
     let credentials = Credentials::default();
     let router = ModelRouter::from_config(&models, &credentials).expect("router should init");
@@ -121,6 +125,7 @@ fn router_errors_on_unavailable_default() {
         default: "anthropic/claude-sonnet".to_owned(),
         roles: HashMap::new(),
         skills: HashMap::new(),
+        openai_base_url: None,
     };
     let credentials = Credentials::default(); // no API key
     let result = ModelRouter::from_config(&models, &credentials);
@@ -146,6 +151,7 @@ fn from_config_with_auth_uses_pre_resolved_anthropic_auth() {
         default: "anthropic/claude-haiku-4-5-20251001".to_owned(),
         roles: HashMap::new(),
         skills: HashMap::new(),
+        openai_base_url: None,
     };
     // No Anthropic credentials in .env — only the pre-resolved auth should work.
     let credentials = Credentials::default();
@@ -188,11 +194,29 @@ fn router_errors_on_unavailable_openai_default() {
 }
 
 #[test]
+fn router_builds_openai_provider_with_custom_base_url() {
+    let models = ModelsConfig {
+        default: "openai/gpt-5".to_owned(),
+        roles: HashMap::new(),
+        skills: HashMap::new(),
+        openai_base_url: Some("https://api.deepseek.com/v1".to_owned()),
+    };
+    let mut vars = BTreeMap::new();
+    vars.insert("OPENAI_API_KEY".to_owned(), "test-key".to_owned());
+    let credentials = Credentials::from_map(vars);
+    let router = ModelRouter::from_config(&models, &credentials)
+        .expect("router should init with custom base_url");
+    assert!(router.has_model("openai/gpt-5"));
+    assert_eq!(router.default_provider().model_id(), "openai/gpt-5");
+}
+
+#[test]
 fn resolves_openai_skill_override_when_credentials_present() {
     let models = ModelsConfig {
         default: "ollama/qwen3:8b".to_owned(),
         roles: HashMap::new(),
         skills: HashMap::from([("gpt_task".to_owned(), "openai/gpt-5".to_owned())]),
+        openai_base_url: None,
     };
     let mut vars = BTreeMap::new();
     vars.insert("OPENAI_API_KEY".to_owned(), "api-key".to_owned());

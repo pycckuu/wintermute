@@ -30,10 +30,10 @@ pub const BRIDGE_PORT: u16 = 9223;
 /// Memory limit for the browser container (2 GB).
 const MEMORY_LIMIT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
-/// CPU quota: 2 cores expressed as microseconds per period (200_000 / 100_000).
+/// CFS scheduling period in microseconds.
 const CPU_PERIOD: i64 = 100_000;
 
-/// CPU quota microseconds (2 cores).
+/// CFS quota in microseconds (200_000 / 100_000 = 2 cores).
 const CPU_QUOTA: i64 = 200_000;
 
 /// Number of health-check retries before giving up.
@@ -45,10 +45,11 @@ const HEALTH_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(2
 /// HTTP timeout for health-check requests.
 const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Python bridge server script embedded as a constant. This is base64-encoded
-/// into the Dockerfile at runtime to avoid heredoc issues with Docker's
-/// classic builder (which ends `RUN` at the first newline).
-const BRIDGE_SCRIPT: &str = r#"import json
+/// Python bridge server script embedded as a constant.
+///
+/// Base64-encoded into the Dockerfile at runtime to avoid heredoc issues
+/// with Docker's classic builder (which ends `RUN` at the first newline).
+pub const BRIDGE_SCRIPT: &str = r#"import json, os
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 
@@ -59,19 +60,45 @@ page = None
 
 MAX_EXTRACT_BYTES = 50 * 1024
 
+# When CDP_TARGET is set, connect to an external Chrome instance instead
+# of launching headless Chromium. Used for attached mode (user's browser).
+CDP_TARGET = os.environ.get("CDP_TARGET")
+
 def get_browser():
     global pw, browser, page
     if browser is None:
         pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True, args=[
-            "--no-sandbox",
-            "--disable-gpu",
-            "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE *.com, EXCLUDE *.org, EXCLUDE *.net, EXCLUDE *.io, EXCLUDE *.dev, EXCLUDE *.app, EXCLUDE *.co",
-        ])
+        if CDP_TARGET:
+            browser = pw.chromium.connect_over_cdp(CDP_TARGET)
+        else:
+            browser = pw.chromium.launch(headless=True, args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE *.com, EXCLUDE *.org, EXCLUDE *.net, EXCLUDE *.io, EXCLUDE *.dev, EXCLUDE *.app, EXCLUDE *.co",
+            ])
     if page is None:
-        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
-        page = ctx.new_page()
+        if CDP_TARGET:
+            # In attached mode, use an existing page from the user's browser
+            # if any are open, otherwise create a new context and page.
+            contexts = browser.contexts
+            if contexts and contexts[0].pages:
+                page = contexts[0].pages[0]
+            else:
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+                page = ctx.new_page()
+        else:
+            ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+            page = ctx.new_page()
     return page
+
+def get_all_pages():
+    """Return all pages across all browser contexts."""
+    if browser is None:
+        get_browser()
+    pages = []
+    for ctx in browser.contexts:
+        pages.extend(ctx.pages)
+    return pages
 
 def close_browser():
     global pw, browser, page
@@ -80,7 +107,12 @@ def close_browser():
         except Exception: pass
         page = None
     if browser is not None:
-        try: browser.close()
+        # In attached mode, only disconnect — do not close the user's Chrome.
+        try:
+            if CDP_TARGET:
+                browser.close()  # disconnect, does not shut down remote Chrome
+            else:
+                browser.close()
         except Exception: pass
         browser = None
     if pw is not None:
@@ -88,12 +120,16 @@ def close_browser():
         except Exception: pass
         pw = None
 
+# Track tabs created by the agent (for safety in attached mode).
+agent_created_tabs = set()
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
 @app.route("/execute", methods=["POST"])
 def execute():
+    global page
     try:
         data = request.get_json(force=True)
         action = data.get("action", "")
@@ -162,6 +198,57 @@ def execute():
                 raw = raw[:MAX_EXTRACT_BYTES] + "\n... (truncated)"
             result = raw
 
+        elif action == "list_tabs":
+            pages = get_all_pages()
+            tabs = []
+            for i, pg in enumerate(pages):
+                tabs.append({"id": str(i), "url": pg.url, "title": pg.title()})
+            result = json.dumps(tabs)
+
+        elif action == "switch_tab":
+            tab_id = data.get("tab_id", "0")
+            pages = get_all_pages()
+            idx = int(tab_id)
+            if 0 <= idx < len(pages):
+                page = pages[idx]
+                page.bring_to_front()
+                result = json.dumps({"switched_to": tab_id, "url": page.url, "title": page.title()})
+            else:
+                return jsonify({"success": False, "error": f"tab_id {tab_id} out of range (0-{len(pages)-1})"})
+
+        elif action == "new_tab":
+            url = data.get("url")
+            contexts = browser.contexts
+            ctx = contexts[0] if contexts else browser.new_context(viewport={"width": 1280, "height": 720})
+            new_page = ctx.new_page()
+            if url:
+                new_page.goto(url, wait_until="domcontentloaded")
+            page = new_page
+            pages = get_all_pages()
+            new_id = str(len(pages) - 1)
+            agent_created_tabs.add(new_id)
+            result = json.dumps({"tab_id": new_id, "url": new_page.url, "title": new_page.title()})
+
+        elif action == "close_tab":
+            tab_id = data.get("tab_id")
+            if tab_id is not None:
+                # In attached mode, only allow closing tabs the agent created.
+                if CDP_TARGET and tab_id not in agent_created_tabs:
+                    return jsonify({"success": False, "error": f"cannot close tab {tab_id}: not created by agent"})
+                pages = get_all_pages()
+                idx = int(tab_id)
+                if 0 <= idx < len(pages):
+                    target = pages[idx]
+                    target.close()
+                    agent_created_tabs.discard(tab_id)
+                    remaining = get_all_pages()
+                    page = remaining[0] if remaining else None
+                    result = f"closed tab {tab_id}"
+                else:
+                    return jsonify({"success": False, "error": f"tab_id {tab_id} out of range"})
+            else:
+                return jsonify({"success": False, "error": "close_tab requires tab_id"})
+
         else:
             return jsonify({"success": False, "error": f"unknown action: {action}"})
 
@@ -170,7 +257,6 @@ def execute():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"})
 
 if __name__ == "__main__":
-    import os
     port = int(os.environ.get("BRIDGE_PORT", "9223"))
     app.run(host="0.0.0.0", port=port, threaded=False)
 "#;
@@ -206,6 +292,10 @@ impl PlaywrightSidecar {
     /// Creates the Docker network (if needed), pulls or builds the image,
     /// creates and starts the container, and verifies the HTTP health endpoint.
     ///
+    /// When `cdp_target` is `Some`, the sidecar connects to an external Chrome
+    /// instance via `connect_over_cdp()` instead of launching its own Chromium.
+    /// Pass `None` for standalone mode (headless Chromium inside the container).
+    ///
     /// # Errors
     ///
     /// Returns [`ExecutorError`] if any Docker operation fails or the
@@ -214,6 +304,7 @@ impl PlaywrightSidecar {
         docker: &Docker,
         image: &str,
         workspace_dir: &Path,
+        cdp_target: Option<&str>,
     ) -> Result<Self, ExecutorError> {
         let dockerfile = browser_dockerfile();
         super::ensure_image(docker, image, Some(&dockerfile)).await?;
@@ -222,7 +313,7 @@ impl PlaywrightSidecar {
             ExecutorError::Infrastructure("workspace path is not valid UTF-8".to_owned())
         })?;
 
-        ensure_browser_container(docker, image, workspace_str).await?;
+        ensure_browser_container(docker, image, workspace_str, cdp_target).await?;
 
         let base_url = format!("http://127.0.0.1:{BRIDGE_PORT}");
         health_check(&base_url).await?;
@@ -254,11 +345,12 @@ impl PlaywrightSidecar {
 ///
 /// Inspects the container; if it exists and is running, returns immediately.
 /// If it exists but is stopped, starts it. If it does not exist, creates
-/// and starts it.
+/// and starts it. Recreates when port or CDP target configuration has changed.
 async fn ensure_browser_container(
     docker: &Docker,
     image: &str,
     workspace_dir: &str,
+    cdp_target: Option<&str>,
 ) -> Result<(), ExecutorError> {
     let inspect = docker
         .inspect_container(CONTAINER_NAME, None::<InspectContainerOptions>)
@@ -275,8 +367,26 @@ async fn ensure_browser_container(
                 .and_then(|pb| pb.get(&format!("{BRIDGE_PORT}/tcp")))
                 .is_some();
 
-            if !port_matches {
-                info!("browser sidecar port mismatch — recreating container");
+            // Check if the CDP target matches the requested config.
+            // An existing standalone container must be recreated for attached mode.
+            let existing_cdp =
+                state
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.env.as_ref())
+                    .and_then(|vars| {
+                        vars.iter()
+                            .find_map(|v| v.strip_prefix("CDP_TARGET="))
+                            .map(str::to_owned)
+                    });
+            let cdp_matches = match (existing_cdp.as_deref(), cdp_target) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+
+            if !port_matches || !cdp_matches {
+                info!("browser sidecar config mismatch — recreating container");
                 let remove_opts = RemoveContainerOptions {
                     force: true,
                     ..Default::default()
@@ -284,7 +394,7 @@ async fn ensure_browser_container(
                 let _ = docker
                     .remove_container(CONTAINER_NAME, Some(remove_opts))
                     .await;
-                create_browser_container(docker, image, workspace_dir).await?;
+                create_browser_container(docker, image, workspace_dir, cdp_target).await?;
                 true
             } else {
                 let running = state.state.and_then(|s| s.running).unwrap_or(false);
@@ -294,7 +404,7 @@ async fn ensure_browser_container(
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
         }) => {
-            create_browser_container(docker, image, workspace_dir).await?;
+            create_browser_container(docker, image, workspace_dir, cdp_target).await?;
             true
         }
         Err(e) => {
@@ -317,10 +427,15 @@ async fn ensure_browser_container(
 }
 
 /// Create the browser sidecar container with resource limits and port mapping.
+///
+/// When `cdp_target` is provided, the container receives a `CDP_TARGET` env
+/// var that tells the bridge script to connect to an external Chrome instance
+/// instead of launching its own Chromium.
 async fn create_browser_container(
     docker: &Docker,
     image: &str,
     workspace_dir: &str,
+    cdp_target: Option<&str>,
 ) -> Result<(), ExecutorError> {
     let mut labels = HashMap::new();
     labels.insert("wintermute".to_owned(), "true".to_owned());
@@ -351,19 +466,27 @@ async fn create_browser_container(
         }),
         // Chromium inside Docker needs /dev/shm to be large enough.
         shm_size: Some(512 * 1024 * 1024),
+        // Ensure host.docker.internal resolves on Linux (standard since Docker 20.10).
+        extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_owned()]),
         ..Default::default()
     };
 
     let mut exposed_ports = HashMap::new();
     exposed_ports.insert(port_key, HashMap::new());
 
+    // Only BRIDGE_PORT and optionally CDP_TARGET are passed.
+    // No secrets or config leaked into the browser sidecar.
+    let mut env_vars = vec![format!("BRIDGE_PORT={BRIDGE_PORT}")];
+    if let Some(target) = cdp_target {
+        env_vars.push(format!("CDP_TARGET={target}"));
+    }
+
     let container_config = ContainerConfig {
         image: Some(image.to_owned()),
         labels: Some(labels),
         host_config: Some(host_config),
         exposed_ports: Some(exposed_ports),
-        // Only BRIDGE_PORT is passed; no secrets or config leaked into browser sidecar.
-        env: Some(vec![format!("BRIDGE_PORT={BRIDGE_PORT}")]),
+        env: Some(env_vars),
         ..Default::default()
     };
 

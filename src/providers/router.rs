@@ -97,6 +97,7 @@ impl ModelRouter {
                 &parsed.model,
                 credentials,
                 anthropic_auth.as_ref(),
+                models.openai_base_url.as_deref(),
             );
             if let Ok(provider) = instance {
                 providers.insert(spec.clone(), provider);
@@ -223,6 +224,7 @@ fn instantiate_provider(
     model: &str,
     credentials: &Credentials,
     anthropic_auth: Option<&AnthropicAuth>,
+    openai_base_url: Option<&str>,
 ) -> Result<Arc<dyn LlmProvider>, RouterError> {
     match provider {
         "anthropic" => {
@@ -245,11 +247,17 @@ fn instantiate_provider(
                     provider: provider.to_owned(),
                     key: "OPENAI_OAUTH_TOKEN or OPENAI_API_KEY".to_owned(),
                 })?;
-            Ok(Arc::new(OpenAiProvider::new(
-                model_spec.to_owned(),
-                model.to_owned(),
-                auth,
-            )))
+            let openai = if let Some(url) = openai_base_url {
+                OpenAiProvider::with_base_url(
+                    model_spec.to_owned(),
+                    model.to_owned(),
+                    auth,
+                    url.to_owned(),
+                )
+            } else {
+                OpenAiProvider::new(model_spec.to_owned(), model.to_owned(), auth)
+            };
+            Ok(Arc::new(openai))
         }
         "ollama" => Ok(Arc::new(OllamaProvider::new(
             model_spec.to_owned(),

@@ -181,10 +181,10 @@ always_approve_domains = []
 blocked_domains = []
 
 [browser]
+cdp_port = 9222                    # Chrome DevTools Protocol port
 auto_submit = false                # never auto-submit forms (safety default)
-idle_timeout_secs = 300            # kill Chrome after 5 min idle
-sidecar_fallback = true            # start Docker sidecar if no display
-sidecar_image = "ghcr.io/pycckuu/wintermute-browser:latest"
+standalone_fallback = true         # start Docker sidecar if no CDP available
+image = "ghcr.io/pycckuu/wintermute-browser:latest"  # sidecar image
 ```
 
 ### agent.toml — agent-owned, the agent can and should modify this
@@ -318,10 +318,9 @@ create_tool       Create or update a dynamic tool (/scripts/{name}.py + .json).
 web_fetch         HTTP GET. SSRF filtered. 30/min. Returns text by default.
                   With save_to: downloads file (binary ok) to /workspace.
 web_request       HTTP POST/PUT/PATCH/DELETE. Domain allowlisted. 10/min.
-browser           Control a browser. Launches dedicated Chrome via pipe
-                  transport (no open port). Fills forms, reads pages,
-                  takes screenshots, manages tabs. User can interact
-                  with the same window.
+browser           Control the browser. Attaches to user's Chrome via CDP
+                  (same cookies/logins) or Docker sidecar fallback (headless).
+                  Fills forms, reads pages, takes screenshots, manages tabs.
 docker_manage     Manage Docker containers/services on the host. Run, stop,
                   pull, logs, exec. For spinning up services the agent needs.
 memory_search     Search memories. FTS5 + optional vector.
@@ -462,135 +461,118 @@ async fn execute_tool(&self, name: &str, input: &Value) -> Result<ToolResult> {
 
 ## Browser
 
-The agent launches and controls a visible Chrome window. It fills forms,
-you review and submit. You can interact with the same window. But it's
-NOT your main Chrome — it's a dedicated instance with its own profile,
-connected via pipe (no open port), started on demand.
+The agent uses YOUR browser, not a throwaway one. It fills forms, you
+review and submit. It reads a dashboard, you see the same tab. Same
+cookies, same logins, same session.
 
-### Why not the user's main browser?
+### Why the user's own browser?
 
-CDP remote debugging (`--remote-debugging-port=9222`) is a skeleton key:
-any local process gets zero-auth full control over every tab — cookies,
-sessions, arbitrary JS execution. Infostealers actively exploit this
-(Phemedrone, Stealc, Lumma et al weaponized it within 45 days of Chrome
-127's cookie encryption). Leaving port 9222 open on a machine running
-an always-on agent is an unnecessary risk.
+An ephemeral Playwright browser is useless for real work:
+- No logins. The agent can't access your Jira, your bank, your email.
+- No continuity. You can't pick up where the agent left off.
+- No context. The agent can't see what you're looking at right now.
 
-But a throwaway ephemeral browser is also useless for real work — no
-logins, no continuity. The right model is in between.
-
-### Design: Dedicated Profile + Pipe Transport + Session Injection
-
-```
-Wintermute (Rust binary, HOST)
-    │
-    │  Chrome DevTools Protocol over PIPE (stdin/stdout)
-    │  No TCP port. No network exposure. No unauthenticated endpoint.
-    ▼
-Chrome (visible window, dedicated --user-data-dir)
-    ├── Separate profile: ~/.wintermute/browser-profile/
-    ├── User can see and interact with the window
-    ├── Sessions injected per-domain via Network.setCookie
-    └── Killed after idle timeout, relaunched on demand
-```
-
-**Pipe transport** (`--remote-debugging-pipe`): CDP over stdin/stdout.
-No TCP listener. No `/json` discovery endpoint. No port scanning.
-No DNS rebinding. The only process that can control Chrome is the one
-that launched it. This is what Puppeteer and Playwright recommend for
-same-machine automation.
-
-**Dedicated profile** (`--user-data-dir=~/.wintermute/browser-profile/`):
-Post-Chrome 136, `--remote-debugging-pipe` requires a non-default data
-directory anyway. The agent gets its own clean profile. Your main
-Chrome is never touched.
-
-**On-demand lifecycle**: Chrome is launched when the agent needs it,
-killed after an idle timeout (default 5 min). Not always-on. This
-minimizes the exposure window. Session state is persisted between
-launches via cookie/storage export.
-
-**Session injection**: When the agent needs your logins for a specific
-site, it imports cookies for that domain into the dedicated profile.
-Two approaches:
-
-1. **Manual login (preferred)**: Agent opens the site, tells user
-   "Please log in. I'll wait." User types credentials in the visible
-   window. Agent sees the authenticated session. Cookies persist in
-   the dedicated profile for future use.
-
-2. **Cookie import (advanced)**: Export cookies from your main Chrome
-   profile for specific domains, inject via `Network.setCookie`.
-   Agent never sees credentials directly — just session cookies.
+The right model: the agent is a pair of hands on YOUR keyboard. It
+operates your browser. You watch, you intervene, you continue.
 
 ### Why it's a core tool, not a dynamic tool
 
-Browser automation runs on the HOST, not in the sandbox. It needs
-a display and launches a real Chrome process. This puts it in the
-same category as web_fetch and docker_manage — a host-side capability.
+Browser automation runs on the HOST, not in the sandbox. It needs network
+access and a display (or CDP port). This puts it in the same category as
+web_fetch and web_request — a host-side capability with privacy implications.
 
-### Implementation: chromiumoxide (Rust)
-
-`chromiumoxide` is a pure-Rust CDP client with pipe transport support.
-No Python subprocess. No Flask sidecar needed for the primary mode.
-
-```rust
-use chromiumoxide::Browser;
-use chromiumoxide::BrowserConfig;
-
-let (browser, mut handler) = Browser::launch(
-    BrowserConfig::builder()
-        .chrome_executable("/usr/bin/google-chrome")
-        .arg("--user-data-dir=/home/user/.wintermute/browser-profile")
-        // Pipe transport: no --remote-debugging-port at all
-        // chromiumoxide uses --remote-debugging-pipe by default
-        .build()?,
-).await?;
-
-// Spawn handler in background (drives CDP messages over pipe)
-tokio::spawn(async move { while let Some(_) = handler.next().await {} });
-
-// Now control the browser
-let page = browser.new_page("https://example.com").await?;
-page.wait_for_navigation().await?;
-let title = page.get_title().await?;
-```
-
-Key properties of chromiumoxide:
-- Pipe transport by default (no TCP port)
-- RAII cleanup: connections drop when they go out of scope
-- Type-safe CDP commands generated from protocol definitions
-- ~50-100MB memory vs ~500MB+ for Node.js alternatives
-- Async/await native (tokio)
-- No `std::process::Command` concern — it's a library, not a subprocess
+Unlike web_fetch (GET only, no interaction) and web_request (single HTTP
+call), the browser enables multi-step interaction: navigate, wait, click,
+type, extract, screenshot. This is essential for tasks like checking
+dashboards, filling forms, scraping JS-rendered content, or monitoring
+pages that don't have APIs.
 
 ### Modes of Operation
 
-**Managed mode (default, secure):**
-Wintermute launches Chrome with pipe transport + dedicated profile.
-Visible window on the user's display. User can interact. Agent controls
-via CDP over pipe. Chrome killed after idle timeout.
+**Attached mode (default, preferred):**
+Connect to the user's existing Chrome on CDP port 9222. Agent sees the
+user's tabs, cookies, logins. Agent can open new tabs, interact with
+existing ones. The user sees everything happening in real time.
 
-**Sidecar mode (headless fallback, no display):**
-If no display is available (headless server), Wintermute starts a
-`wintermute-browser` Docker sidecar with headless Chromium. The Rust
-core sends actions via HTTP to a Flask bridge inside the container.
-Published on `127.0.0.1:9223` only. No user interaction possible.
-Good for scraping, research, monitoring.
+**Standalone mode (fallback via Docker sidecar):**
+If no Chrome debug port is available, Wintermute starts a
+`wintermute-browser` Docker sidecar running headless Chromium + Playwright.
+Ephemeral, no logins. Good for scraping, testing, research tasks that
+don't need the user's session.
 
 **No browser:**
-Neither display nor Docker available. Tool doesn't appear in tool list.
+Neither CDP nor sidecar available. Tool doesn't appear in tool list.
+Agent doesn't know it exists.
+
+### Implementation
+
+Both modes communicate via HTTP — no `std::process::Command` in `src/`.
+
+**Attached mode: CDP over HTTP/WebSocket**
+
+The user runs Chrome with remote debugging enabled:
+```bash
+# One-time setup (or add to Chrome shortcut flags)
+google-chrome --remote-debugging-port=9222
+# macOS:
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+```
+
+Wintermute connects via CDP from Rust:
+```rust
+// GET http://localhost:9222/json → list of tabs
+// Connect to tab's webSocketDebuggerUrl
+// Send CDP commands (navigate, click, type, screenshot, evaluate)
+// All via WebSocket — no subprocess needed
+```
+
+For richer interactions (complex selectors, waits), the sidecar container
+can connect to the user's Chrome via CDP too:
+```python
+# In the sidecar's Flask bridge
+browser = pw.chromium.connect_over_cdp("http://host.docker.internal:9222")
+```
+
+**Standalone mode: Playwright via Docker sidecar**
+
+Playwright (Python) runs inside a Docker container (`wintermute-browser`)
+on the default bridge network. The Rust core sends browser actions as
+HTTP POST requests to a Flask bridge server inside the container.
+
+```
+Wintermute (Rust, HOST)
+    │
+    │  HTTP POST to 127.0.0.1:9223/execute
+    ▼
+wintermute-browser container (Flask + Playwright)
+    │
+    │  Playwright sync API
+    ▼
+Chromium (headless, inside container)
+```
+
+The bridge server is embedded in the Dockerfile (not agent-modifiable).
+The container uses the official `mcr.microsoft.com/playwright/python`
+image with browsers pre-installed. The sidecar is NOT on `wintermute-net`
+— it is isolated from the sandbox to prevent the sandbox from bypassing
+Rust-layer policy enforcement. The host accesses it via a published port
+bound to `127.0.0.1:9223`.
+
+This approach uses bollard (pure Rust Docker API) — same pattern as the
+egress proxy. No `std::process::Command` needed.
+
+### Detection
 
 ```rust
 async fn detect_browser(config: &BrowserConfig) -> BrowserMode {
-    // 1. Display available? Launch Chrome with pipe transport
-    if has_display() && has_chrome() {
-        return BrowserMode::Managed;
+    // 1. Try CDP connection to user's Chrome
+    if let Ok(tabs) = cdp_list_tabs(config.cdp_port).await {
+        return BrowserMode::Attached { port: config.cdp_port };
     }
-    // 2. Docker available? Start headless sidecar
-    if config.sidecar_fallback && docker_available().await {
+    // 2. Try starting Docker sidecar (if enabled + Docker available)
+    if config.standalone_fallback && docker_available().await {
         if let Ok(_) = start_browser_sidecar().await {
-            return BrowserMode::Sidecar { port: 9223 };
+            return BrowserMode::Standalone { port: 9223 };
         }
     }
     // 3. No browser
@@ -600,29 +582,28 @@ async fn detect_browser(config: &BrowserConfig) -> BrowserMode {
 
 ### Interaction Patterns
 
-**Agent fills, user submits:**
+**Agent fills, user submits (attached mode):**
 ```
 User: "Fill in the shipping form on that tab with my address"
-Agent: [launches Chrome if not running, navigates, fills form fields]
-Agent: "Done. Review the form in the Chrome window and submit when ready."
+Agent: [finds the tab, fills form fields]
+Agent: "Done. I've filled in the shipping form. Review and submit
+       when ready — I left the submit button for you."
 ```
 
-**Agent needs login:**
+**Agent reads, user watches (attached mode):**
 ```
-User: "Check my Jira dashboard"
-Agent: [opens Jira in the managed Chrome]
-Agent: "Jira needs your login. I've opened the login page —
-       please sign in. I'll continue once you're authenticated."
-User: [types credentials in the visible Chrome window]
-Agent: [detects login complete, navigates to dashboard, screenshots]
+User: "What does my Grafana dashboard show right now?"
+Agent: [navigates to Grafana tab, takes screenshot, reads metrics]
+Agent: "Your API latency is at 230ms (up from 180ms yesterday).
+       Error rate is 0.3%. I'm looking at the production dashboard."
 ```
 
-**Agent opens for user to continue:**
+**Agent opens new tab (either mode):**
 ```
 User: "Find me flights to Mauritius in October"
-Agent: [opens Google Flights, fills dates, searches]
-Agent: "Found flights. Cheapest is $620 via Singapore Airlines.
-       The Chrome window has the results — take a look."
+Agent: [opens new tab, navigates to flight search, fills dates]
+Agent: "I've opened Google Flights with your search. Cheapest
+       option is $620 via Singapore Airlines. Tab is ready for you."
 ```
 
 ### Tool Definition
@@ -630,7 +611,7 @@ Agent: "Found flights. Cheapest is $620 via Singapore Airlines.
 ```json
 {
   "name": "browser",
-  "description": "Control a browser window. Launches a dedicated Chrome instance (not your main browser). Navigate, click, type, screenshot, extract. You can interact with the same window.",
+  "description": "Control the browser. Can use your existing Chrome session (same cookies/logins) or a standalone instance. Navigate, click, type, screenshot, extract.",
   "parameters": {
     "action": {
       "type": "string",
@@ -651,38 +632,44 @@ Agent: "Found flights. Cheapest is $620 via Singapore Airlines.
 }
 ```
 
+Tab management actions (`list_tabs`, `switch_tab`, `new_tab`, `close_tab`)
+are available in both modes but most useful in attached mode where the
+agent works with a real browser that has multiple tabs.
+
 ### Privacy & Safety
 
-**No open port.** Pipe transport means no TCP listener. No other
-process can connect. No unauthenticated endpoint to discover.
+In attached mode the browser has access to the user's full session —
+logins, cookies, saved passwords. This is powerful but sensitive.
 
-**Dedicated profile.** The agent's Chrome is isolated from the user's
-main browser. No cross-contamination of cookies or history.
+In standalone mode the browser is ephemeral — no persistent cookies,
+no saved passwords, no history between sessions.
 
 **Controls:**
-1. **Domain policy applies.** Navigate to unknown domains triggers
-   approval (same as web_request).
-2. **No form submission without explicit ask.** Agent fills forms but
-   doesn't submit. SID instructs: "Fill, don't submit. Let the user
-   review and press the button."
-3. **No password entry.** Agent never types passwords. If login is
-   needed, it opens the page and tells the user to sign in.
+1. **Domain policy still applies.** Browser navigate to unknown domains
+   triggers approval (especially in attached mode where the user's
+   session is at stake).
+2. **No form submission without approval.** The agent can FILL forms but
+   should not SUBMIT them unless explicitly asked. The SID instructs:
+   "When interacting with the user's browser: fill, don't submit. Let
+   the user review and press the button."
+3. **No password entry.** The agent never types passwords. If a login is
+   needed, it tells the user: "This page needs your login. Please sign
+   in and tell me when you're ready."
 4. **Screenshots are local.** Saved to /workspace, not transmitted.
-5. **Idle timeout.** Chrome is killed after configurable idle period
-   (default 5 min). Session state exported for next launch.
-6. **Session persistence.** Cookies/localStorage from the dedicated
-   profile persist between launches. User can clear with /browser reset.
+5. **Tab management.** The agent can open and close tabs it created. It
+   should not close tabs it didn't open.
 
 ### SID Browser Section
 
 ```markdown
 ## Browser
-{if managed: "I control a dedicated Chrome window (not your main browser).
-You can see and interact with it. I connect via pipe — no open port.
-If a site needs your login, I'll open it and ask you to sign in.
-Your credentials stay in the Chrome window — I never see passwords."}
-{if sidecar: "Using a headless browser in Docker (no display available).
-Good for scraping and research. No user interaction possible."}
+{if attached: "Connected to your Chrome on port 9222. I can see your
+tabs and use your logins. When I fill forms, I won't submit — I'll
+let you review first. I won't type passwords. If I need you to log in
+somewhere, I'll ask."}
+{if standalone: "Using a standalone browser (no access to your logins).
+Good for research and scraping. For tasks needing your accounts, run
+Chrome with --remote-debugging-port=9222 and I'll connect."}
 {if none: "No browser available."}
 ```
 
@@ -690,11 +677,10 @@ Good for scraping and research. No user interaction possible."}
 
 ```toml
 [browser]
+cdp_port = 9222                    # Chrome DevTools Protocol port to connect to
 auto_submit = false                # never auto-submit forms (safety default)
-idle_timeout_secs = 300            # kill Chrome after 5 min idle
-sidecar_fallback = true            # start Docker sidecar if no display
-sidecar_image = "ghcr.io/pycckuu/wintermute-browser:latest"
-# chrome_path = "/usr/bin/google-chrome"  # auto-detected if not set
+standalone_fallback = true         # start Docker sidecar if no CDP available
+image = "ghcr.io/pycckuu/wintermute-browser:latest"  # sidecar image
 ```
 
 ### Rate Limiting
@@ -705,16 +691,18 @@ Screenshot: max 10/min (disk space protection).
 
 ### Setup
 
-On first use, the agent checks for Chrome/Chromium installation:
-```rust
-// Check standard paths
-// macOS: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-// Linux: google-chrome, chromium-browser, chromium
-// If not found: tell user what to install
-```
+The agent can guide the user through setup. In the SID:
 
-No `--remote-debugging-port` flag. No special Chrome launch procedure.
-The user just needs Chrome installed. Wintermute handles everything else.
+```markdown
+## Browser Setup (if not connected)
+If the user wants browser automation:
+1. Tell them to restart Chrome with: google-chrome --remote-debugging-port=9222
+2. Or add the flag to their Chrome shortcut permanently
+3. On macOS: /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+4. Once running, you'll auto-detect it and connect
+If no Chrome available, standalone mode via Docker sidecar works for
+scraping and research (no logins).
+```
 
 Auto-detected at startup. Two implementations.
 
@@ -1014,7 +1002,7 @@ CROSSING THE BOUNDARY (controlled by egress proxy + policy):
   - Sandbox HTTP(S): routed through egress proxy, domain allowlist enforced
   - web_fetch: GET, SSRF filtered, text or file download               → public internet
   - web_request: POST, domain allowlisted, approval for new domains     → allowed domains
-  - browser: dedicated Chrome via pipe (host-side, no open port), domain policy gate → approved domains
+  - browser: full network, domain policy applies                        → approved domains
   - docker_manage: pull images (approval per new image)                 → Docker Hub
   - LLM API: conversation context                                      → model provider
   - Telegram: responses                                                 → user
@@ -1034,7 +1022,7 @@ CANNOT CROSS:
 | web_fetch | GET only | Never | SSRF filter | No | 30/min |
 | web_fetch (save_to) | GET, saves to /workspace | Binary ok | SSRF filter | Files >50MB | 30/min |
 | web_request | POST/PUT/PATCH/DELETE | Allowed | Allowlist + SSRF | New domains | 10/min |
-| browser | Full HTTP (GET/POST/etc) | Via page interaction | Policy gate (pipe, no proxy) | New domains | 60 actions/min |
+| browser | Full HTTP (GET/POST/etc) | Via page interaction | Allowlist | New domains | 60 actions/min |
 
 ### web_fetch Details
 
@@ -1310,9 +1298,9 @@ The agent always knows who it's talking to without searching.
 Contents:
 
 ```markdown
-# {personality.name}
+# Wintermute
 
-You are {personality.name}, a self-coding AI agent running on {hostname}.
+You are Wintermute, a self-coding AI agent running on {hostname}.
 
 ## Your Architecture
 - Core: Rust binary running on the HOST with full network access
@@ -1331,7 +1319,7 @@ You are {personality.name}, a self-coding AI agent running on {hostname}.
 HOST (has network, has Docker)
   ├── wintermute binary (Rust) ← your core, runs HERE
   │   ├── web_fetch / web_request ← reach the internet
-  │   ├── browser ← launches + controls dedicated Chrome via pipe
+  │   ├── browser ← controls user's Chrome via CDP (or Docker sidecar fallback)
   │   ├── docker_manage ← creates/manages Docker containers
   │   ├── model router ← talks to Ollama/Anthropic
   │   └── memory engine ← reads/writes memory.db
@@ -1353,8 +1341,7 @@ HOST (has network, has Docker)
       └── Agent's scripts can reach them (e.g., localhost:11434 for Ollama)
 ```
 When you run execute_command, it runs INSIDE the sandbox (has proxy-controlled network).
-When you call web_fetch/web_request/browser/docker_manage, they run OUTSIDE (on the host).
-The browser launches a dedicated Chrome instance via pipe transport — no open port, no proxy.
+When you call web_fetch/web_request/docker_manage, they run OUTSIDE (on the host).
 Need a service like Ollama or a database? Use docker_manage to spin it up.
 
 ## What You CAN Install
@@ -1392,7 +1379,7 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 - create_tool: Create reusable tools in /scripts/ (Python + JSON schema)
 - web_fetch: HTTP GET (no body, 30/min)
 - web_request: HTTP POST/PUT/etc (domain allowlisted, approval for new domains)
-- browser: {managed (dedicated Chrome, pipe transport)|sidecar (headless Docker)|not available}
+- browser: {attached to Chrome on port 9222 (your logins/cookies)|standalone (ephemeral, no logins)|not available}
 - memory_search: Search your memories ({keyword|keyword + vector} search)
 - memory_save: Save facts, procedures, episodes, skills
 - send_telegram: Send messages + files to the user
@@ -1815,6 +1802,7 @@ wintermute/
 │   │   ├── docker.rs              # DockerExecutor (bollard, warm container)
 │   │   ├── direct.rs              # DirectExecutor (host, restricted dir)
 │   │   ├── egress.rs              # Egress proxy (Squid config, domain allowlist)
+│   │   ├── playwright.rs          # Playwright browser sidecar lifecycle
 │   │   └── redactor.rs            # Secret pattern redaction
 │   │
 │   ├── tools/
@@ -1822,8 +1810,8 @@ wintermute/
 │   │   ├── core.rs                # 9 core tool implementations
 │   │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   │   ├── create_tool.rs         # create_tool implementation + git commit
-│   │   ├── browser.rs             # Browser tool: chromiumoxide pipe + sidecar fallback
-│   │   ├── browser_sidecar.rs     # Sidecar lifecycle (bollard) + HTTP bridge client
+│   │   ├── browser.rs             # Browser tool: CDP attach + sidecar fallback
+│   │   ├── browser_bridge.rs      # PlaywrightBridge (HTTP client to sidecar)
 │   │   └── docker.rs              # docker_manage (bollard, label policy)
 │   │
 │   ├── agent/
@@ -1992,9 +1980,9 @@ Files: agent/*, tools/*
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
 - Dynamic tool selection (top N by relevance/recency)
-- Browser: chromiumoxide pipe transport (managed Chrome, dedicated profile),
-  Docker sidecar fallback (headless, Playwright + Flask). On-demand lifecycle
-  with idle timeout. Auto-detect mode at startup. Skip if neither available.
+- Browser: CDP attach to user's Chrome (preferred) or Docker sidecar
+  fallback (Playwright + Flask in container). Tab management, form filling,
+  screenshot capture. Auto-detect mode at startup. Skip if neither available.
 
 ### Phase 3: Intelligence (weeks 7-8)
 
@@ -2054,9 +2042,6 @@ teloxide = { version = "0.13", features = ["macros"] }
 
 # Docker
 bollard = "0.18"
-
-# Browser (CDP over pipe)
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

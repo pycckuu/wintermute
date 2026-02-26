@@ -29,6 +29,7 @@ fn make_config() -> Config {
             default: "ollama/llama3".to_owned(),
             roles: std::collections::HashMap::new(),
             skills: std::collections::HashMap::new(),
+            openai_base_url: None,
         },
         channels: ChannelsConfig {
             telegram: TelegramConfig {
@@ -145,6 +146,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         default: "ollama/llama3".to_owned(),
         roles: std::collections::HashMap::new(),
         skills: std::collections::HashMap::new(),
+        openai_base_url: None,
     };
     let router = Arc::new(
         ModelRouter::from_config(&models_config, &creds).expect("failed to build model router"),

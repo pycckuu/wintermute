@@ -6,8 +6,8 @@ use serde_json::json;
 use wintermute::agent::policy::RateLimiter;
 use wintermute::config::BrowserConfig;
 use wintermute::tools::browser::{
-    browser_tool_definition, detect_browser, run_browser, validate_browser_input, BrowserBridge,
-    BrowserMode, SIDECAR_PORT,
+    browser_tool_definition, cdp_probe, detect_browser, run_browser, validate_browser_input,
+    BrowserBridge, BrowserMode, SIDECAR_PORT,
 };
 
 // ---------------------------------------------------------------------------
@@ -141,10 +141,10 @@ async fn run_browser_rate_limited() {
         .contains("rate"));
 }
 
-struct BridgeNeverCalled;
+struct NoOpBridge;
 
 #[async_trait]
-impl BrowserBridge for BridgeNeverCalled {
+impl BrowserBridge for NoOpBridge {
     async fn execute(&self, _action: &str, _input: &serde_json::Value) -> Result<String, String> {
         Ok("ok".to_owned())
     }
@@ -153,7 +153,7 @@ impl BrowserBridge for BridgeNeverCalled {
 #[tokio::test]
 async fn run_browser_navigate_blocks_private_ip_ssrf() {
     let limiter = RateLimiter::new(60, 60);
-    let bridge = BridgeNeverCalled;
+    let bridge = NoOpBridge;
     let input = json!({"action": "navigate", "url": "http://127.0.0.1/private"});
 
     let result = run_browser(&input, &limiter, Some(&bridge)).await;
@@ -165,6 +165,24 @@ async fn run_browser_navigate_blocks_private_ip_ssrf() {
             .to_string()
             .contains("SSRF blocked"),
         "navigate to private IP should be blocked before bridge execution"
+    );
+}
+
+#[tokio::test]
+async fn run_browser_new_tab_blocks_private_ip_ssrf() {
+    let limiter = RateLimiter::new(60, 60);
+    let bridge = NoOpBridge;
+    let input = json!({"action": "new_tab", "url": "http://169.254.169.254/latest/meta-data"});
+
+    let result = run_browser(&input, &limiter, Some(&bridge)).await;
+
+    assert!(result.is_err());
+    assert!(
+        result
+            .expect_err("should fail")
+            .to_string()
+            .contains("SSRF blocked"),
+        "new_tab to metadata IP should be blocked before bridge execution"
     );
 }
 
@@ -256,6 +274,13 @@ fn browser_tool_definition_includes_tab_actions() {
         Some("string"),
         "tab_id should be a string type"
     );
+
+    // direction property exists for scroll action
+    let direction_prop = schema.pointer("/properties/direction");
+    assert!(
+        direction_prop.is_some(),
+        "tool definition should include direction property for scroll"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,4 +310,105 @@ fn browser_mode_debug_and_clone() {
     let cloned = mode;
     assert_eq!(mode, cloned);
     assert_eq!(format!("{mode:?}"), "Attached { port: 9222 }");
+}
+
+// ---------------------------------------------------------------------------
+// CDP probe tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cdp_probe_returns_true_for_valid_cdp_endpoint() {
+    // Start a mock HTTP server returning a CDP-style JSON array.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind should succeed");
+    let port = listener.local_addr().expect("addr").port();
+
+    let server_handle = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut reader, mut writer) = stream.into_split();
+            let mut buf = [0u8; 1024];
+            let _ = reader.read(&mut buf).await;
+            let body = r#"[{"id":"page1","type":"page","url":"about:blank","webSocketDebuggerUrl":"ws://localhost:9222/devtools/page/1"}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = writer.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let result = cdp_probe(port).await;
+    assert!(
+        result,
+        "CDP probe should return true for valid JSON array response"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn cdp_probe_returns_false_for_connection_refused() {
+    // Use a port that nothing is listening on.
+    let result = cdp_probe(19876).await;
+    assert!(
+        !result,
+        "CDP probe should return false when connection is refused"
+    );
+}
+
+#[tokio::test]
+async fn detect_browser_returns_attached_when_cdp_available() {
+    // Start a mock CDP server.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind should succeed");
+    let port = listener.local_addr().expect("addr").port();
+
+    let server_handle = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut reader, mut writer) = stream.into_split();
+            let mut buf = [0u8; 1024];
+            let _ = reader.read(&mut buf).await;
+            let body = r#"[{"id":"page1","type":"page","url":"about:blank"}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = writer.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let config = BrowserConfig {
+        cdp_port: port,
+        standalone_fallback: true,
+        ..BrowserConfig::default()
+    };
+    let mode = detect_browser(&config).await;
+    assert_eq!(
+        mode,
+        BrowserMode::Attached { port },
+        "should detect attached mode when CDP responds"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn detect_browser_falls_back_when_cdp_unreachable() {
+    let config = BrowserConfig {
+        cdp_port: 19877, // nothing listening
+        standalone_fallback: true,
+        ..BrowserConfig::default()
+    };
+    let mode = detect_browser(&config).await;
+    assert_eq!(
+        mode,
+        BrowserMode::Standalone { port: SIDECAR_PORT },
+        "should fall back to standalone when CDP is unreachable"
+    );
 }
