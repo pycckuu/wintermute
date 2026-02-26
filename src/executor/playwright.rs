@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use base64::Engine;
 use bollard::container::{
     Config as ContainerConfig, CreateContainerOptions, InspectContainerOptions,
     RemoveContainerOptions, StartContainerOptions,
@@ -44,15 +45,10 @@ const HEALTH_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(2
 /// HTTP timeout for health-check requests.
 const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Embedded Dockerfile for local build fallback when the registry image
-/// is unavailable. Based on the official Playwright Python image with
-/// Flask and an inline bridge server script.
-const BROWSER_DOCKERFILE: &str = r#"FROM mcr.microsoft.com/playwright/python:v1.49.0
-
-RUN pip install --no-cache-dir flask==3.1.*
-
-RUN cat > /opt/browser_bridge.py << 'PYEOF'
-import json
+/// Python bridge server script embedded as a constant. This is base64-encoded
+/// into the Dockerfile at runtime to avoid heredoc issues with Docker's
+/// classic builder (which ends `RUN` at the first newline).
+const BRIDGE_SCRIPT: &str = r#"import json
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 
@@ -179,12 +175,24 @@ def execute():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=9222, threaded=True)
-PYEOF
+"#;
 
+/// Generate the Dockerfile for the browser sidecar.
+///
+/// The Python bridge script is base64-encoded into a `RUN` command to
+/// avoid heredoc parsing issues with Docker's classic builder.
+fn browser_dockerfile() -> String {
+    let script_b64 = base64::engine::general_purpose::STANDARD.encode(BRIDGE_SCRIPT);
+    format!(
+        r#"FROM mcr.microsoft.com/playwright/python:v1.49.0
+RUN pip install --no-cache-dir flask==3.1.* playwright==1.49.*
+RUN echo "{script_b64}" | base64 -d > /opt/browser_bridge.py
 USER pwuser
 EXPOSE 9222
 CMD ["python3", "/opt/browser_bridge.py"]
-"#;
+"#
+    )
+}
 
 /// Playwright browser sidecar providing HTTP-based browser automation.
 ///
@@ -209,7 +217,8 @@ impl PlaywrightSidecar {
         image: &str,
         workspace_dir: &Path,
     ) -> Result<Self, ExecutorError> {
-        super::ensure_image(docker, image, Some(BROWSER_DOCKERFILE)).await?;
+        let dockerfile = browser_dockerfile();
+        super::ensure_image(docker, image, Some(&dockerfile)).await?;
 
         let workspace_str = workspace_dir.to_str().ok_or_else(|| {
             ExecutorError::Infrastructure("workspace path is not valid UTF-8".to_owned())
