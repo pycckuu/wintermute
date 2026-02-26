@@ -3,7 +3,7 @@
 //! Provides per-session and per-day budget enforcement using lock-free atomics.
 //! The [`DailyBudget`] automatically resets when the calendar day changes.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -179,12 +179,16 @@ impl DailyBudget {
 /// Per-session budget tracker.
 ///
 /// Wraps a shared [`DailyBudget`] and adds session-scoped token tracking
-/// plus tool-call-per-turn enforcement.
+/// plus tool-call-per-turn enforcement. When the session budget is exhausted,
+/// the session pauses and resumes with a fresh allocation on the next user
+/// message (see [`SessionBudget::renew`]).
 #[derive(Debug)]
 pub struct SessionBudget {
     session_tokens: AtomicU64,
     daily: Arc<DailyBudget>,
     config: BudgetConfig,
+    /// Whether the session is paused due to budget exhaustion.
+    paused: AtomicBool,
 }
 
 impl SessionBudget {
@@ -194,6 +198,7 @@ impl SessionBudget {
             session_tokens: AtomicU64::new(0),
             daily,
             config,
+            paused: AtomicBool::new(false),
         }
     }
 
@@ -265,6 +270,35 @@ impl SessionBudget {
     /// Daily usage as a percentage (0–100), clamped.
     pub fn daily_percent(&self) -> u8 {
         percent_of(self.daily_used(), self.config.max_tokens_per_day)
+    }
+
+    /// Reset the session token counter for a new budget window.
+    ///
+    /// The daily budget is unaffected — it still caps total spend across all
+    /// windows. Returns `false` if the daily budget is also exhausted,
+    /// leaving the session paused. On success the caller should also call
+    /// [`set_paused(false)`](Self::set_paused) to resume processing.
+    ///
+    /// Note: the daily-used check is a relaxed load, so another session could
+    /// push daily usage over the limit between this check and the next
+    /// `check_budget()`. This is benign — `check_budget()` independently
+    /// validates the daily budget before every LLM call.
+    pub fn renew(&self) -> bool {
+        if self.daily.used() >= self.daily.limit() {
+            return false;
+        }
+        self.session_tokens.store(0, Ordering::Relaxed);
+        true
+    }
+
+    /// Whether the session is paused due to budget exhaustion.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Mark the session as paused (budget exhausted) or unpaused (renewed).
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
     }
 
     /// Compute the current budget status considering both session and daily limits.

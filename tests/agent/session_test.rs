@@ -322,3 +322,35 @@ async fn session_count_reflects_active_sessions() {
     router.shutdown_all().await;
     assert_eq!(router.session_count().await, 0);
 }
+
+#[tokio::test]
+async fn remove_session_removes_active_session() {
+    let (router, mut _tg_rx) = build_session_router().await;
+
+    router
+        .route_message(12345, "Hello".to_owned())
+        .await
+        .expect("message failed");
+
+    tokio::task::yield_now().await;
+    assert_eq!(router.session_count().await, 1);
+
+    let removed = router.remove_session(12345).await;
+    assert!(removed, "should have found and removed the session");
+
+    // Allow the shutdown event to be processed
+    tokio::task::yield_now().await;
+    assert_eq!(router.session_count().await, 0);
+
+    // Removing again returns false
+    let removed_again = router.remove_session(12345).await;
+    assert!(!removed_again, "should not find a session to remove");
+}
+
+#[tokio::test]
+async fn remove_session_nonexistent_returns_false() {
+    let (router, mut _tg_rx) = build_session_router().await;
+
+    let removed = router.remove_session(99999).await;
+    assert!(!removed);
+}

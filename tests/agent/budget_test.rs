@@ -225,3 +225,71 @@ fn daily_percent_accuracy() {
     budget.record_usage(500_000, 0);
     assert_eq!(budget.daily_percent(), 50);
 }
+
+// ---------------------------------------------------------------------------
+// Pause / renew tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paused_flag_defaults_to_false() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    assert!(!budget.is_paused());
+}
+
+#[test]
+fn paused_flag_roundtrip() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.set_paused(true);
+    assert!(budget.is_paused());
+
+    budget.set_paused(false);
+    assert!(!budget.is_paused());
+}
+
+#[test]
+fn renew_resets_session_counter() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(5_000, 5_000); // 10_000 used
+    assert_eq!(budget.session_used(), 10_000);
+
+    let renewed = budget.renew();
+    assert!(renewed);
+    assert_eq!(budget.session_used(), 0);
+    // Daily usage should remain unchanged
+    assert_eq!(budget.daily_used(), 10_000);
+}
+
+#[test]
+fn renew_fails_when_daily_exhausted() {
+    let daily = Arc::new(DailyBudget::new(10_000));
+    let budget = SessionBudget::new(daily, test_config(5_000, 10_000, 20));
+
+    // Exhaust daily budget
+    budget.record_usage(5_000, 5_000); // daily at 10_000/10_000
+    assert_eq!(budget.session_used(), 10_000);
+
+    let renewed = budget.renew();
+    assert!(!renewed);
+    // Session counter should NOT have been reset
+    assert_eq!(budget.session_used(), 10_000);
+}
+
+#[test]
+fn renew_succeeds_when_session_exhausted_but_daily_has_room() {
+    let daily = Arc::new(DailyBudget::new(100_000));
+    let budget = SessionBudget::new(daily, test_config(10_000, 100_000, 20));
+
+    budget.record_usage(5_000, 5_000); // session at limit, daily at 10%
+    assert!(budget.check_budget(1).is_err());
+
+    let renewed = budget.renew();
+    assert!(renewed);
+    assert_eq!(budget.session_used(), 0);
+    assert!(budget.check_budget(1).is_ok());
+}

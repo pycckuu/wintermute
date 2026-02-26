@@ -193,7 +193,7 @@ async fn handle_message(bot: Bot, msg: Message, state: SharedState) -> ResponseR
 
     // Handle slash commands
     if text.starts_with('/') {
-        let reply = dispatch_command(&text, &state).await;
+        let reply = dispatch_command(&text, &state, user_id).await;
         bot.send_message(msg.chat.id, reply)
             .parse_mode(ParseMode::Html)
             .await?;
@@ -229,7 +229,7 @@ async fn handle_message(bot: Bot, msg: Message, state: SharedState) -> ResponseR
 // ---------------------------------------------------------------------------
 
 /// Parse and dispatch a slash command, returning the HTML response.
-async fn dispatch_command(text: &str, state: &SharedState) -> String {
+async fn dispatch_command(text: &str, state: &SharedState, user_id: i64) -> String {
     // Strip the leading "/" and split into command and args
     let without_slash = &text[1..];
     // Handle bot-mention suffixes like "/help@wintermute_bot"
@@ -242,6 +242,10 @@ async fn dispatch_command(text: &str, state: &SharedState) -> String {
 
     match command {
         "help" | "start" => commands::handle_help(),
+        "reset" | "new" => {
+            let had_session = state.session_router.remove_session(user_id).await;
+            commands::handle_reset(had_session)
+        }
         "status" => {
             let session_count = state.session_router.session_count().await;
             commands::handle_status(&*state.executor, &state.memory, session_count).await

@@ -107,6 +107,25 @@ fn tools_detail_not_found() {
 }
 
 #[test]
+fn help_includes_reset_command() {
+    let result = commands::handle_help();
+    assert!(result.contains("/reset"));
+}
+
+#[test]
+fn reset_with_active_session() {
+    let result = commands::handle_reset(true);
+    assert!(result.contains("Session reset"));
+    assert!(result.contains("fresh conversation"));
+}
+
+#[test]
+fn reset_without_active_session() {
+    let result = commands::handle_reset(false);
+    assert!(result.contains("No active session"));
+}
+
+#[test]
 fn tools_with_registered_tool_shows_it() {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let tool_json = serde_json::json!({

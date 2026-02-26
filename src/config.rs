@@ -414,7 +414,7 @@ fn default_session_tokens() -> u64 {
     500_000
 }
 fn default_daily_tokens() -> u64 {
-    5_000_000
+    10_000_000
 }
 fn default_tool_calls_per_turn() -> u32 {
     20
