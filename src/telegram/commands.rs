@@ -16,6 +16,7 @@ pub fn handle_help() -> String {
         "/help — show this message",
         "/status — executor health, memory stats, active sessions",
         "/budget — token budget usage",
+        "/reset — end current session and start fresh",
         "/memory — search recent memories",
         "/memory_pending — show pending observer memories",
         "/memory_undo — undo last observer promotion",
@@ -60,6 +61,18 @@ pub fn handle_budget(
     daily_limit: u64,
 ) -> String {
     format_budget(session_used, daily_used, session_limit, daily_limit)
+}
+
+/// Handle the /reset command — confirms session reset to the user.
+///
+/// The actual session removal is performed by the caller since this module
+/// does not own the [`SessionRouter`].
+pub fn handle_reset(had_session: bool) -> String {
+    if had_session {
+        "Session reset. Your next message will start a fresh conversation.".to_owned()
+    } else {
+        "No active session. Your next message will start a new one.".to_owned()
+    }
 }
 
 /// Search for recent memories and return a summary.

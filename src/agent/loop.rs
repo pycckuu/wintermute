@@ -198,6 +198,23 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     warn!(error = %e, "failed to save user conversation entry");
                 }
 
+                // Renew paused session on new user message
+                if cfg.budget.is_paused() {
+                    if cfg.budget.renew() {
+                        cfg.budget.set_paused(false);
+                        last_warned_percent = 0;
+                        info!(session_id = %cfg.session_id, "budget renewed by user message");
+                    } else {
+                        send_text(
+                            &cfg,
+                            "Daily budget still exhausted. I'll be back tomorrow, \
+                             or adjust the limit in config.toml under [budget].max_tokens_per_day.",
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+
                 // Run the agent reasoning turn
                 run_agent_turn(
                     &cfg,
@@ -365,13 +382,7 @@ async fn run_agent_turn(
         let response = loop {
             let estimated = estimate_messages_tokens(&trimmed);
             if let Err(e) = cfg.budget.check_budget(estimated) {
-                // Graceful exhaustion: send a user-friendly message
-                let scope_label = e.scope().label();
-                let msg = format!(
-                    "{scope_label} token budget reached. Start a new conversation to continue, \
-                     or adjust the limit in config.toml under [budget]."
-                );
-                send_text(cfg, &msg).await;
+                pause_session(cfg, e.scope().label()).await;
                 return;
             }
 
@@ -393,9 +404,7 @@ async fn run_agent_turn(
                     info!(percent, scope = scope_label, "budget warning injected");
                 }
                 BudgetStatus::Exhausted => {
-                    let msg = "Token budget exhausted. Start a new conversation to continue, \
-                               or adjust the limit in config.toml under [budget].";
-                    send_text(cfg, msg).await;
+                    pause_session(cfg, scope.label()).await;
                     return;
                 }
                 _ => {}
@@ -693,6 +702,17 @@ fn extract_assistant_text(parts: &[ContentPart]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Pause the session on budget exhaustion and notify the user.
+async fn pause_session(cfg: &SessionConfig, scope_label: &str) {
+    cfg.budget.set_paused(true);
+    let msg = format!(
+        "{scope_label} token budget reached. Send another message to continue \
+         with a fresh allocation, or /reset to start a new conversation. \
+         Adjust limits in config.toml under [budget]."
+    );
+    send_text(cfg, &msg).await;
 }
 
 /// Send a text message to the user via the Telegram outbound channel.

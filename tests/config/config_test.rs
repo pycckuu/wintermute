@@ -17,7 +17,7 @@ use wintermute::config::{
 fn default_budget_values() {
     let budget = BudgetConfig::default();
     assert_eq!(budget.max_tokens_per_session, 500_000);
-    assert_eq!(budget.max_tokens_per_day, 5_000_000);
+    assert_eq!(budget.max_tokens_per_day, 10_000_000);
     assert_eq!(budget.max_tool_calls_per_turn, 20);
     assert_eq!(budget.max_dynamic_tools_per_turn, 20);
 }

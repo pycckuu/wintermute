@@ -197,6 +197,22 @@ impl SessionRouter {
         Ok(())
     }
 
+    /// Remove and shut down a session for the given user.
+    ///
+    /// Sends a [`SessionEvent::Shutdown`] to the session task and removes it
+    /// from the routing table. Returns `true` if a session was found and
+    /// removed.
+    pub async fn remove_session(&self, user_id: i64) -> bool {
+        let session_key = format!("user_{user_id}");
+        let mut sessions = self.sessions.lock().await;
+        if let Some(tx) = sessions.remove(&session_key) {
+            let _ = tx.send(SessionEvent::Shutdown).await;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Shut down all active sessions gracefully.
     pub async fn shutdown_all(&self) {
         let mut sessions = self.sessions.lock().await;

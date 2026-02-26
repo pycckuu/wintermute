@@ -35,8 +35,10 @@ part of itself. Everything else is infrastructure supporting this.
 is maximally capable INSIDE the boundary. The boundary controls what
 data can LEAVE, not what the agent can DO.
 
-**C3: Single binary, macOS + Linux.** Deploy with scp. No Kubernetes,
-no Docker requirement (but better with it). Works on a VPS or a laptop.
+**C3: Single binary, macOS + Linux.** Deploy with scp. Auto-updates
+daily via Flatline (checks GitHub Releases, swaps binary, rolls back
+if broken). No Kubernetes, no Docker requirement (but better with it).
+Works on a VPS or a laptop.
 
 **C4: Telegram-first.** Always available, every device, push notifications
 built in. Not a web UI. Not a CLI for daily use.
@@ -71,7 +73,7 @@ uses sonnet). The user configures this, not the code.
 │  │  │   └── Dynamic Tools (from /scripts/*.json, hot-reload)  │   │
 │  │  ├── Policy Gate (approval for new domains + images)       │   │
 │  │  ├── Approval Manager (non-blocking, short-ID callbacks)   │   │
-│  │  ├── Budget Tracker (atomic, per-session + daily, 70/85/95% warnings) │
+│  │  ├── Budget Tracker (atomic, per-session + daily, pause/renew on exhaust) │
 │  │  └── Redactor (single chokepoint, all tool output)         │   │
 │  │                                                            │   │
 │  │  Memory Engine                                             │   │
@@ -1492,7 +1494,8 @@ When you solve a repeatable task:
 
 ## Current State
 - Uptime: {uptime}
-- Budget today: {used}/{limit} tokens ({percent}%)
+- Session budget: {session_used}/{session_limit} tokens ({percent}%)
+- Daily budget: {daily_used}/{daily_limit} tokens ({percent}%)
 - Active sessions: {n}
 - Last backup: {time}
 ```
@@ -1570,7 +1573,8 @@ to the user. The agent sees them and can act accordingly.
 
 ### Graceful Exhaustion
 
-When budget is exceeded, the agent should NOT crash silently. Instead:
+When budget is exceeded, the agent should NOT crash or kill the session.
+Instead: **pause the session, let the user resume it.**
 
 ```rust
 match budget_tracker.check_budget() {
@@ -1581,31 +1585,100 @@ match budget_tracker.check_budget() {
             "Budget at {}%. Wrap up current task.", percent
         ));
     }
-    BudgetStatus::Exhausted => {
-        // Don't call LLM. Send a direct message instead.
+    BudgetStatus::SessionExhausted => {
+        // Don't call LLM. Pause the session. Tell the user.
+        telegram.send(
+            "⚠️ Session token budget reached. Send another message \
+             to continue with a fresh allocation, or /reset to start \
+             a new conversation. Adjust limits in config.toml under \
+             [budget].max_tokens_per_session."
+        ).await;
+        session.budget.set_paused(true);
+        // Session stays alive. History preserved.
+        // Next UserMessage calls budget.renew() and continues.
+    }
+    BudgetStatus::DailyExhausted => {
+        // Hard stop. No renewal possible until tomorrow.
         telegram.send(
             "⚠️ Daily token budget reached. I'll be back tomorrow, \
              or you can adjust the limit in config.toml under \
              [budget].max_tokens_per_day."
         ).await;
-        session.suspend().await;
+        session.budget.set_paused(true);
+        // Same pause mechanism, but renew() checks daily budget
+        // first and refuses if daily is also exhausted.
     }
 }
 ```
 
-The agent tells the user what happened AND how to fix it. Not a raw
-error string.
+The key: **session budget exhaustion pauses, it doesn't kill.** When
+the user sends their next message, the session renews:
+
+```rust
+// In run_session's event loop
+SessionEvent::UserMessage(msg) => {
+    if budget.is_paused() {
+        if budget.daily_exhausted() {
+            // Still can't continue — daily limit hit
+            telegram.send("Daily budget still exhausted. Back tomorrow.").await;
+            continue;
+        }
+        budget.renew();           // reset session token counter to 0
+        budget.set_paused(false); // unpause
+        // Fall through — full conversation history still in context
+    }
+    run_agent_turn(&msg, ...).await;
+}
+```
+
+Why not kill the session? Because the session budget protects against
+**runaway agent loops**, not against users wanting to continue their
+conversation. If a human explicitly sends a new message after the
+warning, that's intentional — they want to keep going with fresh
+allocation. The **daily budget** is the real cost protection.
 
 ### Session Budget vs Daily Budget
 
-Two separate limits, both enforced:
+Two separate limits, both enforced, different behaviors:
 
 - **Per-session**: protects against runaway single conversations.
-  When exceeded: "This conversation is getting long. I can continue
-  in a new session, or you can increase the session limit."
+  When exceeded: session **pauses**. History preserved. User's next
+  message renews the allocation and continues where they left off.
+  "Session budget reached. Send another message to continue."
 
 - **Per-day**: protects against cost overrun across all sessions.
-  When exceeded: "Daily budget reached. Back tomorrow."
+  When exceeded: session **pauses** and cannot be renewed until the
+  daily counter resets (midnight or configurable).
+  "Daily budget reached. Back tomorrow."
+
+```rust
+pub struct SessionBudget {
+    session_tokens_used: AtomicU64,
+    session_limit: u64,
+    daily_tracker: Arc<DailyBudget>,  // shared across all sessions
+    paused: AtomicBool,
+}
+
+impl SessionBudget {
+    /// Reset session counter. Called when user resumes after pause.
+    /// Fails if daily budget is also exhausted.
+    pub fn renew(&self) -> bool {
+        if self.daily_tracker.exhausted() {
+            return false;  // can't renew — daily limit hit
+        }
+        self.session_tokens_used.store(0, Ordering::Relaxed);
+        true
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_paused(&self, v: bool) {
+        self.paused.store(v, Ordering::Relaxed);
+    }
+}
+```
 
 ### Context Compaction for Long Conversations
 
@@ -1645,6 +1718,10 @@ with the summary as context.
   Session: 45,000 / 500,000 tokens (9%)
   Today:   320,000 / 5,000,000 tokens (6.4%)
   Est. cost today: $0.48
+
+If paused:
+  Session: ⏸ PAUSED — send a message to resume
+  Today:   320,000 / 5,000,000 tokens (6.4%)
 ```
 
 ---
@@ -1658,13 +1735,14 @@ HTML parse mode only. Escape only `< > &`.
 ```
 /status              Health, sandbox, memory stats, active tasks
 /budget              Token usage today, limits, estimated cost
+/reset               End current session, start fresh (history cleared)
 /memory              Overview of facts + procedures
 /memory pending      Staged extractions awaiting promotion
 /memory undo         Reverse last observer batch
 /tools               List dynamic tools with usage stats
 /tools {name}        Show tool details + recent invocations
 /sandbox             Container status (or "direct mode" if no Docker)
-/reset               Recreate sandbox (reinstalls requirements.txt)
+/sandbox reset       Recreate sandbox (reinstalls requirements.txt)
 /backup              Trigger immediate backup
 /help                List commands
 ```
@@ -1984,7 +2062,7 @@ Files: agent/*, tools/*
 - Agent loop: context assemble → LLM call → tool routing → execute → observe
 - Context assembler with trimming + retry + compaction at 60% session budget
 - Budget tracker: atomic counters, per-session + daily, warnings at 70/85/95%
-- Budget exhaustion: graceful message to user, session suspend (not crash)
+- Budget exhaustion: session pauses (not killed), user's next message renews
 - Policy gate + egress rules
 - Non-blocking approval manager (short-ID callbacks)
 - 9 core tool implementations
