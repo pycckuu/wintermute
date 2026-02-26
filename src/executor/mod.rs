@@ -13,6 +13,7 @@ use tokio_stream::StreamExt;
 pub mod direct;
 pub mod docker;
 pub mod egress;
+pub mod playwright;
 pub mod redactor;
 
 /// Executor implementation kind.

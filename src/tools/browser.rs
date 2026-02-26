@@ -106,7 +106,14 @@ pub fn validate_browser_input(input: &serde_json::Value) -> Result<serde_json::V
     let mut sanitised = serde_json::Map::new();
     sanitised.insert("action".to_owned(), json!(action));
 
-    for key in ["url", "selector", "text", "javascript", "wait_for"] {
+    for key in [
+        "url",
+        "selector",
+        "text",
+        "javascript",
+        "wait_for",
+        "direction",
+    ] {
         if let Some(sanitised_val) = sanitise_string_param(input, key, MAX_STRING_PARAM_LEN)? {
             sanitised.insert(key.to_owned(), sanitised_val);
         }

@@ -36,6 +36,8 @@ use wintermute::logging;
 use wintermute::memory::{MemoryEngine, TrustSource};
 use wintermute::providers::router::ModelRouter;
 use wintermute::telegram;
+use wintermute::tools::browser::BrowserBridge;
+use wintermute::tools::browser_bridge::PlaywrightBridge;
 use wintermute::tools::registry::DynamicToolRegistry;
 use wintermute::tools::ToolRouter;
 
@@ -242,6 +244,36 @@ async fn handle_start() -> anyhow::Result<()> {
 
     let observer_redactor = redactor.clone();
     let docker_client = bollard::Docker::connect_with_local_defaults().ok();
+
+    // Browser bridge: start Playwright sidecar if enabled and Docker is available.
+    let browser_bridge: Option<Arc<dyn BrowserBridge>> = if config.browser.enabled {
+        if let Some(ref docker) = docker_client {
+            match wintermute::executor::playwright::PlaywrightSidecar::ensure(
+                docker,
+                &config.browser.image,
+                &paths.workspace_dir,
+            )
+            .await
+            {
+                Ok(sidecar) => {
+                    info!("browser bridge: Playwright sidecar ready");
+                    Some(Arc::new(PlaywrightBridge::new(
+                        sidecar.base_url().to_owned(),
+                    )))
+                }
+                Err(e) => {
+                    warn!("browser bridge unavailable: {e}");
+                    None
+                }
+            }
+        } else {
+            warn!("browser bridge unavailable: Docker client not connected");
+            None
+        }
+    } else {
+        None
+    };
+
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -251,7 +283,7 @@ async fn handle_start() -> anyhow::Result<()> {
         fetch_limiter,
         request_limiter,
         browser_limiter,
-        None, // No browser bridge configured; tool returns unavailable when called
+        browser_bridge,
         docker_client,
         Some(u64::from(config.egress.max_file_download_mb).saturating_mul(1024 * 1024)),
     ));

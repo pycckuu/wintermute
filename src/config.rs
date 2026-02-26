@@ -33,6 +33,10 @@ pub struct Config {
     /// Privacy boundary configuration.
     #[serde(default)]
     pub privacy: PrivacyConfig,
+
+    /// Browser automation sidecar configuration.
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 /// Top-level agent-owned configuration.
@@ -240,6 +244,27 @@ impl Default for EgressConfig {
     }
 }
 
+/// Browser automation sidecar configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BrowserConfig {
+    /// Enable browser sidecar auto-start.
+    #[serde(default = "default_browser_enabled")]
+    pub enabled: bool,
+
+    /// Docker image for the Playwright sidecar.
+    #[serde(default = "default_browser_image")]
+    pub image: String,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_browser_enabled(),
+            image: default_browser_image(),
+        }
+    }
+}
+
 /// Heartbeat scheduler settings.
 #[derive(Debug, Deserialize)]
 pub struct HeartbeatConfig {
@@ -413,6 +438,12 @@ fn default_auto_promote_threshold() -> u32 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_browser_enabled() -> bool {
+    true
+}
+fn default_browser_image() -> String {
+    crate::executor::playwright::BROWSER_IMAGE.to_owned()
 }
 
 /// Load the human-owned config from a TOML file.
