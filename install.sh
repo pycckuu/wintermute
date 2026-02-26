@@ -29,8 +29,22 @@ detect_target() {
 }
 
 latest_version() {
-    local json version
-    json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+    local tmpfile http_code json version
+    tmpfile="$(mktemp)"
+    trap 'rm -f "$tmpfile"' RETURN
+
+    http_code="$(curl -sL -o "$tmpfile" -w '%{http_code}' \
+        "https://api.github.com/repos/${REPO}/releases/latest")"
+
+    if [ "$http_code" = "404" ]; then
+        error "No releases found for ${REPO}.
+  The release pipeline may not have run yet.
+  Check: https://github.com/${REPO}/releases"
+    elif [ "$http_code" != "200" ]; then
+        error "GitHub API returned HTTP ${http_code}. Check https://github.com/${REPO}/releases"
+    fi
+
+    json="$(cat "$tmpfile")"
     if command -v jq &>/dev/null; then
         version="$(echo "$json" | jq -r '.tag_name' | sed 's/^v//')"
     else
@@ -68,10 +82,13 @@ main() {
 
     info "Downloading ${archive}..."
     curl -fsSL -o "${tmpdir}/${archive}" "$url" \
-        || error "Download failed. Check that a release exists for ${target}."
+        || error "Download failed for ${archive}.
+  The release v${version} may be missing the archive for ${target}.
+  Check: https://github.com/${REPO}/releases/tag/v${version}"
 
     info "Verifying checksum..."
-    curl -fsSL -o "${tmpdir}/checksums-sha256.txt" "$checksum_url"
+    curl -fsSL -o "${tmpdir}/checksums-sha256.txt" "$checksum_url" \
+        || error "Failed to download checksums file from ${checksum_url}"
     expected="$(grep -F "${archive}" "${tmpdir}/checksums-sha256.txt" | awk '{print $1}')"
     if [ -n "$expected" ]; then
         if command -v sha256sum &>/dev/null; then
@@ -126,7 +143,7 @@ main() {
         info "Running wintermute init..."
         "${INSTALL_DIR}/wintermute" init || true
     else
-        info "~/.wintermute already exists, skipping init."
+        info "$HOME/.wintermute already exists, skipping init."
     fi
 
     echo
