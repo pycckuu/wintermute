@@ -30,7 +30,7 @@ jobs:
             os: ubuntu-latest
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             cross: false
           - target: aarch64-apple-darwin
             os: macos-14
@@ -51,11 +51,13 @@ jobs:
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: ${{ matrix.cross }}
-        run: cross build --release --locked --target ${{ matrix.target }}
+        env:
+          CROSS_CONFIG: Cross.toml
+        run: cross build --workspace --release --locked --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
