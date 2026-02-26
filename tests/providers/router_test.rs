@@ -141,6 +141,26 @@ fn resolve_returns_provider_for_valid_spec() {
 }
 
 #[test]
+fn from_config_with_auth_uses_pre_resolved_anthropic_auth() {
+    let models = ModelsConfig {
+        default: "anthropic/claude-haiku-4-5-20251001".to_owned(),
+        roles: HashMap::new(),
+        skills: HashMap::new(),
+    };
+    // No Anthropic credentials in .env — only the pre-resolved auth should work.
+    let credentials = Credentials::default();
+    let auth = AnthropicAuth::ApiKey("pre-resolved-key".to_owned());
+
+    let router = ModelRouter::from_config_with_auth(&models, &credentials, Some(auth))
+        .expect("router should init with pre-resolved auth");
+    assert!(router.has_model("anthropic/claude-haiku-4-5-20251001"));
+    assert_eq!(
+        router.default_provider().model_id(),
+        "anthropic/claude-haiku-4-5-20251001"
+    );
+}
+
+#[test]
 fn router_loads_openai_default_with_oauth_token() {
     let models = openai_default_config();
     let credentials = openai_credentials_with_oauth_and_api_key();
@@ -165,26 +185,6 @@ fn router_errors_on_unavailable_openai_default() {
     let credentials = Credentials::default();
     let result = ModelRouter::from_config(&models, &credentials);
     assert!(result.is_err());
-}
-
-#[test]
-fn from_config_with_auth_uses_pre_resolved_anthropic_auth() {
-    let models = ModelsConfig {
-        default: "anthropic/claude-haiku-4-5-20251001".to_owned(),
-        roles: HashMap::new(),
-        skills: HashMap::new(),
-    };
-    // No Anthropic credentials in .env — only the pre-resolved auth should work.
-    let credentials = Credentials::default();
-    let auth = AnthropicAuth::ApiKey("pre-resolved-key".to_owned());
-
-    let router = ModelRouter::from_config_with_auth(&models, &credentials, Some(auth))
-        .expect("router should init with pre-resolved auth");
-    assert!(router.has_model("anthropic/claude-haiku-4-5-20251001"));
-    assert_eq!(
-        router.default_provider().model_id(),
-        "anthropic/claude-haiku-4-5-20251001"
-    );
 }
 
 #[test]

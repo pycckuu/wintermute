@@ -163,6 +163,7 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
         session_budget_limit: deps.config.budget.max_tokens_per_session,
         daily_budget_limit: deps.config.budget.max_tokens_per_day,
         uptime: start_time.elapsed(),
+        agent_name: deps.agent_config.personality.name.clone(),
     };
 
     let content = identity::render_identity(&snap);
