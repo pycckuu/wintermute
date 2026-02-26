@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   bump-and-release:
@@ -65,3 +66,12 @@ jobs:
           git commit -m "chore: bump version to ${NEW} [skip ci]"
           git tag "v${NEW}"
           git push origin main "v${NEW}"
+
+      - name: Trigger release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.version.outputs.new }}"
+          # Brief delay to let GitHub propagate the tag ref.
+          sleep 5
+          gh workflow run release.yml --ref "$TAG"
