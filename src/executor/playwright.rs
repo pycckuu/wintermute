@@ -174,7 +174,7 @@ def execute():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9222, threaded=True)
+    app.run(host="0.0.0.0", port=9222, threaded=False)
 "#;
 
 /// Generate the Dockerfile for the browser sidecar.
