@@ -289,7 +289,11 @@ fn browser_tool_definition_includes_tab_actions() {
 
 #[tokio::test]
 async fn detect_browser_returns_standalone_when_fallback_enabled() {
-    let config = BrowserConfig::default(); // standalone_fallback defaults to true
+    let config = BrowserConfig {
+        cdp_port: 19878, // use a port nothing listens on
+        standalone_fallback: true,
+        ..BrowserConfig::default()
+    };
     let mode = detect_browser(&config).await;
     assert_eq!(mode, BrowserMode::Standalone { port: SIDECAR_PORT });
 }
@@ -297,6 +301,7 @@ async fn detect_browser_returns_standalone_when_fallback_enabled() {
 #[tokio::test]
 async fn detect_browser_returns_none_when_fallback_disabled() {
     let config = BrowserConfig {
+        cdp_port: 19879, // use a port nothing listens on
         standalone_fallback: false,
         ..BrowserConfig::default()
     };
