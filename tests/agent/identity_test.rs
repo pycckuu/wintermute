@@ -6,6 +6,7 @@ use wintermute::agent::identity::{
     format_uptime, load_identity, render_identity, write_identity_file, IdentitySnapshot,
 };
 use wintermute::executor::ExecutorKind;
+use wintermute::tools::browser::BrowserMode;
 
 fn sample_snapshot() -> IdentitySnapshot {
     IdentitySnapshot {
@@ -20,6 +21,7 @@ fn sample_snapshot() -> IdentitySnapshot {
         daily_budget_limit: 5_000_000,
         uptime: Duration::from_secs(3_723),
         agent_name: "Wintermute".to_owned(),
+        browser_mode: BrowserMode::None,
     }
 }
 
@@ -30,6 +32,7 @@ fn render_identity_contains_all_sections() {
     assert!(doc.contains("## Your Architecture"));
     assert!(doc.contains("## Topology"));
     assert!(doc.contains("## Your Tools"));
+    assert!(doc.contains("## Browser"));
     assert!(doc.contains("## Your Memory"));
     assert!(doc.contains("## Budget"));
     assert!(doc.contains("## Privacy Boundary"));
@@ -124,6 +127,7 @@ fn render_identity_shows_topology_for_docker() {
     assert!(doc.contains("egress-proxy"));
     assert!(doc.contains("sandbox"));
     assert!(doc.contains("service containers"));
+    assert!(doc.contains("browser"));
 }
 
 #[test]
@@ -189,4 +193,32 @@ fn render_identity_contains_self_modification_sections() {
     assert!(doc.contains("config.toml"));
     assert!(doc.contains("IDENTITY.md"));
     assert!(doc.contains("evolve:"));
+}
+
+#[test]
+fn render_identity_shows_browser_none() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("## Browser"));
+    assert!(doc.contains("No browser available."));
+}
+
+#[test]
+fn render_identity_shows_browser_attached() {
+    let mut snap = sample_snapshot();
+    snap.browser_mode = BrowserMode::Attached { port: 9222 };
+    let doc = render_identity(&snap);
+    assert!(doc.contains("## Browser"));
+    assert!(doc.contains("Connected to your Chrome on port 9222"));
+    assert!(doc.contains("won't submit"));
+    assert!(doc.contains("won't type passwords"));
+}
+
+#[test]
+fn render_identity_shows_browser_standalone() {
+    let mut snap = sample_snapshot();
+    snap.browser_mode = BrowserMode::Standalone { port: 9223 };
+    let doc = render_identity(&snap);
+    assert!(doc.contains("## Browser"));
+    assert!(doc.contains("standalone browser"));
+    assert!(doc.contains("--remote-debugging-port=9222"));
 }

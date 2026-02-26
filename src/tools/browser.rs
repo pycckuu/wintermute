@@ -12,9 +12,55 @@ use tracing::debug;
 use url::Url;
 
 use crate::agent::policy::{ssrf_check, RateLimiter};
+use crate::executor::playwright::BRIDGE_PORT;
 use crate::providers::ToolDefinition;
 
 use super::ToolError;
+
+// ---------------------------------------------------------------------------
+// Browser mode detection
+// ---------------------------------------------------------------------------
+
+/// Browser operation mode detected at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMode {
+    /// Connected to user's Chrome via CDP on the given port.
+    Attached {
+        /// CDP port number.
+        port: u16,
+    },
+    /// Using Docker sidecar (headless Chromium + Playwright) on the given port.
+    Standalone {
+        /// Sidecar bridge port number.
+        port: u16,
+    },
+    /// No browser available. Tool not exposed to LLM.
+    None,
+}
+
+/// Port used by the Playwright sidecar bridge.
+///
+/// Re-exported from [`crate::executor::playwright::BRIDGE_PORT`] for
+/// convenience in code that only depends on `tools::browser`.
+pub const SIDECAR_PORT: u16 = BRIDGE_PORT;
+
+/// Detect the available browser mode.
+///
+/// Tries CDP connection first (not yet implemented), then falls back to
+/// Docker sidecar if `standalone_fallback` is enabled, otherwise returns
+/// [`BrowserMode::None`].
+pub async fn detect_browser(config: &crate::config::BrowserConfig) -> BrowserMode {
+    // TODO: Phase 2 — try CDP connection to config.cdp_port
+    // if let Ok(_tabs) = cdp_list_tabs(config.cdp_port).await {
+    //     return BrowserMode::Attached { port: config.cdp_port };
+    // }
+
+    if config.standalone_fallback {
+        return BrowserMode::Standalone { port: BRIDGE_PORT };
+    }
+
+    BrowserMode::None
+}
 
 /// Allowed browser actions per the tool schema.
 const ALLOWED_ACTIONS: &[&str] = &[
@@ -26,7 +72,10 @@ const ALLOWED_ACTIONS: &[&str] = &[
     "wait",
     "scroll",
     "evaluate",
-    "close",
+    "list_tabs",
+    "switch_tab",
+    "new_tab",
+    "close_tab",
 ];
 
 /// Maximum length for string parameters (URL, selector, text, etc.).
@@ -113,6 +162,7 @@ pub fn validate_browser_input(input: &serde_json::Value) -> Result<serde_json::V
         "javascript",
         "wait_for",
         "direction",
+        "tab_id",
     ] {
         if let Some(sanitised_val) = sanitise_string_param(input, key, MAX_STRING_PARAM_LEN)? {
             sanitised.insert(key.to_owned(), sanitised_val);
@@ -168,15 +218,21 @@ pub async fn run_browser(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if action == "navigate" {
-        let url_str = sanitised
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("navigate action requires url".to_owned()))?;
-        let parsed = Url::parse(url_str).map_err(|e| {
-            ToolError::InvalidInput(format!("invalid url for navigate action: {e}"))
-        })?;
-        ssrf_check(&parsed).await?;
+    // SSRF / domain policy check for any action that carries a URL.
+    // Currently: navigate and new_tab both accept a url parameter.
+    if action == "navigate" || action == "new_tab" {
+        if let Some(url_str) = sanitised.get("url").and_then(|v| v.as_str()) {
+            let parsed = Url::parse(url_str).map_err(|e| {
+                ToolError::InvalidInput(format!("invalid url for {action} action: {e}"))
+            })?;
+            ssrf_check(&parsed).await?;
+        }
+        // navigate requires url; new_tab may open a blank tab without one.
+        if action == "navigate" && sanitised.get("url").and_then(|v| v.as_str()).is_none() {
+            return Err(ToolError::InvalidInput(
+                "navigate action requires url".to_owned(),
+            ));
+        }
     }
 
     debug!(action, "executing browser action via bridge");
@@ -195,13 +251,13 @@ pub async fn run_browser(
 pub fn browser_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "browser".to_owned(),
-        description: "Control a browser. Navigate pages, interact with elements, take screenshots, extract content. Only available when a browser runtime bridge is configured.".to_owned(),
+        description: "Control the browser. Can use your existing Chrome session (same cookies/logins) or a standalone instance. Navigate, click, type, screenshot, extract.".to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["navigate", "click", "type", "screenshot", "extract", "wait", "scroll", "evaluate", "close"],
+                    "enum": ["navigate", "click", "type", "screenshot", "extract", "wait", "scroll", "evaluate", "list_tabs", "switch_tab", "new_tab", "close_tab"],
                     "description": "Browser action to perform"
                 },
                 "url": { "type": "string", "description": "URL for navigate action" },
@@ -209,6 +265,7 @@ pub fn browser_tool_definition() -> ToolDefinition {
                 "text": { "type": "string", "description": "Text for type action" },
                 "javascript": { "type": "string", "description": "JS code for evaluate action" },
                 "wait_for": { "type": "string", "description": "Selector or 'networkidle' for wait action" },
+                "tab_id": { "type": "string", "description": "Target tab (from list_tabs). Default: active tab." },
                 "timeout_ms": { "type": "integer", "default": 30000, "description": "Timeout in milliseconds" }
             },
             "required": ["action"]

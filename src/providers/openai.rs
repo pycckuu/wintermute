@@ -1,4 +1,7 @@
 //! OpenAI provider implementation using the `/v1/chat/completions` API.
+//!
+//! Works with any OpenAI-compatible API (DeepSeek, Groq, Together, etc.)
+//! by overriding the base URL via [`OpenAiProvider::with_base_url`].
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,7 +13,7 @@ use super::{
     MessageContent, ProviderError, Role, StopReason, UsageStats,
 };
 
-const OPENAI_API_BASE: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 // ---------------------------------------------------------------------------
@@ -122,22 +125,46 @@ pub struct OpenAiUsage {
 // ---------------------------------------------------------------------------
 
 /// OpenAI chat completions API provider.
+///
+/// Supports any OpenAI-compatible API by overriding the base URL
+/// via [`Self::with_base_url`].
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
     model_spec: String,
     model_name: String,
     auth: OpenAiAuth,
     client: reqwest::Client,
+    // Base URL for API requests. Defaults to OpenAI's API.
+    // Override for OpenAI-compatible APIs (DeepSeek, Groq, Together, etc.).
+    base_url: String,
 }
 
 impl OpenAiProvider {
-    /// Create a new OpenAI provider instance.
+    /// Create a new OpenAI provider with the default OpenAI API endpoint.
     pub fn new(model_spec: String, model_name: String, auth: OpenAiAuth) -> Self {
+        Self::with_base_url(
+            model_spec,
+            model_name,
+            auth,
+            DEFAULT_OPENAI_BASE_URL.to_owned(),
+        )
+    }
+
+    /// Create a new OpenAI provider with a custom base URL.
+    ///
+    /// Use this for OpenAI-compatible APIs (DeepSeek, Groq, Together, etc.).
+    pub fn with_base_url(
+        model_spec: String,
+        model_name: String,
+        auth: OpenAiAuth,
+        base_url: String,
+    ) -> Self {
         Self {
             model_spec,
             model_name,
             auth,
             client: reqwest::Client::new(),
+            base_url,
         }
     }
 }
@@ -344,7 +371,7 @@ impl LlmProvider for OpenAiProvider {
 
         let response = self
             .client
-            .post(OPENAI_API_BASE)
+            .post(&self.base_url)
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {}", self.auth.token()))
             .json(&api_request)

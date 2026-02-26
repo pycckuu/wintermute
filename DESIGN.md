@@ -179,6 +179,12 @@ request_rate_limit = 10
 always_approve_domains = []
 # Block outbound requests to these domains entirely
 blocked_domains = []
+
+[browser]
+cdp_port = 9222                    # Chrome DevTools Protocol port
+auto_submit = false                # never auto-submit forms (safety default)
+standalone_fallback = true         # start Docker sidecar if no CDP available
+image = "ghcr.io/pycckuu/wintermute-browser:latest"  # sidecar image
 ```
 
 ### agent.toml — agent-owned, the agent can and should modify this
@@ -262,18 +268,20 @@ Example:
   deploy_check skill     → skills.deploy_check (claude-haiku)
 ```
 
-Three provider implementations in v1:
+Two provider implementations in v1:
 
 **AnthropicProvider** — native tool calling via /v1/messages. Streaming.
 Tool definitions as JSON schema in the request.
-
-**OpenAiProvider** — native tool calling via /v1/chat/completions.
-Standard function calling with `tools` param.
 
 **OllamaProvider** — native tool calling via /api/chat with `tools` param.
 Structured output via `format` param (GBNF grammar enforcement).
 No ReAct parsing. Ollama supports native tool calling for Qwen3, Llama 3.x,
 Mistral, and others.
+
+**OpenAiProvider** — native tool calling via /v1/chat/completions.
+Standard function calling with `tools` param. Compatible with OpenAI,
+DeepSeek, Groq, Together, and any OpenAI-compatible API. Base URL
+configurable per provider instance.
 
 ```rust
 pub trait LlmProvider: Send + Sync {
@@ -310,8 +318,9 @@ create_tool       Create or update a dynamic tool (/scripts/{name}.py + .json).
 web_fetch         HTTP GET. SSRF filtered. 30/min. Returns text by default.
                   With save_to: downloads file (binary ok) to /workspace.
 web_request       HTTP POST/PUT/PATCH/DELETE. Domain allowlisted. 10/min.
-browser           Control a browser. Navigate, click, type, screenshot, extract.
-                  Only available on non-headless machines. Host-side (has network).
+browser           Control the browser. Attaches to user's Chrome via CDP
+                  (same cookies/logins) or Docker sidecar fallback (headless).
+                  Fills forms, reads pages, takes screenshots, manages tabs.
 docker_manage     Manage Docker containers/services on the host. Run, stop,
                   pull, logs, exec. For spinning up services the agent needs.
 memory_search     Search memories. FTS5 + optional vector.
@@ -452,15 +461,25 @@ async fn execute_tool(&self, name: &str, input: &Value) -> Result<ToolResult> {
 
 ## Browser
 
-Available on non-headless machines. Auto-detected at startup (checks for
-display server / Playwright installation). Headless servers skip it — the
-tool simply doesn't appear in the tool list.
+The agent uses YOUR browser, not a throwaway one. It fills forms, you
+review and submit. It reads a dashboard, you see the same tab. Same
+cookies, same logins, same session.
+
+### Why the user's own browser?
+
+An ephemeral Playwright browser is useless for real work:
+- No logins. The agent can't access your Jira, your bank, your email.
+- No continuity. You can't pick up where the agent left off.
+- No context. The agent can't see what you're looking at right now.
+
+The right model: the agent is a pair of hands on YOUR keyboard. It
+operates your browser. You watch, you intervene, you continue.
 
 ### Why it's a core tool, not a dynamic tool
 
 Browser automation runs on the HOST, not in the sandbox. It needs network
-access and a display. This puts it in the same category as web_fetch and
-web_request — a host-side capability with privacy implications.
+access and a display (or CDP port). This puts it in the same category as
+web_fetch and web_request — a host-side capability with privacy implications.
 
 Unlike web_fetch (GET only, no interaction) and web_request (single HTTP
 call), the browser enables multi-step interaction: navigate, wait, click,
@@ -468,7 +487,53 @@ type, extract, screenshot. This is essential for tasks like checking
 dashboards, filling forms, scraping JS-rendered content, or monitoring
 pages that don't have APIs.
 
-### Implementation: Playwright via Docker sidecar
+### Modes of Operation
+
+**Attached mode (default, preferred):**
+Connect to the user's existing Chrome on CDP port 9222. Agent sees the
+user's tabs, cookies, logins. Agent can open new tabs, interact with
+existing ones. The user sees everything happening in real time.
+
+**Standalone mode (fallback via Docker sidecar):**
+If no Chrome debug port is available, Wintermute starts a
+`wintermute-browser` Docker sidecar running headless Chromium + Playwright.
+Ephemeral, no logins. Good for scraping, testing, research tasks that
+don't need the user's session.
+
+**No browser:**
+Neither CDP nor sidecar available. Tool doesn't appear in tool list.
+Agent doesn't know it exists.
+
+### Implementation
+
+Both modes communicate via HTTP — no `std::process::Command` in `src/`.
+
+**Attached mode: CDP over HTTP/WebSocket**
+
+The user runs Chrome with remote debugging enabled:
+```bash
+# One-time setup (or add to Chrome shortcut flags)
+google-chrome --remote-debugging-port=9222
+# macOS:
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+```
+
+Wintermute connects via CDP from Rust:
+```rust
+// GET http://localhost:9222/json → list of tabs
+// Connect to tab's webSocketDebuggerUrl
+// Send CDP commands (navigate, click, type, screenshot, evaluate)
+// All via WebSocket — no subprocess needed
+```
+
+For richer interactions (complex selectors, waits), the sidecar container
+can connect to the user's Chrome via CDP too:
+```python
+# In the sidecar's Flask bridge
+browser = pw.chromium.connect_over_cdp("http://host.docker.internal:9222")
+```
+
+**Standalone mode: Playwright via Docker sidecar**
 
 Playwright (Python) runs inside a Docker container (`wintermute-browser`)
 on the default bridge network. The Rust core sends browser actions as
@@ -477,13 +542,13 @@ HTTP POST requests to a Flask bridge server inside the container.
 ```
 Wintermute (Rust, HOST)
     │
-    │  HTTP POST to 127.0.0.1:9222/execute
+    │  HTTP POST to 127.0.0.1:9223/execute
     ▼
 wintermute-browser container (Flask + Playwright)
     │
     │  Playwright sync API
     ▼
-Chromium (headless)
+Chromium (headless, inside container)
 ```
 
 The bridge server is embedded in the Dockerfile (not agent-modifiable).
@@ -491,25 +556,71 @@ The container uses the official `mcr.microsoft.com/playwright/python`
 image with browsers pre-installed. The sidecar is NOT on `wintermute-net`
 — it is isolated from the sandbox to prevent the sandbox from bypassing
 Rust-layer policy enforcement. The host accesses it via a published port
-bound to `127.0.0.1:9222`.
+bound to `127.0.0.1:9223`.
 
-This approach was chosen over a subprocess because security invariant #1
-forbids `std::process::Command` in `src/`. The Docker sidecar uses bollard
-(pure Rust Docker API) and follows the same pattern as the egress proxy.
+This approach uses bollard (pure Rust Docker API) — same pattern as the
+egress proxy. No `std::process::Command` needed.
+
+### Detection
+
+```rust
+async fn detect_browser(config: &BrowserConfig) -> BrowserMode {
+    // 1. Try CDP connection to user's Chrome
+    if let Ok(tabs) = cdp_list_tabs(config.cdp_port).await {
+        return BrowserMode::Attached { port: config.cdp_port };
+    }
+    // 2. Try starting Docker sidecar (if enabled + Docker available)
+    if config.standalone_fallback && docker_available().await {
+        if let Ok(_) = start_browser_sidecar().await {
+            return BrowserMode::Standalone { port: 9223 };
+        }
+    }
+    // 3. No browser
+    BrowserMode::None
+}
+```
+
+### Interaction Patterns
+
+**Agent fills, user submits (attached mode):**
+```
+User: "Fill in the shipping form on that tab with my address"
+Agent: [finds the tab, fills form fields]
+Agent: "Done. I've filled in the shipping form. Review and submit
+       when ready — I left the submit button for you."
+```
+
+**Agent reads, user watches (attached mode):**
+```
+User: "What does my Grafana dashboard show right now?"
+Agent: [navigates to Grafana tab, takes screenshot, reads metrics]
+Agent: "Your API latency is at 230ms (up from 180ms yesterday).
+       Error rate is 0.3%. I'm looking at the production dashboard."
+```
+
+**Agent opens new tab (either mode):**
+```
+User: "Find me flights to Mauritius in October"
+Agent: [opens new tab, navigates to flight search, fills dates]
+Agent: "I've opened Google Flights with your search. Cheapest
+       option is $620 via Singapore Airlines. Tab is ready for you."
+```
 
 ### Tool Definition
 
 ```json
 {
   "name": "browser",
-  "description": "Control a browser. Navigate pages, interact with elements, take screenshots, extract content. Only available on machines with a display.",
+  "description": "Control the browser. Can use your existing Chrome session (same cookies/logins) or a standalone instance. Navigate, click, type, screenshot, extract.",
   "parameters": {
     "action": {
       "type": "string",
       "enum": ["navigate", "click", "type", "screenshot", "extract",
-               "wait", "scroll", "evaluate", "close"],
+               "wait", "scroll", "evaluate", "list_tabs", "switch_tab",
+               "new_tab", "close_tab"],
       "description": "Browser action to perform"
     },
+    "tab_id": { "type": "string", "description": "Target tab (from list_tabs). Default: active tab." },
     "url": { "type": "string", "description": "URL for navigate action" },
     "selector": { "type": "string", "description": "CSS/XPath selector for click/type/extract" },
     "text": { "type": "string", "description": "Text for type action" },
@@ -521,51 +632,56 @@ forbids `std::process::Command` in `src/`. The Docker sidecar uses bollard
 }
 ```
 
-### Actions
+Tab management actions (`list_tabs`, `switch_tab`, `new_tab`, `close_tab`)
+are available in both modes but most useful in attached mode where the
+agent works with a real browser that has multiple tabs.
 
-| Action | Description | Returns |
-|--------|-------------|---------|
-| navigate | Go to URL | Page title, final URL |
-| click | Click element by selector | Success/failure |
-| type | Type text into element | Success/failure |
-| screenshot | Capture viewport or element | File path in /workspace |
-| extract | Get text/attribute from selector | Extracted content |
-| wait | Wait for selector or network idle | Success/timeout |
-| scroll | Scroll page or element | New scroll position |
-| evaluate | Run JavaScript in page context | JS return value |
-| close | Close browser session | Confirmation |
+### Privacy & Safety
 
-### Privacy Implications
+In attached mode the browser has access to the user's full session —
+logins, cookies, saved passwords. This is powerful but sensitive.
 
-The browser has FULL network access. It's the most powerful egress
-channel in the system. Privacy controls:
+In standalone mode the browser is ephemeral — no persistent cookies,
+no saved passwords, no history between sessions.
 
-1. **Domain policy applies.** browser navigate to unknown domains follows
-   the same approval rules as web_request. Pre-approved domains pass,
-   unknown domains require user approval.
+**Controls:**
+1. **Domain policy still applies.** Browser navigate to unknown domains
+   triggers approval (especially in attached mode where the user's
+   session is at stake).
+2. **No form submission without approval.** The agent can FILL forms but
+   should not SUBMIT them unless explicitly asked. The SID instructs:
+   "When interacting with the user's browser: fill, don't submit. Let
+   the user review and press the button."
+3. **No password entry.** The agent never types passwords. If a login is
+   needed, it tells the user: "This page needs your login. Please sign
+   in and tell me when you're ready."
+4. **Screenshots are local.** Saved to /workspace, not transmitted.
+5. **Tab management.** The agent can open and close tabs it created. It
+   should not close tabs it didn't open.
 
-2. **No silent data extraction.** The agent can see page content (via
-   extract/evaluate), but can only send it externally via web_request
-   (which is domain-allowlisted). The browser itself doesn't POST form
-   data without the agent explicitly choosing to — and that goes through
-   policy gate.
+### SID Browser Section
 
-3. **Screenshots saved locally.** Screenshots go to /workspace, not
-   transmitted anywhere unless the agent explicitly sends them.
+```markdown
+## Browser
+{if attached: "Connected to your Chrome on port 9222. I can see your
+tabs and use your logins. When I fill forms, I won't submit — I'll
+let you review first. I won't type passwords. If I need you to log in
+somewhere, I'll ask."}
+{if standalone: "Using a standalone browser (no access to your logins).
+Good for research and scraping. For tasks needing your accounts, run
+Chrome with --remote-debugging-port=9222 and I'll connect."}
+{if none: "No browser available."}
+```
 
-4. **Session isolation.** Browser context is ephemeral — no persistent
-   cookies, no saved passwords, no history between sessions. Fresh
-   context per task unless the agent explicitly manages state.
+### Config
 
-### Auto-detection
-
-At startup, if `config.browser.enabled` is true and Docker is available,
-Wintermute starts the `wintermute-browser` sidecar container. If the
-container fails to start or the health check fails, the browser tool is
-silently omitted from the tool list. The agent never knows it exists.
-
-No display server or host-side Playwright installation is needed — the
-browser runs headless inside the Docker container.
+```toml
+[browser]
+cdp_port = 9222                    # Chrome DevTools Protocol port to connect to
+auto_submit = false                # never auto-submit forms (safety default)
+standalone_fallback = true         # start Docker sidecar if no CDP available
+image = "ghcr.io/pycckuu/wintermute-browser:latest"  # sidecar image
+```
 
 ### Rate Limiting
 
@@ -575,15 +691,20 @@ Screenshot: max 10/min (disk space protection).
 
 ### Setup
 
-Not required. The Playwright Docker image is pulled (or built locally
-from the embedded Dockerfile) automatically on first startup when
-`config.browser.enabled = true`. Configure the image in `config.toml`:
+The agent can guide the user through setup. In the SID:
 
-```toml
-[browser]
-enabled = true
-image = "ghcr.io/pycckuu/wintermute-browser:latest"
+```markdown
+## Browser Setup (if not connected)
+If the user wants browser automation:
+1. Tell them to restart Chrome with: google-chrome --remote-debugging-port=9222
+2. Or add the flag to their Chrome shortcut permanently
+3. On macOS: /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+4. Once running, you'll auto-detect it and connect
+If no Chrome available, standalone mode via Docker sidecar works for
+scraping and research (no logins).
 ```
+
+Auto-detected at startup. Two implementations.
 
 ```rust
 #[async_trait]
@@ -1185,21 +1306,20 @@ You are Wintermute, a self-coding AI agent running on {hostname}.
 - Core: Rust binary running on the HOST with full network access
 - Executor: {docker|direct} mode
   {if docker: "Your code runs in a sandboxed Docker container.
-   THE SANDBOX HAS NO NETWORK. Your scripts cannot curl, wget, pip install
-   from the internet, or connect to any service directly.
-   To reach the internet: use web_fetch or web_request (these run on the HOST).
-   To reach host services (Ollama, APIs on localhost): you CANNOT from inside
-   the sandbox. Host services must be exposed via mounted sockets or the
-   Rust core must proxy requests (e.g., LLM calls go through the model router)."}
-  {if direct: "Your code runs directly on the host. Be careful with destructive commands.
-   You have network access but egress is controlled by policy."}
+   The sandbox HAS network via an egress proxy. Your scripts can pip install,
+   requests.get(), curl — anything HTTP(S). BUT only allowed domains work.
+   Unknown domains are blocked by the proxy (HTTP 403).
+   Service containers (Ollama, Postgres, etc.) are on a shared Docker
+   network — your scripts can reach them directly (e.g., localhost:11434)."}
+  {if direct: "Your code runs directly on the host. Full network access.
+   Be careful with destructive commands."}
 
 ## Topology (important — read this)
 ```
 HOST (has network, has Docker)
   ├── wintermute binary (Rust) ← your core, runs HERE
   │   ├── web_fetch / web_request ← reach the internet
-  │   ├── browser ← controls a browser on the host
+  │   ├── browser ← controls user's Chrome via CDP (or Docker sidecar fallback)
   │   ├── docker_manage ← creates/manages Docker containers
   │   ├── model router ← talks to Ollama/Anthropic
   │   └── memory engine ← reads/writes memory.db
@@ -1259,7 +1379,7 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 - create_tool: Create reusable tools in /scripts/ (Python + JSON schema)
 - web_fetch: HTTP GET (no body, 30/min)
 - web_request: HTTP POST/PUT/etc (domain allowlisted, approval for new domains)
-- browser: {available|not available (no display detected)}
+- browser: {attached to Chrome on port 9222 (your logins/cookies)|standalone (ephemeral, no logins)|not available}
 - memory_search: Search your memories ({keyword|keyword + vector} search)
 - memory_save: Save facts, procedures, episodes, skills
 - send_telegram: Send messages + files to the user
@@ -1291,8 +1411,8 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 ## What You Can Modify About Yourself
 You can evolve. This is by design.
 
-**Your name and personality (agent.toml → [personality]):**
-You can rename yourself. You can rewrite your own soul. If the user asks you to be more concise,
+**Your personality (agent.toml → [personality].soul):**
+You can rewrite your own soul. If the user asks you to be more concise,
 more opinionated, funnier, more formal — update your soul. If you notice
 your communication style doesn't match what the user wants, propose a
 change. The soul is loaded fresh every conversation, so changes take
@@ -1673,7 +1793,7 @@ wintermute/
 │   ├── providers/
 │   │   ├── mod.rs                 # LlmProvider trait
 │   │   ├── anthropic.rs           # Anthropic API + native tool calling
-│   │   ├── openai.rs              # OpenAI Chat Completions API + native tool calling
+│   │   ├── openai.rs              # OpenAI-compatible API + native tool calling
 │   │   ├── ollama.rs              # Ollama API + native tool calling
 │   │   └── router.rs              # ModelRouter (default → role → skill)
 │   │
@@ -1690,8 +1810,8 @@ wintermute/
 │   │   ├── core.rs                # 9 core tool implementations
 │   │   ├── registry.rs            # Dynamic tool registry + hot-reload
 │   │   ├── create_tool.rs         # create_tool implementation + git commit
-│   │   ├── browser.rs             # Browser bridge trait + validation
-│   │   ├── browser_bridge.rs      # PlaywrightBridge (HTTP client)
+│   │   ├── browser.rs             # Browser tool: CDP attach + sidecar fallback
+│   │   ├── browser_bridge.rs      # PlaywrightBridge (HTTP client to sidecar)
 │   │   └── docker.rs              # docker_manage (bollard, label policy)
 │   │
 │   ├── agent/
@@ -1807,6 +1927,7 @@ Files: Cargo.toml, main.rs, config.rs, credentials.rs
 Files: providers/*
 - LlmProvider trait
 - AnthropicProvider (native tool calling, streaming)
+- OpenAiProvider (OpenAI-compatible: OpenAI, DeepSeek, Groq, Together, etc.)
 - OllamaProvider (native tool calling via /api/chat)
 - ModelRouter (default → role → skill resolution)
 - Provider instantiation from config strings ("anthropic/claude-sonnet")
@@ -1859,8 +1980,9 @@ Files: agent/*, tools/*
 - create_tool implementation (write files + git commit)
 - Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
 - Dynamic tool selection (top N by relevance/recency)
-- Browser bridge: Playwright Docker sidecar, auto-detection, domain policy
-  (skip if Docker unavailable — tool not registered)
+- Browser: CDP attach to user's Chrome (preferred) or Docker sidecar
+  fallback (Playwright + Flask in container). Tab management, form filling,
+  screenshot capture. Auto-detect mode at startup. Skip if neither available.
 
 ### Phase 3: Intelligence (weeks 7-8)
 

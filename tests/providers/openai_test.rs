@@ -1,9 +1,10 @@
 //! OpenAI provider wire format tests.
 
 use serde_json::json;
-use wintermute::providers::openai::{build_request, parse_response};
+use wintermute::credentials::OpenAiAuth;
+use wintermute::providers::openai::{build_request, parse_response, OpenAiProvider};
 use wintermute::providers::{
-    CompletionRequest, ContentPart, Message, MessageContent, Role, StopReason,
+    CompletionRequest, ContentPart, LlmProvider, Message, MessageContent, Role, StopReason,
 };
 
 fn simple_request() -> CompletionRequest {
@@ -211,4 +212,31 @@ fn parse_response_content_filter_maps_to_other() {
 #[test]
 fn parse_response_rejects_non_json() {
     assert!(parse_response("not json at all").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Base URL tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn openai_provider_uses_default_base_url() {
+    let provider = OpenAiProvider::new(
+        "openai/gpt-5".to_owned(),
+        "gpt-5".to_owned(),
+        OpenAiAuth::ApiKey("test-key".to_owned()),
+    );
+    assert_eq!(provider.model_id(), "openai/gpt-5");
+    assert!(provider.supports_tool_calling());
+}
+
+#[test]
+fn openai_provider_accepts_custom_base_url() {
+    let provider = OpenAiProvider::with_base_url(
+        "deepseek/deepseek-chat".to_owned(),
+        "deepseek-chat".to_owned(),
+        OpenAiAuth::ApiKey("test-key".to_owned()),
+        "https://api.deepseek.com/v1/chat/completions".to_owned(),
+    );
+    assert_eq!(provider.model_id(), "deepseek/deepseek-chat");
+    assert!(provider.supports_tool_calling());
 }

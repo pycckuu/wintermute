@@ -300,7 +300,7 @@ async fn browser_output_is_redacted_when_bridge_is_configured() {
         None,
     );
 
-    let input = json!({"action": "close"});
+    let input = json!({"action": "screenshot"});
     let result = router.execute("browser", &input).await;
     assert!(!result.is_error, "bridge execution should succeed");
     assert!(!result.content.contains("SECRET_BROWSER_TOKEN"));

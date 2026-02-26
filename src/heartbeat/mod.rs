@@ -22,6 +22,7 @@ use crate::config::{AgentConfig, Config, RuntimePaths};
 use crate::executor::Executor;
 use crate::memory::{MemoryEngine, MemoryStatus};
 use crate::providers::router::ModelRouter;
+use crate::tools::browser::BrowserMode;
 use crate::tools::ToolRouter;
 
 /// Shared dependencies for the heartbeat runner.
@@ -48,6 +49,8 @@ pub struct HeartbeatDeps {
     pub paths: RuntimePaths,
     /// Session router for active session count.
     pub session_router: Arc<SessionRouter>,
+    /// Detected browser mode for SID generation.
+    pub browser_mode: BrowserMode,
 }
 
 /// Run the heartbeat background loop.
@@ -164,6 +167,7 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
         daily_budget_limit: deps.config.budget.max_tokens_per_day,
         uptime: start_time.elapsed(),
         agent_name: deps.agent_config.personality.name.clone(),
+        browser_mode: deps.browser_mode,
     };
 
     let content = identity::render_identity(&snap);

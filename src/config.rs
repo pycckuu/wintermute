@@ -247,9 +247,17 @@ impl Default for EgressConfig {
 /// Browser automation sidecar configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BrowserConfig {
-    /// Enable browser sidecar auto-start.
-    #[serde(default = "default_browser_enabled")]
-    pub enabled: bool,
+    /// Chrome DevTools Protocol port for attached mode.
+    #[serde(default = "default_cdp_port")]
+    pub cdp_port: u16,
+
+    /// Never auto-submit forms (safety default).
+    #[serde(default)]
+    pub auto_submit: bool,
+
+    /// Start Docker sidecar if no CDP endpoint is available.
+    #[serde(default = "default_standalone_fallback")]
+    pub standalone_fallback: bool,
 
     /// Docker image for the Playwright sidecar.
     #[serde(default = "default_browser_image")]
@@ -259,7 +267,9 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            enabled: default_browser_enabled(),
+            cdp_port: default_cdp_port(),
+            auto_submit: false,
+            standalone_fallback: default_standalone_fallback(),
             image: default_browser_image(),
         }
     }
@@ -439,7 +449,10 @@ fn default_auto_promote_threshold() -> u32 {
 fn default_true() -> bool {
     true
 }
-fn default_browser_enabled() -> bool {
+fn default_cdp_port() -> u16 {
+    9222
+}
+fn default_standalone_fallback() -> bool {
     true
 }
 fn default_browser_image() -> String {

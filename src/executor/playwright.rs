@@ -24,8 +24,8 @@ pub const BROWSER_IMAGE: &str = "ghcr.io/pycckuu/wintermute-browser:latest";
 /// Container name for the browser sidecar.
 const CONTAINER_NAME: &str = "wintermute-browser";
 
-/// Port the bridge server listens on inside the container.
-const BRIDGE_PORT: u16 = 9222;
+/// Port the bridge server listens on inside the container, published to the host.
+pub const BRIDGE_PORT: u16 = 9223;
 
 /// Memory limit for the browser container (2 GB).
 const MEMORY_LIMIT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
@@ -162,10 +162,6 @@ def execute():
                 raw = raw[:MAX_EXTRACT_BYTES] + "\n... (truncated)"
             result = raw
 
-        elif action == "close":
-            close_browser()
-            result = "browser closed"
-
         else:
             return jsonify({"success": False, "error": f"unknown action: {action}"})
 
@@ -174,7 +170,9 @@ def execute():
         return jsonify({"success": False, "error": f"{type(e).__name__}: {e}"})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=9222, threaded=False)
+    import os
+    port = int(os.environ.get("BRIDGE_PORT", "9223"))
+    app.run(host="0.0.0.0", port=port, threaded=False)
 "#;
 
 /// Generate the Dockerfile for the browser sidecar.
@@ -188,7 +186,7 @@ fn browser_dockerfile() -> String {
 RUN pip install --no-cache-dir flask==3.1.* playwright==1.49.*
 RUN echo "{script_b64}" | base64 -d > /opt/browser_bridge.py
 USER pwuser
-EXPOSE 9222
+EXPOSE 9223
 CMD ["python3", "/opt/browser_bridge.py"]
 "#
     )
@@ -246,7 +244,7 @@ impl PlaywrightSidecar {
         Ok(())
     }
 
-    /// Base URL for the HTTP bridge API (e.g. `http://127.0.0.1:9222`).
+    /// Base URL for the HTTP bridge API (e.g. `http://127.0.0.1:9223`).
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -268,8 +266,30 @@ async fn ensure_browser_container(
 
     let needs_start = match inspect {
         Ok(state) => {
-            let running = state.state.and_then(|s| s.running).unwrap_or(false);
-            !running
+            // Check if the existing container has the correct port mapping.
+            // If the published port changed (e.g. 9222→9223), we must recreate.
+            let port_matches = state
+                .host_config
+                .as_ref()
+                .and_then(|hc| hc.port_bindings.as_ref())
+                .and_then(|pb| pb.get(&format!("{BRIDGE_PORT}/tcp")))
+                .is_some();
+
+            if !port_matches {
+                info!("browser sidecar port mismatch — recreating container");
+                let remove_opts = RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                };
+                let _ = docker
+                    .remove_container(CONTAINER_NAME, Some(remove_opts))
+                    .await;
+                create_browser_container(docker, image, workspace_dir).await?;
+                true
+            } else {
+                let running = state.state.and_then(|s| s.running).unwrap_or(false);
+                !running
+            }
         }
         Err(bollard::errors::Error::DockerResponseServerError {
             status_code: 404, ..
@@ -342,8 +362,8 @@ async fn create_browser_container(
         labels: Some(labels),
         host_config: Some(host_config),
         exposed_ports: Some(exposed_ports),
-        // Explicitly empty: no secrets or config leaked into browser sidecar.
-        env: Some(Vec::new()),
+        // Only BRIDGE_PORT is passed; no secrets or config leaked into browser sidecar.
+        env: Some(vec![format!("BRIDGE_PORT={BRIDGE_PORT}")]),
         ..Default::default()
     };
 
