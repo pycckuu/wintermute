@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO="pycckuu/wintermute"
 INSTALL_DIR="${WINTERMUTE_INSTALL_DIR:-$HOME/.wintermute/bin}"
+TMPDIR_CLEANUP=""
 
 info()  { printf '\033[1;34m%s\033[0m\n' "$*"; }
 warn()  { printf '\033[1;33m%s\033[0m\n' "$*"; }
@@ -76,9 +77,9 @@ main() {
     url="https://github.com/${REPO}/releases/download/v${version}/${archive}"
     checksum_url="https://github.com/${REPO}/releases/download/v${version}/checksums-sha256.txt"
 
-    local tmpdir
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    TMPDIR_CLEANUP="$(mktemp -d)"
+    trap 'rm -rf "$TMPDIR_CLEANUP"' EXIT
+    local tmpdir="$TMPDIR_CLEANUP"
 
     info "Downloading ${archive}..."
     curl -fsSL -o "${tmpdir}/${archive}" "$url" \

@@ -83,6 +83,10 @@ jobs:
             cp -r systemd "${DIST_DIR}/"
           fi
 
+          if [ -d launchd ]; then
+            cp -r launchd "${DIST_DIR}/"
+          fi
+
           tar czf "wintermute-dist-${VERSION}-${TARGET}.tar.gz" "${DIST_DIR}"
 
           # Per-binary archives (for auto-updater)
