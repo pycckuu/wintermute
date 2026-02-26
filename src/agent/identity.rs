@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Context;
 
 use crate::executor::ExecutorKind;
+use crate::tools::browser::BrowserMode;
 
 /// Snapshot of runtime state used to render the identity document.
 #[derive(Debug, Clone)]
@@ -40,6 +41,8 @@ pub struct IdentitySnapshot {
     pub uptime: Duration,
     /// Agent display name from personality config.
     pub agent_name: String,
+    /// Current browser mode (attached to Chrome, standalone sidecar, or unavailable).
+    pub browser_mode: BrowserMode,
 }
 
 /// Render the identity document from a runtime snapshot.
@@ -83,8 +86,9 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
             "\
 ## Topology
 ```
-HOST → egress-proxy (Squid) → sandbox → service containers
+HOST → browser (CDP or sidecar) + egress-proxy (Squid) → sandbox → service containers
 ```
+- `browser` controls your Chrome via CDP (or Docker sidecar fallback).
 - The sandbox runs your code. Service containers (databases, etc.) are managed via `docker_manage`.
 - All outbound traffic from the sandbox goes through the egress proxy.
 
@@ -105,6 +109,30 @@ HOST → egress-proxy (Squid) → sandbox → service containers
         snap.dynamic_tool_count
     );
     doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_telegram, create_tool, docker_manage\n");
+    doc.push('\n');
+
+    // Browser
+    doc.push_str("## Browser\n");
+    match &snap.browser_mode {
+        BrowserMode::Attached { port } => {
+            let _ = writeln!(
+                doc,
+                "Connected to your Chrome on port {port}. I can see your tabs and use your \
+                 logins. When I fill forms, I won't submit — I'll let you review first. I \
+                 won't type passwords. If I need you to log in somewhere, I'll ask."
+            );
+        }
+        BrowserMode::Standalone { .. } => {
+            doc.push_str(
+                "Using a standalone browser (no access to your logins). Good for research \
+                 and scraping. For tasks needing your accounts, run Chrome with \
+                 --remote-debugging-port=9222 and I'll connect.\n",
+            );
+        }
+        BrowserMode::None => {
+            doc.push_str("No browser available.\n");
+        }
+    }
     doc.push('\n');
 
     // Memory

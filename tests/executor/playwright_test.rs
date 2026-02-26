@@ -15,14 +15,14 @@ fn browser_image_constant_matches_expected_registry() {
 }
 
 #[test]
-fn base_url_uses_localhost_port_9222() {
-    // The sidecar binds port 9222 to localhost for host access.
-    let expected = "http://127.0.0.1:9222";
+fn base_url_uses_localhost_port_9223() {
+    // The sidecar binds port 9223 to localhost for host access.
+    let expected = "http://127.0.0.1:9223";
     // Validate the expected format is a valid URL.
     let parsed = url::Url::parse(expected);
     assert!(parsed.is_ok(), "base_url format should be a valid URL");
     let parsed = parsed.expect("just checked");
     assert_eq!(parsed.host_str(), Some("127.0.0.1"));
-    assert_eq!(parsed.port(), Some(9222));
+    assert_eq!(parsed.port(), Some(9223));
     assert_eq!(parsed.scheme(), "http");
 }

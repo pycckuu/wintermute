@@ -34,7 +34,7 @@ impl PlaywrightBridge {
     /// Create a new bridge pointing at the sidecar's HTTP API.
     ///
     /// The `base_url` should be the root URL of the bridge server
-    /// (e.g. `http://127.0.0.1:9222`).
+    /// (e.g. `http://127.0.0.1:9223`).
     pub fn new(base_url: String) -> Self {
         // Build with a connect timeout; per-request timeout is set dynamically.
         // The builder can only fail on TLS backend init; fall back to default

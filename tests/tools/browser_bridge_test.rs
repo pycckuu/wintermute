@@ -5,7 +5,7 @@ use wintermute::tools::browser_bridge::PlaywrightBridge;
 
 #[test]
 fn playwright_bridge_new_sets_base_url() {
-    let bridge = PlaywrightBridge::new("http://127.0.0.1:9222".to_owned());
+    let bridge = PlaywrightBridge::new("http://127.0.0.1:9223".to_owned());
     // The bridge should be constructable without panicking.
     // We verify it implements BrowserBridge by calling execute below.
     let _ = &bridge;

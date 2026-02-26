@@ -36,7 +36,7 @@ use wintermute::logging;
 use wintermute::memory::{MemoryEngine, TrustSource};
 use wintermute::providers::router::ModelRouter;
 use wintermute::telegram;
-use wintermute::tools::browser::BrowserBridge;
+use wintermute::tools::browser::{detect_browser, BrowserBridge, BrowserMode};
 use wintermute::tools::browser_bridge::PlaywrightBridge;
 use wintermute::tools::registry::DynamicToolRegistry;
 use wintermute::tools::ToolRouter;
@@ -245,34 +245,44 @@ async fn handle_start() -> anyhow::Result<()> {
     let observer_redactor = redactor.clone();
     let docker_client = bollard::Docker::connect_with_local_defaults().ok();
 
-    // Browser bridge: start Playwright sidecar if enabled and Docker is available.
-    let browser_bridge: Option<Arc<dyn BrowserBridge>> = if config.browser.enabled {
-        if let Some(ref docker) = docker_client {
-            match wintermute::executor::playwright::PlaywrightSidecar::ensure(
-                docker,
-                &config.browser.image,
-                &paths.workspace_dir,
-            )
-            .await
-            {
-                Ok(sidecar) => {
-                    info!("browser bridge: Playwright sidecar ready");
-                    Some(Arc::new(PlaywrightBridge::new(
-                        sidecar.base_url().to_owned(),
-                    )))
-                }
-                Err(e) => {
-                    warn!("browser bridge unavailable: {e}");
-                    None
+    // Browser bridge: detect mode and start sidecar if needed.
+    let browser_mode = detect_browser(&config.browser).await;
+    let (browser_mode, browser_bridge): (BrowserMode, Option<Arc<dyn BrowserBridge>>) =
+        match browser_mode {
+            BrowserMode::Attached { port } => {
+                // TODO: Phase 2 — create CDP bridge client
+                warn!(port, "CDP attached mode detected but not yet implemented");
+                (BrowserMode::None, None)
+            }
+            BrowserMode::Standalone { port: _ } => {
+                if let Some(ref docker) = docker_client {
+                    match wintermute::executor::playwright::PlaywrightSidecar::ensure(
+                        docker,
+                        &config.browser.image,
+                        &paths.workspace_dir,
+                    )
+                    .await
+                    {
+                        Ok(sidecar) => {
+                            info!("browser bridge: Playwright sidecar ready");
+                            let bridge: Option<Arc<dyn BrowserBridge>> = Some(Arc::new(
+                                PlaywrightBridge::new(sidecar.base_url().to_owned()),
+                            ));
+                            (BrowserMode::Standalone { port: 9223 }, bridge)
+                        }
+                        Err(e) => {
+                            warn!("browser bridge unavailable: {e}");
+                            (BrowserMode::None, None)
+                        }
+                    }
+                } else {
+                    warn!("browser bridge unavailable: Docker client not connected");
+                    (BrowserMode::None, None)
                 }
             }
-        } else {
-            warn!("browser bridge unavailable: Docker client not connected");
-            None
-        }
-    } else {
-        None
-    };
+            BrowserMode::None => (BrowserMode::None, None),
+        };
+    info!(mode = ?browser_mode, "browser detection complete");
 
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
@@ -353,6 +363,7 @@ async fn handle_start() -> anyhow::Result<()> {
             notify_user_id,
             paths: paths.clone(),
             session_router: Arc::clone(&session_router),
+            browser_mode,
         };
         tokio::spawn(wintermute::heartbeat::run_heartbeat(
             heartbeat_deps,

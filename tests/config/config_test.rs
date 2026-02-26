@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use wintermute::config::{
-    all_model_specs, config_dir, runtime_paths, AgentConfig, BudgetConfig, Config, EgressConfig,
-    HeartbeatConfig, LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig, PromotionMode,
-    SandboxConfig,
+    all_model_specs, config_dir, runtime_paths, AgentConfig, BrowserConfig, BudgetConfig, Config,
+    EgressConfig, HeartbeatConfig, LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig,
+    PromotionMode, SandboxConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,7 @@ fn default_egress_values() {
     assert!(egress.allowed_domains.is_empty());
     assert_eq!(egress.fetch_rate_limit, 30);
     assert_eq!(egress.request_rate_limit, 10);
+    assert_eq!(egress.browser_rate_limit, 60);
     assert_eq!(egress.max_file_download_mb, 500);
 }
 
@@ -79,6 +80,15 @@ fn default_privacy_values() {
 #[test]
 fn default_promotion_mode_is_auto() {
     assert_eq!(PromotionMode::default(), PromotionMode::Auto);
+}
+
+#[test]
+fn default_browser_values() {
+    let browser = BrowserConfig::default();
+    assert_eq!(browser.cdp_port, 9222);
+    assert!(!browser.auto_submit);
+    assert!(browser.standalone_fallback);
+    assert!(!browser.image.is_empty());
 }
 
 // ---------------------------------------------------------------------------
