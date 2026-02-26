@@ -239,10 +239,6 @@ fn instantiate_provider(
                 auth,
             )))
         }
-        "ollama" => Ok(Arc::new(OllamaProvider::new(
-            model_spec.to_owned(),
-            model.to_owned(),
-        ))),
         "openai" => {
             let auth =
                 resolve_openai_auth(credentials).ok_or_else(|| RouterError::MissingCredential {
@@ -255,6 +251,10 @@ fn instantiate_provider(
                 auth,
             )))
         }
+        "ollama" => Ok(Arc::new(OllamaProvider::new(
+            model_spec.to_owned(),
+            model.to_owned(),
+        ))),
         _ => Err(RouterError::UnsupportedProvider {
             provider: provider.to_owned(),
         }),

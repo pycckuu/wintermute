@@ -11,7 +11,7 @@ fn sample_snapshot() -> IdentitySnapshot {
     IdentitySnapshot {
         model_id: "anthropic/claude-sonnet-4-5-20250929".to_owned(),
         executor_kind: ExecutorKind::Docker,
-        core_tool_count: 8,
+        core_tool_count: 9,
         dynamic_tool_count: 3,
         active_memory_count: 42,
         pending_memory_count: 5,
@@ -19,6 +19,7 @@ fn sample_snapshot() -> IdentitySnapshot {
         session_budget_limit: 500_000,
         daily_budget_limit: 5_000_000,
         uptime: Duration::from_secs(3_723),
+        agent_name: "Wintermute".to_owned(),
     }
 }
 
@@ -32,6 +33,10 @@ fn render_identity_contains_all_sections() {
     assert!(doc.contains("## Your Memory"));
     assert!(doc.contains("## Budget"));
     assert!(doc.contains("## Privacy Boundary"));
+    assert!(doc.contains("## What You Can Modify About Yourself"));
+    assert!(doc.contains("## What You CANNOT Modify"));
+    assert!(doc.contains("## Self-Modification Protocol"));
+    assert!(doc.contains("## What You Can Help Set Up"));
     assert!(doc.contains("## Handling Non-Text Messages"));
 }
 
@@ -164,4 +169,24 @@ fn format_uptime_hours() {
 #[test]
 fn format_uptime_days() {
     assert_eq!(format_uptime(Duration::from_secs(90_000)), "1d 1h 0m");
+}
+
+#[test]
+fn render_identity_uses_custom_agent_name() {
+    let mut snap = sample_snapshot();
+    snap.agent_name = "Neuromancer".to_owned();
+    let doc = render_identity(&snap);
+    assert!(doc.contains("# Neuromancer"));
+    assert!(doc.contains("You are Neuromancer, a self-coding AI agent."));
+    assert!(!doc.contains("Wintermute"));
+}
+
+#[test]
+fn render_identity_contains_self_modification_sections() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("[personality]"));
+    assert!(doc.contains("rename yourself"));
+    assert!(doc.contains("config.toml"));
+    assert!(doc.contains("IDENTITY.md"));
+    assert!(doc.contains("evolve:"));
 }
