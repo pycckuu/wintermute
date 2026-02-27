@@ -711,6 +711,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "directories",
  "filetime",
  "flate2",
  "hex",

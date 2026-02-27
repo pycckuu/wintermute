@@ -579,6 +579,19 @@ impl Updater {
         Ok(())
     }
 
+    /// Stop Wintermute gracefully via PID file (SIGTERM + wait).
+    ///
+    /// Used by the CLI update command when no service manager is detected.
+    /// Reads the PID from `wintermute.pid` and sends SIGTERM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal cannot be sent.
+    pub async fn stop_wintermute_pid(&self) -> anyhow::Result<()> {
+        self.signal_wintermute(&[], "SIGTERM for CLI update", 10)
+            .await
+    }
+
     /// Stop Wintermute gracefully (SIGTERM + wait).
     async fn stop_wintermute(&self) -> anyhow::Result<()> {
         self.signal_wintermute(&[], "SIGTERM for update", 10).await
@@ -629,7 +642,11 @@ impl Updater {
     }
 
     /// Backup a binary to the updates directory as `{name}.prev`.
-    async fn backup_binary(&self, name: &str) -> anyhow::Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the copy operation fails.
+    pub async fn backup_binary(&self, name: &str) -> anyhow::Result<()> {
         let source = resolve_binary_path(name);
         let dest = self.paths.updates_dir.join(format!("{name}.prev"));
 
@@ -866,6 +883,93 @@ impl Updater {
 
         passed
     }
+
+    /// Download the combined dist archive for the current platform from a release.
+    ///
+    /// The dist archive contains both binaries, service files, and documentation.
+    /// Used by the `flatline update` CLI command (as opposed to [`download_release`](Self::download_release)
+    /// which downloads per-binary archives for the daemon auto-updater).
+    ///
+    /// Returns the path to the downloaded archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the download or SHA256 verification fails.
+    pub async fn download_dist_archive(&self, release: &ReleaseInfo) -> anyhow::Result<PathBuf> {
+        std::fs::create_dir_all(&self.paths.pending_dir).with_context(|| {
+            format!(
+                "failed to create pending dir {}",
+                self.paths.pending_dir.display()
+            )
+        })?;
+
+        // Download checksums file first.
+        let checksums_asset = release
+            .assets
+            .iter()
+            .find(|a| a.name == "checksums-sha256.txt")
+            .ok_or_else(|| anyhow::anyhow!("release missing checksums-sha256.txt"))?;
+
+        let checksums_content = self
+            .http
+            .get(&checksums_asset.browser_download_url)
+            .send()
+            .await
+            .context("failed to download checksums")?
+            .text()
+            .await
+            .context("failed to read checksums body")?;
+
+        let checksums_path = self.paths.pending_dir.join("checksums-sha256.txt");
+        tokio::fs::write(&checksums_path, &checksums_content)
+            .await
+            .context("failed to write checksums file")?;
+
+        // Download the dist archive.
+        let dist_name = format!("wintermute-dist-{}-{TARGET}.tar.gz", release.version);
+        validate_asset_name(&dist_name)?;
+
+        let asset = release
+            .assets
+            .iter()
+            .find(|a| a.name == dist_name)
+            .ok_or_else(|| anyhow::anyhow!("release missing asset: {dist_name}"))?;
+
+        let dest = self.paths.pending_dir.join(&dist_name);
+        info!(asset = %dist_name, "downloading dist archive");
+
+        let response = self
+            .http
+            .get(&asset.browser_download_url)
+            .send()
+            .await
+            .with_context(|| format!("failed to download {dist_name}"))?;
+
+        if !response.status().is_success() {
+            anyhow::bail!("download of {dist_name} returned {}", response.status());
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("failed to read body for {dist_name}"))?;
+
+        tokio::fs::write(&dest, &bytes)
+            .await
+            .with_context(|| format!("failed to write {}", dest.display()))?;
+
+        // Verify SHA256.
+        let expected = find_checksum(&checksums_content, &dist_name)?;
+        let actual = sha256_bytes(&bytes);
+
+        if actual != expected {
+            let _ = tokio::fs::remove_file(&dest).await;
+            anyhow::bail!("SHA256 mismatch for {dist_name}: expected {expected}, got {actual}");
+        }
+
+        info!(asset = %dist_name, sha256 = %actual, "dist archive checksum verified");
+        Ok(dest)
+    }
 }
 
 // -- Free functions --
@@ -1039,6 +1143,108 @@ fn extract_binary_from_archive(archive_path: &Path, binary_name: &str) -> anyhow
         "binary '{binary_name}' not found in archive {}",
         archive_path.display()
     )
+}
+
+/// Resolve the binary install directory (`~/.wintermute/bin/`).
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined.
+pub fn install_dir() -> anyhow::Result<PathBuf> {
+    let root = wintermute::config::config_dir()?;
+    Ok(root.join("bin"))
+}
+
+/// Extract a dist archive (`.tar.gz`) to the same directory as the archive.
+///
+/// Returns the path to the extracted directory (e.g.
+/// `~/.wintermute/flatline/updates/pending/wintermute-0.9.0-aarch64-apple-darwin/`).
+///
+/// # Errors
+///
+/// Returns an error if extraction fails or the archive cannot be read.
+pub fn extract_dist_archive(archive_path: &Path) -> anyhow::Result<PathBuf> {
+    let parent = archive_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("archive has no parent directory"))?;
+
+    let file = std::fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive {}", archive_path.display()))?;
+
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    // Track the top-level directory name from the archive.
+    let mut top_dir: Option<PathBuf> = None;
+
+    for entry_result in archive.entries().context("failed to read tar entries")? {
+        let mut entry = entry_result.context("failed to read tar entry")?;
+        let entry_path = entry
+            .path()
+            .context("failed to read entry path")?
+            .into_owned();
+
+        // Validate: no absolute paths or path traversal.
+        anyhow::ensure!(
+            !entry_path.has_root()
+                && !entry_path
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir),
+            "archive entry contains unsafe path: {}",
+            entry_path.display()
+        );
+
+        // Record the top-level directory.
+        if top_dir.is_none() {
+            if let Some(first_component) = entry_path.components().next() {
+                top_dir = Some(PathBuf::from(first_component.as_os_str()));
+            }
+        }
+
+        let dest = parent.join(&entry_path);
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&dest)
+                .with_context(|| format!("failed to create directory {}", dest.display()))?;
+        } else {
+            // Ensure parent directory exists.
+            if let Some(p) = dest.parent() {
+                std::fs::create_dir_all(p)
+                    .with_context(|| format!("failed to create parent dir {}", p.display()))?;
+            }
+            let mut out = std::fs::File::create(&dest)
+                .with_context(|| format!("failed to create {}", dest.display()))?;
+            std::io::copy(&mut entry, &mut out)
+                .with_context(|| format!("failed to extract {}", entry_path.display()))?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(mode) = entry.header().mode() {
+                    let perms = std::fs::Permissions::from_mode(mode);
+                    std::fs::set_permissions(&dest, perms).ok();
+                }
+            }
+        }
+    }
+
+    let extracted_dir = top_dir
+        .map(|d| parent.join(d))
+        .ok_or_else(|| anyhow::anyhow!("archive appears to be empty"))?;
+
+    anyhow::ensure!(
+        extracted_dir.is_dir(),
+        "expected extracted path to be a directory: {}",
+        extracted_dir.display()
+    );
+
+    info!(
+        archive = %archive_path.display(),
+        dir = %extracted_dir.display(),
+        "extracted dist archive"
+    );
+
+    Ok(extracted_dir)
 }
 
 // -- GitHub API response types (private) --
