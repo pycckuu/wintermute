@@ -37,6 +37,7 @@ const BYTES_PER_TOKEN: u64 = 4;
 pub fn assemble_system_prompt(
     personality: &str,
     identity_document: Option<&str>,
+    agents_md: Option<&str>,
     user_md: Option<&str>,
     executor_kind: ExecutorKind,
     dynamic_tool_count: usize,
@@ -55,6 +56,13 @@ pub fn assemble_system_prompt(
     if let Some(sid) = identity_document {
         if !sid.is_empty() {
             sections.push(sid.to_owned());
+        }
+    }
+
+    // Section 2.5: AGENTS.md — lessons learned
+    if let Some(amd) = agents_md {
+        if !amd.is_empty() {
+            sections.push(format!("## Lessons Learned\n{amd}"));
         }
     }
 

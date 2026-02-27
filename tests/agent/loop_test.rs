@@ -15,7 +15,8 @@ use wintermute::agent::r#loop::{SessionConfig, SessionEvent};
 use wintermute::agent::TelegramOutbound;
 use wintermute::config::{
     AgentConfig, BudgetConfig, ChannelsConfig, Config, EgressConfig, HeartbeatConfig,
-    LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig, SandboxConfig, TelegramConfig,
+    LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig, SandboxConfig,
+    SoulModificationMode, TelegramConfig,
 };
 use wintermute::executor::ExecutorKind;
 use wintermute::memory::MemoryEngine;
@@ -59,6 +60,7 @@ fn make_agent_config() -> AgentConfig {
     AgentConfig {
         personality: PersonalityConfig {
             name: "TestBot".to_owned(),
+            soul_modification: SoulModificationMode::default(),
             soul: "You are a test assistant.".to_owned(),
         },
         heartbeat: HeartbeatConfig::default(),
@@ -224,6 +226,8 @@ async fn run_session_completes_on_shutdown() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let cfg = SessionConfig {
@@ -240,6 +244,7 @@ async fn run_session_completes_on_shutdown() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 
@@ -320,6 +325,8 @@ async fn run_session_completes_on_channel_close() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let cfg = SessionConfig {
@@ -336,6 +343,7 @@ async fn run_session_completes_on_channel_close() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 
@@ -601,6 +609,8 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -618,6 +628,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 
@@ -712,6 +723,8 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -729,6 +742,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 
@@ -829,6 +843,8 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -846,6 +862,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 
@@ -940,6 +957,8 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
@@ -957,6 +976,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         agent_config: Arc::new(make_agent_config()),
         observer_tx: None,
         identity_document: None,
+        agents_md_content: None,
         user_md_content: None,
     };
 

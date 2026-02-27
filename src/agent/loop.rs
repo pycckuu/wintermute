@@ -25,7 +25,9 @@ use crate::agent::TelegramOutbound;
 use crate::config::{AgentConfig, Config};
 use crate::memory::{ConversationEntry, Memory, MemoryEngine, MemoryStatus, TrustSource};
 use crate::providers::router::ModelRouter;
-use crate::providers::{CompletionRequest, ContentPart, Message, MessageContent, Role, StopReason};
+use crate::providers::{
+    extract_text, CompletionRequest, ContentPart, Message, MessageContent, Role, StopReason,
+};
 use crate::tools::ToolRouter;
 
 use super::approval::ApprovalManager;
@@ -79,6 +81,8 @@ pub struct SessionConfig {
     pub observer_tx: Option<mpsc::Sender<ObserverEvent>>,
     /// Loaded System Identity Document content (from IDENTITY.md).
     pub identity_document: Option<String>,
+    /// Loaded AGENTS.md content (lessons learned).
+    pub agents_md_content: Option<String>,
     /// Loaded USER.md content (consolidated long-term memory).
     pub user_md_content: Option<String>,
 }
@@ -142,6 +146,8 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
     let mut last_warned_percent: u8 = 0;
     // Compaction fires at most once per session to avoid repeated LLM calls.
     let mut compacted_this_session = false;
+    // Track tools created/modified during this session (for observer reflection).
+    let mut tools_modified: Vec<String> = Vec::new();
 
     loop {
         let event = if last_turn_had_activity {
@@ -159,6 +165,7 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                             session_id: cfg.session_id.clone(),
                             user_id: cfg.user_id,
                             messages: conversation[start..].to_vec(),
+                            tools_modified: tools_modified.clone(),
                         };
                         if let Err(e) = observer_tx.try_send(event) {
                             debug!(error = %e, "failed to send observer event (non-blocking)");
@@ -222,6 +229,7 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     &mut last_warned_percent,
                     &mut compacted_this_session,
                     &mut bootstrap_memories,
+                    &mut tools_modified,
                 )
                 .await;
             }
@@ -234,6 +242,7 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     &mut last_warned_percent,
                     &mut compacted_this_session,
                     &mut bootstrap_memories,
+                    &mut tools_modified,
                 )
                 .await;
             }
@@ -270,6 +279,7 @@ async fn run_agent_turn(
     last_warned_percent: &mut u8,
     compacted_this_session: &mut bool,
     bootstrap_memories: &mut Vec<Memory>,
+    tools_modified: &mut Vec<String>,
 ) {
     let mut tool_call_count: u32 = 0;
 
@@ -305,7 +315,7 @@ async fn run_agent_turn(
 
                 match provider.complete(request).await {
                     Ok(response) => {
-                        let summary = extract_assistant_text(&response.content);
+                        let summary = extract_text(&response.content);
                         if !summary.is_empty() {
                             cfg.budget.record_usage(
                                 u64::from(response.usage.input_tokens),
@@ -357,6 +367,7 @@ async fn run_agent_turn(
         let system_prompt = assemble_system_prompt(
             &cfg.agent_config.personality.soul,
             cfg.identity_document.as_deref(),
+            cfg.agents_md_content.as_deref(),
             cfg.user_md_content.as_deref(),
             cfg.policy_context.executor_kind,
             tools.len().saturating_sub(core_tool_count),
@@ -479,9 +490,20 @@ async fn run_agent_turn(
 
                     let result = match decision {
                         PolicyDecision::Allow => {
-                            cfg.tool_router
+                            let r = cfg
+                                .tool_router
                                 .execute_for_user(name, input, Some(cfg.user_id))
-                                .await
+                                .await;
+                            // Track tools created/modified for observer reflection.
+                            if name == "create_tool" && !r.is_error {
+                                if let Some(tool_name) = input.get("name").and_then(|v| v.as_str())
+                                {
+                                    if !tools_modified.contains(&tool_name.to_owned()) {
+                                        tools_modified.push(tool_name.to_owned());
+                                    }
+                                }
+                            }
+                            r
                         }
                         PolicyDecision::RequireApproval => {
                             let approval_id = cfg.approval_manager.request(
@@ -525,7 +547,7 @@ async fn run_agent_turn(
         });
 
         // Step 9: Persist assistant text to conversation log
-        let assistant_text = extract_assistant_text(&response.content);
+        let assistant_text = extract_text(&response.content);
 
         if !assistant_text.is_empty() {
             let total_tokens = response
@@ -583,6 +605,7 @@ async fn handle_approval_resolved(
     last_warned_percent: &mut u8,
     compacted_this_session: &mut bool,
     bootstrap_memories: &mut Vec<Memory>,
+    tools_modified: &mut Vec<String>,
 ) {
     match result {
         ApprovalResult::Approved {
@@ -625,6 +648,7 @@ async fn handle_approval_resolved(
                 last_warned_percent,
                 compacted_this_session,
                 bootstrap_memories,
+                tools_modified,
             )
             .await;
         }
@@ -644,6 +668,7 @@ async fn handle_approval_resolved(
                 last_warned_percent,
                 compacted_this_session,
                 bootstrap_memories,
+                tools_modified,
             )
             .await;
         }
@@ -690,18 +715,6 @@ fn merge_bootstrap_memories(memories: &mut Vec<Memory>, bootstrap: &mut Vec<Memo
 
     // Cap to avoid oversized system prompts.
     memories.truncate(MAX_CONTEXT_MEMORIES);
-}
-
-/// Extract plain text from assistant response content parts.
-fn extract_assistant_text(parts: &[ContentPart]) -> String {
-    parts
-        .iter()
-        .filter_map(|p| match p {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 /// Pause the session on budget exhaustion and notify the user.

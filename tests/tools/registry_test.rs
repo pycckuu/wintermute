@@ -279,6 +279,122 @@ fn registry_default_timeout_is_120() {
     assert_eq!(tool.timeout_secs, 120, "default timeout should be 120");
 }
 
+#[tokio::test]
+async fn registry_record_execution_updates_meta() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    // Initially no _meta.
+    let before = registry.get("test_tool").expect("should exist");
+    assert!(before.meta.is_none());
+
+    // Record a successful execution.
+    registry.record_execution("test_tool", true, 150, None);
+
+    let after = registry.get("test_tool").expect("should exist");
+    let meta = after.meta.expect("_meta should exist after recording");
+    assert_eq!(meta.invocations, 1);
+    assert!((meta.success_rate - 1.0).abs() < f64::EPSILON);
+    assert_eq!(meta.avg_duration_ms, 150);
+    assert!(meta.last_used.is_some());
+    assert!(meta.last_error.is_none());
+}
+
+#[tokio::test]
+async fn registry_record_execution_tracks_failures() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    registry.record_execution("test_tool", true, 100, None);
+    registry.record_execution("test_tool", false, 200, Some("timeout"));
+
+    let tool = registry.get("test_tool").expect("should exist");
+    let meta = tool.meta.expect("_meta should exist");
+    assert_eq!(meta.invocations, 2);
+    assert!((meta.success_rate - 0.5).abs() < f64::EPSILON);
+    assert_eq!(meta.last_error, Some("timeout".to_owned()));
+}
+
+#[tokio::test]
+async fn registry_all_schemas_returns_meta() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    registry.record_execution("test_tool", true, 100, None);
+
+    let schemas = registry.all_schemas();
+    let with_meta = schemas
+        .iter()
+        .find(|s| s.name == "test_tool")
+        .expect("found");
+    assert!(
+        with_meta.meta.is_some(),
+        "_meta should be present in all_schemas"
+    );
+}
+
+#[tokio::test]
+async fn registry_meta_not_in_tool_definition_output() {
+    let (_dir, path) = setup_temp_dir_with_tools();
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path).expect("registry should initialise");
+
+    registry.record_execution("test_tool", true, 100, None);
+
+    let defs = registry.all_definitions();
+    let def = defs.iter().find(|d| d.name == "test_tool").expect("found");
+    // ToolDefinition only has name, description, input_schema — no _meta field.
+    let schema_str = serde_json::to_string(&def.input_schema).expect("serialize");
+    assert!(
+        !schema_str.contains("_meta"),
+        "ToolDefinition should not include _meta"
+    );
+}
+
+#[test]
+fn registry_meta_preserved_across_reload() {
+    let dir = TempDir::new().expect("should create temp dir");
+    let path = dir.path().to_path_buf();
+
+    let schema = json!({
+        "name": "meta_tool",
+        "description": "Tool with meta",
+        "parameters": { "type": "object" },
+        "_meta": {
+            "created_at": "2025-01-01T00:00:00Z",
+            "last_used": null,
+            "invocations": 5,
+            "success_rate": 0.8,
+            "avg_duration_ms": 200,
+            "last_error": null,
+            "version": 2
+        }
+    });
+    std::fs::write(
+        path.join("meta_tool.json"),
+        serde_json::to_string_pretty(&schema).expect("serialize"),
+    )
+    .expect("write");
+
+    let registry =
+        DynamicToolRegistry::new_without_watcher(path.clone()).expect("registry should initialise");
+
+    let tool = registry.get("meta_tool").expect("should exist");
+    let meta = tool.meta.expect("_meta should be loaded");
+    assert_eq!(meta.invocations, 5);
+    assert!((meta.success_rate - 0.8).abs() < f64::EPSILON);
+    assert_eq!(meta.version, 2);
+
+    // Reload and verify _meta is preserved.
+    registry.reload_all().expect("reload should succeed");
+    let reloaded = registry.get("meta_tool").expect("should exist");
+    let meta2 = reloaded.meta.expect("_meta should survive reload");
+    assert_eq!(meta2.invocations, 5);
+}
+
 #[test]
 fn registry_rejects_invalid_timeout_values() {
     let dir = TempDir::new().expect("should create temp dir");

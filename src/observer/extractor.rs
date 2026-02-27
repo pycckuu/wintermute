@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use crate::agent::budget::DailyBudget;
 use crate::executor::redactor::Redactor;
 use crate::providers::router::ModelRouter;
-use crate::providers::{CompletionRequest, ContentPart, Message, MessageContent, Role};
+use crate::providers::{extract_text, CompletionRequest, Message, MessageContent, Role};
 
 /// Estimated tokens per observer extraction call (for budget pre-check).
 const ESTIMATED_EXTRACTION_TOKENS: u64 = 500;
@@ -104,15 +104,7 @@ pub async fn extract(
     daily_budget.record(total);
 
     // Extract text from response.
-    let response_text = response
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let response_text = extract_text(&response.content);
 
     if response_text.is_empty() {
         debug!("observer received empty response");

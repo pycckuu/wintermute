@@ -10,6 +10,8 @@ mod core_test;
 mod create_tool_test;
 #[path = "tools/docker_test.rs"]
 mod docker_test;
+#[path = "tools/escalate_test.rs"]
+mod escalate_test;
 #[path = "tools/flatline_test.rs"]
 mod flatline_test;
 #[path = "tools/registry_test.rs"]

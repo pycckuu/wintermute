@@ -292,6 +292,10 @@ async fn handle_start() -> anyhow::Result<()> {
         None
     };
 
+    let config_arc = Arc::new(config);
+    let agent_config_arc = Arc::new(agent_config);
+    let router_arc = Arc::new(router);
+
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -303,13 +307,11 @@ async fn handle_start() -> anyhow::Result<()> {
         browser_limiter,
         browser_bridge,
         docker_client,
-        Some(u64::from(config.egress.max_file_download_mb).saturating_mul(1024 * 1024)),
+        Some(u64::from(config_arc.egress.max_file_download_mb).saturating_mul(1024 * 1024)),
         flatline_root,
+        Some(Arc::clone(&router_arc)),
+        Some(Arc::clone(&daily_budget)),
     ));
-
-    let config_arc = Arc::new(config);
-    let agent_config_arc = Arc::new(agent_config);
-    let router_arc = Arc::new(router);
 
     // Phase 3: Observer channel + background task
     let observer_tx = if agent_config_arc.learning.enabled {
@@ -624,6 +626,7 @@ fn ensure_runtime_layout(paths: &RuntimePaths) -> anyhow::Result<()> {
     fs::create_dir_all(&paths.workspace_dir)?;
     fs::create_dir_all(&paths.data_dir)?;
     fs::create_dir_all(&paths.backups_dir)?;
+    fs::create_dir_all(&paths.docs_dir)?;
     Ok(())
 }
 
@@ -635,6 +638,21 @@ fn write_default_files(paths: &RuntimePaths) -> anyhow::Result<()> {
     write_if_missing(
         &paths.scripts_dir.join(".gitignore"),
         "__pycache__/\n*.pyc\n*.pyo\n",
+    )?;
+    write_if_missing(&paths.agents_md, default_agents_md())?;
+
+    // Seed docs/ directory with template files.
+    write_if_missing(
+        &paths.docs_dir.join("architecture.md"),
+        "---\nsummary: How Wintermute works internally\nread_when: agent needs to understand its own architecture\n---\n# Architecture\n(Seeded by wintermute init. The agent can expand this.)\n",
+    )?;
+    write_if_missing(
+        &paths.docs_dir.join("tools-guide.md"),
+        "---\nsummary: How to create effective dynamic tools\nread_when: agent is about to create or modify a tool\n---\n# Tools Guide\n(Seeded by wintermute init. The agent can expand this.)\n",
+    )?;
+    write_if_missing(
+        &paths.docs_dir.join("README.md"),
+        "# docs/\n\nSelf-knowledge documents. The agent reads and writes these.\n\n- `architecture.md` — how Wintermute works internally\n- `tools-guide.md` — how to create effective dynamic tools\n",
     )?;
     Ok(())
 }
@@ -743,6 +761,23 @@ builtin = "backup"
 
 fn default_env_file() -> &'static str {
     "WINTERMUTE_TELEGRAM_TOKEN=\nANTHROPIC_API_KEY=\n# ANTHROPIC_OAUTH_TOKEN=\n# ANTHROPIC_OAUTH_REFRESH_TOKEN=\n# ANTHROPIC_OAUTH_EXPIRES_AT=\nOPENAI_API_KEY=\n# OPENAI_OAUTH_TOKEN=\n"
+}
+
+fn default_agents_md() -> &'static str {
+    r#"# Lessons Learned
+
+## Tool Creation
+- Always test tools with edge-case inputs before considering them done.
+- Include a clear `description` — this is what the LLM reads to decide when to use the tool.
+
+## Sandbox
+- The sandbox resets on container restart. Persist important state to /scripts.
+- Use setup.sh for packages that need to survive resets.
+
+## Common Mistakes
+- Forgetting to handle empty input gracefully.
+- Not checking exit codes from shell commands.
+"#
 }
 
 fn list_backups(backups_dir: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {

@@ -150,3 +150,89 @@ fn tools_with_registered_tool_shows_it() {
     assert!(detail_result.contains("A test tool"));
     assert!(detail_result.contains("120s")); // default timeout
 }
+
+#[test]
+fn help_includes_revert_command() {
+    let result = commands::handle_help();
+    assert!(result.contains("/revert"));
+}
+
+/// Mock executor for testing revert command without Docker.
+struct RevertMockExecutor {
+    success: bool,
+    output: String,
+}
+
+#[async_trait::async_trait]
+impl wintermute::executor::Executor for RevertMockExecutor {
+    async fn execute(
+        &self,
+        _command: &str,
+        _opts: wintermute::executor::ExecOptions,
+    ) -> Result<wintermute::executor::ExecResult, wintermute::executor::ExecutorError> {
+        Ok(wintermute::executor::ExecResult {
+            exit_code: if self.success { Some(0) } else { Some(1) },
+            stdout: if self.success {
+                self.output.clone()
+            } else {
+                String::new()
+            },
+            stderr: if self.success {
+                String::new()
+            } else {
+                self.output.clone()
+            },
+            timed_out: false,
+            duration: std::time::Duration::from_millis(10),
+        })
+    }
+
+    async fn health_check(
+        &self,
+    ) -> Result<wintermute::executor::HealthStatus, wintermute::executor::ExecutorError> {
+        Ok(wintermute::executor::HealthStatus::Healthy {
+            kind: wintermute::executor::ExecutorKind::Direct,
+            details: "mock".to_owned(),
+        })
+    }
+
+    fn scripts_dir(&self) -> &std::path::Path {
+        std::path::Path::new("/scripts")
+    }
+
+    fn workspace_dir(&self) -> &std::path::Path {
+        std::path::Path::new("/workspace")
+    }
+
+    fn kind(&self) -> wintermute::executor::ExecutorKind {
+        wintermute::executor::ExecutorKind::Direct
+    }
+}
+
+#[tokio::test]
+async fn revert_success_shows_output() {
+    let executor = RevertMockExecutor {
+        success: true,
+        output: "Revert 'change'\nThis reverts commit abc123.".to_owned(),
+    };
+    let result = commands::handle_revert(&executor).await;
+    assert!(
+        result.contains("Revert successful"),
+        "should show success, got: {result}"
+    );
+    assert!(result.contains("abc123"));
+}
+
+#[tokio::test]
+async fn revert_failure_shows_error() {
+    let executor = RevertMockExecutor {
+        success: false,
+        output: "fatal: not a git repository".to_owned(),
+    };
+    let result = commands::handle_revert(&executor).await;
+    assert!(
+        result.contains("Revert failed"),
+        "should show failure, got: {result}"
+    );
+    assert!(result.contains("not a git repository"));
+}

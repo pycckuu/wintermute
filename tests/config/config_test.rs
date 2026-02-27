@@ -6,7 +6,7 @@ use std::path::Path;
 use wintermute::config::{
     all_model_specs, config_dir, runtime_paths, AgentConfig, BrowserConfig, BudgetConfig, Config,
     EgressConfig, HeartbeatConfig, LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig,
-    PromotionMode, SandboxConfig,
+    PromotionMode, SandboxConfig, SoulModificationMode,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,6 +43,7 @@ fn default_personality_values() {
     let personality = PersonalityConfig::default();
     assert_eq!(personality.name, "Wintermute");
     assert!(personality.soul.is_empty());
+    assert_eq!(personality.soul_modification, SoulModificationMode::Notify);
 }
 
 #[test]
@@ -50,6 +51,9 @@ fn default_heartbeat_values() {
     let heartbeat = HeartbeatConfig::default();
     assert!(heartbeat.enabled);
     assert_eq!(heartbeat.interval_secs, 60);
+    assert!(!heartbeat.proactive);
+    assert_eq!(heartbeat.proactive_interval_mins, 30);
+    assert_eq!(heartbeat.proactive_budget, 5000);
 }
 
 #[test]
@@ -58,6 +62,7 @@ fn default_learning_values() {
     assert!(learning.enabled);
     assert_eq!(learning.promotion_mode, PromotionMode::Auto);
     assert_eq!(learning.auto_promote_threshold, 3);
+    assert!(learning.reflection);
 }
 
 #[test]
@@ -292,4 +297,100 @@ fn all_model_specs_preserves_order() {
     assert_eq!(specs[0], "ollama/qwen3:8b");
     assert!(specs.contains(&"anthropic/claude-haiku".to_owned()));
     assert!(specs.contains(&"anthropic/claude-sonnet".to_owned()));
+}
+
+// ---------------------------------------------------------------------------
+// Soul modification mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_soul_modification_mode_variants() {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        mode: SoulModificationMode,
+    }
+
+    let notify: Wrapper = toml::from_str("mode = \"notify\"").expect("notify should parse");
+    assert_eq!(notify.mode, SoulModificationMode::Notify);
+
+    let approve: Wrapper = toml::from_str("mode = \"approve\"").expect("approve should parse");
+    assert_eq!(approve.mode, SoulModificationMode::Approve);
+}
+
+#[test]
+fn default_soul_modification_mode_is_notify() {
+    assert_eq!(
+        SoulModificationMode::default(),
+        SoulModificationMode::Notify
+    );
+}
+
+#[test]
+fn parse_agent_config_with_soul_modification() {
+    let toml_str = r#"
+[personality]
+name = "TestBot"
+soul_modification = "approve"
+"#;
+    let agent: AgentConfig = toml::from_str(toml_str).expect("agent config should parse");
+    assert_eq!(
+        agent.personality.soul_modification,
+        SoulModificationMode::Approve
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Proactive heartbeat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_heartbeat_with_proactive_settings() {
+    let toml_str = r#"
+[heartbeat]
+enabled = true
+proactive = true
+proactive_interval_mins = 15
+proactive_budget = 10000
+"#;
+    let agent: AgentConfig = toml::from_str(toml_str).expect("proactive heartbeat should parse");
+    assert!(agent.heartbeat.proactive);
+    assert_eq!(agent.heartbeat.proactive_interval_mins, 15);
+    assert_eq!(agent.heartbeat.proactive_budget, 10000);
+}
+
+// ---------------------------------------------------------------------------
+// Reflection in learning config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_learning_with_reflection_disabled() {
+    let toml_str = r#"
+[learning]
+enabled = true
+reflection = false
+"#;
+    let agent: AgentConfig =
+        toml::from_str(toml_str).expect("learning with reflection should parse");
+    assert!(!agent.learning.reflection);
+}
+
+#[test]
+fn learning_reflection_defaults_to_true() {
+    let toml_str = r#"
+[learning]
+enabled = true
+"#;
+    let agent: AgentConfig = toml::from_str(toml_str).expect("learning should parse");
+    assert!(agent.learning.reflection);
+}
+
+// ---------------------------------------------------------------------------
+// New runtime paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn runtime_paths_has_agents_md_and_docs_dir() {
+    let paths = runtime_paths().expect("runtime paths should resolve");
+    assert!(paths.agents_md.ends_with("AGENTS.md"));
+    assert!(paths.docs_dir.ends_with("docs"));
 }

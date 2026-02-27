@@ -6,5 +6,7 @@ mod commands_test;
 mod input_guard_test;
 #[path = "telegram/media_test.rs"]
 mod media_test;
+#[path = "telegram/no_reply_test.rs"]
+mod no_reply_test;
 #[path = "telegram/ui_test.rs"]
 mod ui_test;

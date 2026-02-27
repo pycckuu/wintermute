@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::executor::docker::shell_escape;
 use crate::executor::{ExecOptions, Executor};
 
-use super::registry::DynamicToolRegistry;
+use super::registry::{DynamicToolRegistry, ToolMeta};
 use super::ToolError;
 
 /// Maximum allowed tool name length.
@@ -133,12 +133,30 @@ pub async fn create_tool(
 
     debug!(tool = name, "wrote implementation file");
 
-    // Step 2: Write schema JSON file.
+    // Step 2: Write schema JSON file with _meta.
+    let meta = if action == "update" {
+        // Preserve existing _meta, bump version.
+        registry
+            .get(name)
+            .and_then(|s| s.meta)
+            .map(|mut m| {
+                m.version = m.version.saturating_add(1);
+                m
+            })
+            .unwrap_or_else(ToolMeta::new_initial)
+    } else {
+        ToolMeta::new_initial()
+    };
+
+    let meta_json = serde_json::to_value(&meta)
+        .map_err(|e| ToolError::ExecutionFailed(format!("failed to serialize _meta: {e}")))?;
+
     let schema = json!({
         "name": name,
         "description": description,
         "parameters": parameters_schema,
         "timeout_secs": timeout_secs,
+        "_meta": meta_json,
     });
     let schema_json = serde_json::to_string_pretty(&schema)
         .map_err(|e| ToolError::ExecutionFailed(format!("failed to serialize schema: {e}")))?;

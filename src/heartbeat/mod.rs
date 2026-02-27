@@ -7,7 +7,9 @@
 pub mod backup;
 pub mod digest;
 pub mod health;
+pub mod proactive;
 pub mod scheduler;
+pub mod tool_review;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +72,7 @@ pub async fn run_heartbeat(
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     let mut scheduler_state = scheduler::SchedulerState::new();
     let mut tick_count: u64 = 0;
+    let mut last_proactive_check: Option<Instant> = None;
 
     // Skip the first immediate tick.
     interval.tick().await;
@@ -87,6 +90,16 @@ pub async fn run_heartbeat(
                 if tick_count.is_multiple_of(5) {
                     regenerate_sid(&deps, start_time).await;
                 }
+
+                // Proactive behavior check.
+                if deps.agent_config.heartbeat.proactive {
+                    maybe_run_proactive_check(
+                        &deps,
+                        start_time,
+                        &mut last_proactive_check,
+                    )
+                    .await;
+                }
             }
             result = shutdown_rx.changed() => {
                 if result.is_err() || *shutdown_rx.borrow() {
@@ -98,6 +111,58 @@ pub async fn run_heartbeat(
     }
 
     info!("heartbeat stopped");
+}
+
+/// Run a proactive check if enough time has elapsed since the last one.
+async fn maybe_run_proactive_check(
+    deps: &HeartbeatDeps,
+    start_time: Instant,
+    last_check: &mut Option<Instant>,
+) {
+    let proactive_interval = Duration::from_secs(
+        u64::from(deps.agent_config.heartbeat.proactive_interval_mins).saturating_mul(60),
+    );
+    let should_check = last_check.is_none_or(|last| last.elapsed() >= proactive_interval);
+    if !should_check {
+        return;
+    }
+
+    let now_str = chrono::Utc::now()
+        .format("%Y-%m-%d %H:%M:%S UTC")
+        .to_string();
+    let session_count = deps.session_router.session_count().await;
+    let context_summary = format!(
+        "Current time: {now_str}\nUptime: {:?}\nActive sessions: {session_count}",
+        start_time.elapsed(),
+    );
+
+    match proactive::run_proactive_check(
+        &deps.router,
+        &deps.daily_budget,
+        deps.agent_config.heartbeat.proactive_budget,
+        &context_summary,
+    )
+    .await
+    {
+        Ok(Some(action)) => {
+            let redacted = deps.tool_router.redactor().redact(&action);
+            let msg = TelegramOutbound {
+                user_id: deps.notify_user_id,
+                text: Some(redacted),
+                file_path: None,
+                approval_keyboard: None,
+            };
+            if let Err(e) = deps.telegram_tx.send(msg).await {
+                warn!(error = %e, "failed to send proactive action");
+            }
+        }
+        Ok(None) => {} // No action needed.
+        Err(e) => {
+            warn!(error = %e, "proactive check failed");
+        }
+    }
+
+    *last_check = Some(Instant::now());
 }
 
 /// Execute a single heartbeat tick.
@@ -155,6 +220,46 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
 
     let dynamic_tool_count = deps.tool_router.dynamic_tool_count();
 
+    // Resolve oracle model from roles config.
+    let oracle_model = deps.config.models.roles.get("oracle").cloned();
+
+    // Count docs/ files.
+    let docs_count = std::fs::read_dir(&deps.paths.docs_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+
+    // Build scheduled task summaries.
+    let scheduled_task_summaries: Vec<String> = deps
+        .agent_config
+        .scheduled_tasks
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| {
+            if let Some(ref builtin) = t.builtin {
+                format!("{} (builtin: {builtin}, cron: {})", t.name, t.cron)
+            } else if let Some(ref tool) = t.tool {
+                format!("{} (tool: {tool}, cron: {})", t.name, t.cron)
+            } else {
+                format!("{} (cron: {})", t.name, t.cron)
+            }
+        })
+        .collect();
+
+    // Build dynamic tool summaries with _meta stats.
+    let dynamic_tool_summaries: Vec<(String, String, u64, f64)> = deps
+        .tool_router
+        .registry()
+        .all_schemas()
+        .into_iter()
+        .map(|s| {
+            let (invocations, success_rate) = s
+                .meta
+                .map(|m| (m.invocations, m.success_rate))
+                .unwrap_or((0, 1.0));
+            (s.name, s.description, invocations, success_rate)
+        })
+        .collect();
+
     let snap = IdentitySnapshot {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         model_id: deps.config.models.default.clone(),
@@ -169,6 +274,11 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
         uptime: start_time.elapsed(),
         agent_name: deps.agent_config.personality.name.clone(),
         browser_mode: deps.browser_mode,
+        oracle_model,
+        soul_modification_mode: deps.agent_config.personality.soul_modification,
+        docs_count,
+        scheduled_task_summaries,
+        dynamic_tool_summaries,
     };
 
     let content = identity::render_identity(&snap);

@@ -22,7 +22,7 @@ use super::{ExecOptions, ExecResult, Executor, ExecutorError, ExecutorKind, Heal
 
 const SANDBOX_CONTAINER_NAME: &str = "wintermute-sandbox";
 const RESET_REQUIREMENTS_COMMAND: &str =
-    "if [ -f /scripts/requirements.txt ]; then pip install --user -r /scripts/requirements.txt; fi";
+    "if [ -f /scripts/setup.sh ]; then bash /scripts/setup.sh; fi && if [ -f /scripts/requirements.txt ]; then pip install -r /scripts/requirements.txt; fi";
 
 /// Embedded sandbox Dockerfile for local build fallback when registry pull fails.
 const SANDBOX_DOCKERFILE: &str = include_str!("../../Dockerfile.sandbox");
@@ -381,7 +381,7 @@ pub fn build_container_config(
 
     let host_config = HostConfig {
         network_mode: Some(network_mode),
-        readonly_rootfs: Some(true),
+        readonly_rootfs: Some(false),
         cap_drop: Some(vec!["ALL".to_owned()]),
         security_opt: Some(vec!["no-new-privileges:true".to_owned()]),
         pids_limit: Some(256),
@@ -412,7 +412,7 @@ pub fn build_container_config(
     Ok(ContainerConfig {
         image: Some(sandbox.image.clone()),
         cmd: Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
-        user: Some("wintermute".to_owned()),
+        user: None,
         working_dir: Some("/workspace".to_owned()),
         env: Some(env),
         host_config: Some(host_config),

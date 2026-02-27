@@ -23,6 +23,11 @@ fn sample_snapshot() -> IdentitySnapshot {
         uptime: Duration::from_secs(3_723),
         agent_name: "Wintermute".to_owned(),
         browser_mode: BrowserMode::None,
+        oracle_model: None,
+        soul_modification_mode: wintermute::config::SoulModificationMode::default(),
+        docs_count: 0,
+        scheduled_task_summaries: Vec::new(),
+        dynamic_tool_summaries: Vec::new(),
     }
 }
 
@@ -222,4 +227,100 @@ fn render_identity_shows_browser_standalone() {
     assert!(doc.contains("## Browser"));
     assert!(doc.contains("standalone browser"));
     assert!(doc.contains("--remote-debugging-port=9222"));
+}
+
+#[test]
+fn render_identity_includes_escalation_with_oracle() {
+    let mut snap = sample_snapshot();
+    snap.oracle_model = Some("anthropic/claude-opus-4-20250514".to_owned());
+    let doc = render_identity(&snap);
+    assert!(doc.contains("## Escalation"));
+    assert!(doc.contains("escalate"));
+    assert!(doc.contains("claude-opus-4-20250514"));
+}
+
+#[test]
+fn render_identity_escalation_without_oracle() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("## Escalation"));
+    assert!(doc.contains("No oracle model configured"));
+}
+
+#[test]
+fn render_identity_includes_soul_modification_mode() {
+    // Default mode is Notify.
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("## Self-Modification Protocol"));
+    assert!(doc.contains("notify"));
+
+    // Approve mode.
+    let mut snap = sample_snapshot();
+    snap.soul_modification_mode = wintermute::config::SoulModificationMode::Approve;
+    let doc = render_identity(&snap);
+    assert!(doc.contains("approve"));
+    assert!(doc.contains("Wait for explicit approval"));
+}
+
+#[test]
+fn render_identity_includes_tool_stats() {
+    let mut snap = sample_snapshot();
+    snap.dynamic_tool_summaries = vec![
+        (
+            "weather".to_owned(),
+            "Get weather data".to_owned(),
+            15,
+            0.93,
+        ),
+        (
+            "calculator".to_owned(),
+            "Math operations".to_owned(),
+            3,
+            1.0,
+        ),
+    ];
+    let doc = render_identity(&snap);
+    assert!(doc.contains("Custom Tool Stats"));
+    assert!(doc.contains("`weather`"));
+    assert!(doc.contains("invocations: 15"));
+}
+
+#[test]
+fn render_identity_includes_silence_section() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(doc.contains("## Silence"));
+    assert!(doc.contains("[NO_REPLY]"));
+}
+
+#[test]
+fn render_identity_includes_docs_section_when_present() {
+    let mut snap = sample_snapshot();
+    snap.docs_count = 3;
+    let doc = render_identity(&snap);
+    assert!(doc.contains("## Documentation"));
+    assert!(doc.contains("3 doc(s)"));
+}
+
+#[test]
+fn render_identity_omits_docs_section_when_empty() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(!doc.contains("## Documentation"));
+}
+
+#[test]
+fn render_identity_includes_scheduled_tasks() {
+    let mut snap = sample_snapshot();
+    snap.scheduled_task_summaries =
+        vec!["daily_backup (builtin: backup, cron: 0 0 3 * * *)".to_owned()];
+    let doc = render_identity(&snap);
+    assert!(doc.contains("## Scheduled Tasks"));
+    assert!(doc.contains("daily_backup"));
+}
+
+#[test]
+fn render_identity_includes_escalate_in_tools_list() {
+    let doc = render_identity(&sample_snapshot());
+    assert!(
+        doc.contains("escalate"),
+        "core tools list should include escalate"
+    );
 }

@@ -235,6 +235,11 @@ impl SessionRouter {
             SessionBudget::new(Arc::clone(&self.daily_budget), self.config.budget.clone());
 
         let identity_document = identity::load_identity(&self.paths.identity_md);
+
+        let agents_md_content = std::fs::read_to_string(&self.paths.agents_md)
+            .ok()
+            .filter(|s| !s.is_empty());
+
         let user_md_content = crate::heartbeat::digest::load_user_md(&self.paths.user_md);
         let user_md_content = if user_md_content.is_empty() {
             None
@@ -256,6 +261,7 @@ impl SessionRouter {
             agent_config: Arc::clone(&self.agent_config),
             observer_tx: self.observer_tx.clone(),
             identity_document,
+            agents_md_content,
             user_md_content,
         }
     }

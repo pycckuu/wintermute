@@ -22,6 +22,40 @@ const MAX_DYNAMIC_TIMEOUT_SECS: u64 = 3600;
 // DynamicToolSchema
 // ---------------------------------------------------------------------------
 
+/// Health metadata for a dynamic tool, updated after each invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolMeta {
+    /// ISO 8601 timestamp when the tool was created.
+    pub created_at: String,
+    /// ISO 8601 timestamp of last invocation, if any.
+    pub last_used: Option<String>,
+    /// Total number of invocations.
+    pub invocations: u64,
+    /// Running success rate (0.0–1.0).
+    pub success_rate: f64,
+    /// Running average execution duration in milliseconds.
+    pub avg_duration_ms: u64,
+    /// Last error message, if any.
+    pub last_error: Option<String>,
+    /// Schema version (incremented on tool updates).
+    pub version: u32,
+}
+
+impl ToolMeta {
+    /// Create initial metadata for a newly created tool.
+    pub fn new_initial() -> Self {
+        Self {
+            created_at: chrono::Utc::now().to_rfc3339(),
+            last_used: None,
+            invocations: 0,
+            success_rate: 1.0,
+            avg_duration_ms: 0,
+            last_error: None,
+            version: 1,
+        }
+    }
+}
+
 /// Schema for a dynamically registered tool, loaded from a JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DynamicToolSchema {
@@ -34,6 +68,9 @@ pub struct DynamicToolSchema {
     /// Maximum execution timeout in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// Health metadata, updated after each invocation.
+    #[serde(default, rename = "_meta")]
+    pub meta: Option<ToolMeta>,
 }
 
 /// Default timeout for dynamic tools: 120 seconds.
@@ -316,6 +353,86 @@ impl DynamicToolRegistry {
         }
 
         Ok(())
+    }
+
+    /// Record an execution result, updating `_meta` and persisting to disk.
+    ///
+    /// Updates invocation count, success rate (running average), average
+    /// duration, last-used timestamp, and last error. Writes the updated
+    /// schema back to disk on a blocking thread.
+    pub fn record_execution(
+        &self,
+        name: &str,
+        success: bool,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) {
+        let updated_schema = {
+            let mut map = match self.tools.write() {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = %e, "registry lock poisoned in record_execution");
+                    return;
+                }
+            };
+
+            let schema = match map.get_mut(name) {
+                Some(s) => s,
+                None => return,
+            };
+
+            let meta = schema.meta.get_or_insert_with(ToolMeta::new_initial);
+            meta.invocations = meta.invocations.saturating_add(1);
+            meta.last_used = Some(chrono::Utc::now().to_rfc3339());
+
+            // Running average for success_rate.
+            #[allow(clippy::cast_precision_loss)]
+            let n = meta.invocations as f64;
+            let success_val = if success { 1.0 } else { 0.0 };
+            meta.success_rate = meta.success_rate + (success_val - meta.success_rate) / n;
+
+            // Running average for duration.
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            {
+                let avg = meta.avg_duration_ms as f64;
+                meta.avg_duration_ms = (avg + (duration_ms as f64 - avg) / n) as u64;
+            }
+
+            if !success {
+                meta.last_error = error.map(|e| e.chars().take(500).collect());
+            }
+
+            schema.clone()
+        };
+
+        // Persist to disk on a bounded blocking thread.
+        let path = self.scripts_dir.join(format!("{name}.json"));
+        tokio::task::spawn_blocking(move || {
+            if let Ok(json) = serde_json::to_string_pretty(&updated_schema) {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to persist _meta to disk"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Return all tool schemas including `_meta` (for tool review / SID).
+    pub fn all_schemas(&self) -> Vec<DynamicToolSchema> {
+        match self.tools.read() {
+            Ok(map) => map.values().cloned().collect(),
+            Err(e) => {
+                warn!(error = %e, "registry lock poisoned in all_schemas");
+                Vec::new()
+            }
+        }
     }
 
     /// Return the number of registered dynamic tools.

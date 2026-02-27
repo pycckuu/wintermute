@@ -62,6 +62,8 @@ fn temp_runtime_paths(dir: &tempfile::TempDir) -> RuntimePaths {
         identity_md: root.join("IDENTITY.md"),
         user_md: root.join("USER.md"),
         flatline_root: root.join("flatline"),
+        agents_md: root.join("AGENTS.md"),
+        docs_dir: root.join("docs"),
     }
 }
 
