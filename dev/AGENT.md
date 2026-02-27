@@ -77,7 +77,7 @@ src/
     ├── digest.rs              # Weekly memory digest (USER.md consolidation)
     └── health.rs              # Self-checks, log structured health
 flatline/src/                      # Flatline supervisor (separate crate)
-├── main.rs                        # CLI + daemon loop
+├── main.rs                        # CLI (start/update/check) + daemon loop
 ├── lib.rs                         # Crate root
 ├── config.rs                      # flatline.toml loading + validation
 ├── db.rs                          # state.db (tool_stats, fixes, suppressions)
@@ -86,7 +86,9 @@ flatline/src/                      # Flatline supervisor (separate crate)
 ├── patterns.rs                    # 8 known failure patterns
 ├── diagnosis.rs                   # LLM-based diagnosis (novel problems)
 ├── fixer.rs                       # Fix lifecycle (propose → apply → verify)
-└── reporter.rs                    # Telegram notifications + daily reports
+├── reporter.rs                    # Telegram notifications + daily reports
+├── services.rs                    # launchd/systemd service management
+└── updater.rs                     # Auto-update + CLI update (dist archive)
 ```
 
 ## Security Invariants

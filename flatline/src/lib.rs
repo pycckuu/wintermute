@@ -19,6 +19,8 @@ pub mod fixer;
 pub mod patterns;
 /// Telegram notification reporter.
 pub mod reporter;
+/// Service management for launchd (macOS) and systemd (Linux).
+pub mod services;
 /// Rolling statistics engine for tool health and budget tracking.
 pub mod stats;
 /// Auto-update: check, download, verify, swap, rollback.

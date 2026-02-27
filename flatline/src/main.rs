@@ -1,7 +1,7 @@
 //! Flatline CLI entry point.
 //!
-//! Provides `start` and `check` subcommands for running the supervisor daemon
-//! or performing a single diagnostic check.
+//! Provides `start`, `check`, and `update` subcommands for running the supervisor
+//! daemon, performing a single diagnostic check, or applying updates.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -36,6 +36,12 @@ enum Command {
     Start,
     /// Run a single diagnostic check and exit.
     Check,
+    /// Check for updates and apply the latest version.
+    Update {
+        /// Only check for a newer version without applying it.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
@@ -45,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Start => handle_start().await,
         Command::Check => handle_check().await,
+        Command::Update { check } => handle_update(check).await,
     }
 }
 
@@ -459,6 +466,120 @@ async fn process_match(
             warn!(error = %e, "failed to send alert notification");
         }
     }
+}
+
+/// Check for updates and optionally apply the latest version.
+///
+/// Downloads the dist archive (binaries + service files), stops running
+/// services, swaps binaries, reinstalls service files, and restarts services.
+async fn handle_update(check_only: bool) -> anyhow::Result<()> {
+    wintermute::logging::init_cli();
+
+    let wm_paths = wintermute::config::runtime_paths()?;
+    let fl_paths = flatline_paths()?;
+    let flatline_config_path = wm_paths.root.join("flatline.toml");
+
+    let config = load_flatline_config(&flatline_config_path)
+        .with_context(|| format!("failed to load {}", flatline_config_path.display()))?;
+
+    // Override config: CLI update always checks regardless of enabled/pinned settings.
+    let mut update_config = config.update.clone();
+    update_config.enabled = true;
+    update_config.pinned_version = None;
+
+    let updater = Updater::new(update_config, fl_paths, wm_paths.clone());
+
+    // Step 1: Check for update.
+    info!("checking for updates...");
+    let release = match updater.check_for_update().await? {
+        Some(r) => r,
+        None => {
+            info!(version = env!("CARGO_PKG_VERSION"), "already up to date");
+            return Ok(());
+        }
+    };
+
+    info!(
+        current = env!("CARGO_PKG_VERSION"),
+        latest = %release.version,
+        "new version available"
+    );
+
+    if !release.changelog.is_empty() {
+        info!(changelog = %release.changelog);
+    }
+
+    if check_only {
+        return Ok(());
+    }
+
+    // Step 2: Download dist archive.
+    info!(version = %release.version, "downloading update...");
+    let archive_path = updater.download_dist_archive(&release).await?;
+
+    // Step 3: Extract dist archive.
+    let dist_dir = updater::extract_dist_archive(&archive_path)?;
+
+    // Step 4: Detect service manager and stop services.
+    let service_manager = flatline::services::detect();
+    if let Some(manager) = service_manager {
+        info!(manager = ?manager, "stopping services");
+        flatline::services::stop_services(manager).await?;
+    } else {
+        info!("no service manager detected, stopping wintermute via PID");
+        updater.stop_wintermute_pid().await?;
+    }
+
+    // Step 5: Backup current binaries.
+    updater.backup_binary("wintermute").await?;
+    updater.backup_binary("flatline").await?;
+
+    // Step 6: Install new binaries.
+    let bin_dir = updater::install_dir()?;
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+
+    for name in ["wintermute", "flatline"] {
+        let src = dist_dir.join(name);
+        let dest = bin_dir.join(name);
+        anyhow::ensure!(
+            src.exists(),
+            "{name} binary not found in dist archive at {}",
+            src.display()
+        );
+        tokio::fs::copy(&src, &dest)
+            .await
+            .with_context(|| format!("failed to install {name} binary"))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(&dest, perms)
+                .with_context(|| format!("failed to set {name} execute permission"))?;
+        }
+    }
+
+    info!(dir = %bin_dir.display(), "binaries installed");
+
+    // Step 7: Reinstall service files and start services.
+    if let Some(manager) = service_manager {
+        info!(manager = ?manager, "reinstalling service files");
+        flatline::services::install_service_files(manager, &dist_dir).await?;
+
+        info!(manager = ?manager, "starting services");
+        flatline::services::start_services(manager).await?;
+    } else {
+        info!("no service manager detected; start wintermute and flatline manually");
+    }
+
+    info!(
+        from = env!("CARGO_PKG_VERSION"),
+        to = %release.version,
+        "update complete"
+    );
+
+    Ok(())
 }
 
 /// Run a single diagnostic check and exit.
