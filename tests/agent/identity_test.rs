@@ -10,6 +10,7 @@ use wintermute::tools::browser::BrowserMode;
 
 fn sample_snapshot() -> IdentitySnapshot {
     IdentitySnapshot {
+        version: "0.6.0".to_owned(),
         model_id: "anthropic/claude-sonnet-4-5-20250929".to_owned(),
         executor_kind: ExecutorKind::Docker,
         core_tool_count: 9,

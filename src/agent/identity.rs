@@ -19,6 +19,8 @@ use crate::tools::browser::BrowserMode;
 /// Snapshot of runtime state used to render the identity document.
 #[derive(Debug, Clone)]
 pub struct IdentitySnapshot {
+    /// Wintermute binary version (from Cargo.toml).
+    pub version: String,
     /// Active LLM model identifier.
     pub model_id: String,
     /// Executor type (Docker or Direct).
@@ -62,6 +64,7 @@ pub fn render_identity(snap: &IdentitySnapshot) -> String {
 
     // Architecture
     doc.push_str("## Your Architecture\n");
+    let _ = writeln!(doc, "- Version: {}", snap.version);
     let _ = writeln!(doc, "- Model: {}", snap.model_id);
 
     let executor_label = match snap.executor_kind {

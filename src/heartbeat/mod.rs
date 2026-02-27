@@ -156,6 +156,7 @@ async fn regenerate_sid(deps: &HeartbeatDeps, start_time: Instant) {
     let dynamic_tool_count = deps.tool_router.dynamic_tool_count();
 
     let snap = IdentitySnapshot {
+        version: env!("CARGO_PKG_VERSION").to_owned(),
         model_id: deps.config.models.default.clone(),
         executor_kind: deps.executor.kind(),
         core_tool_count: crate::tools::core::core_tool_definitions().len(),
