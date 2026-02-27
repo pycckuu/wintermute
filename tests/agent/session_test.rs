@@ -179,6 +179,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         None,
         None,
         None,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));
@@ -200,6 +201,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         health_json: tmp_dir.path().join("health.json"),
         identity_md: tmp_dir.path().join("IDENTITY.md"),
         user_md: tmp_dir.path().join("USER.md"),
+        flatline_root: tmp_dir.path().join("flatline"),
     };
 
     let session_router = SessionRouter::new(

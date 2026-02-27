@@ -20,6 +20,7 @@ fn make_wm_paths() -> wintermute::config::RuntimePaths {
         health_json: root.join("health.json"),
         identity_md: root.join("IDENTITY.md"),
         user_md: root.join("USER.md"),
+        flatline_root: root.join("flatline"),
     }
 }
 
