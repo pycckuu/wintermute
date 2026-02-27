@@ -3,7 +3,7 @@ members = ["flatline"]
 
 [package]
 name = "wintermute"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 authors = ["Igor Markelov <pycckuu@gmail.com>"]
 description = "Self-coding AI agent with Telegram interface and sandboxed Docker execution"
