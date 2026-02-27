@@ -9,6 +9,7 @@ pub mod browser_bridge;
 pub mod core;
 pub mod create_tool;
 pub mod docker;
+pub mod flatline;
 pub mod registry;
 
 use std::sync::Arc;
@@ -127,6 +128,8 @@ pub struct ToolRouter {
     docker_client: Option<bollard::Docker>,
     /// Maximum file download size in bytes for web_fetch save_to mode.
     max_download_bytes: Option<u64>,
+    /// Root directory of Flatline supervisor; None when not installed.
+    flatline_root: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for ToolRouter {
@@ -152,6 +155,7 @@ impl ToolRouter {
         browser_bridge: Option<Arc<dyn BrowserBridge>>,
         docker_client: Option<bollard::Docker>,
         max_download_bytes: Option<u64>,
+        flatline_root: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             executor,
@@ -165,6 +169,7 @@ impl ToolRouter {
             browser_bridge,
             docker_client,
             max_download_bytes,
+            flatline_root,
         }
     }
 
@@ -247,6 +252,10 @@ impl ToolRouter {
                 Some(client) => into_tool_result(docker::docker_manage(client, input).await),
                 None => ToolResult::error("docker not available"),
             },
+            "flatline_status" => match &self.flatline_root {
+                Some(root) => into_tool_result(flatline::flatline_status(root, input).await),
+                None => ToolResult::error("flatline supervisor not installed"),
+            },
             _ => {
                 if let Some(schema) = self.registry.get(name) {
                     self.registry.record_usage(name);
@@ -311,6 +320,9 @@ impl ToolRouter {
         }
         if self.docker_client.is_some() {
             defs.push(docker::docker_manage_tool_definition());
+        }
+        if self.flatline_root.is_some() {
+            defs.push(flatline::flatline_status_tool_definition());
         }
         let max_dynamic = match usize::try_from(max_dynamic) {
             Ok(value) => value,

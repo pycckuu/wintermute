@@ -284,6 +284,14 @@ async fn handle_start() -> anyhow::Result<()> {
         };
     info!(mode = ?browser_mode, "browser detection complete");
 
+    // Detect Flatline supervisor for the flatline_status tool.
+    let flatline_root = if paths.flatline_root.exists() {
+        info!("flatline detected, flatline_status tool enabled");
+        Some(paths.flatline_root.clone())
+    } else {
+        None
+    };
+
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -296,6 +304,7 @@ async fn handle_start() -> anyhow::Result<()> {
         browser_bridge,
         docker_client,
         Some(u64::from(config.egress.max_file_download_mb).saturating_mul(1024 * 1024)),
+        flatline_root,
     ));
 
     let config_arc = Arc::new(config);
