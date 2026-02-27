@@ -134,7 +134,7 @@ HOST → browser (CDP or sidecar) + egress-proxy (Squid) → sandbox → service
         "- {} custom tools (agent-created)",
         snap.dynamic_tool_count
     );
-    doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_telegram, create_tool, escalate, docker_manage\n");
+    doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_message, manage_brief, read_messages, create_tool, escalate, docker_manage\n");
 
     // Dynamic tool stats
     if !snap.dynamic_tool_summaries.is_empty() {

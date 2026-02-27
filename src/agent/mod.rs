@@ -16,6 +16,7 @@ pub mod context;
 pub mod identity;
 pub mod r#loop;
 pub mod policy;
+pub mod session_manager;
 
 pub use r#loop::SessionEvent;
 
@@ -29,6 +30,7 @@ use self::approval::{ApprovalManager, ApprovalResult};
 use self::budget::{DailyBudget, SessionBudget};
 use self::policy::PolicyContext;
 use self::r#loop::SessionConfig;
+use self::session_manager::SessionManager;
 
 /// Outbound message from agent to Telegram.
 #[derive(Debug, Clone)]
@@ -79,6 +81,8 @@ pub struct SessionRouter {
     observer_tx: Option<mpsc::Sender<ObserverEvent>>,
     /// Resolved runtime paths.
     paths: RuntimePaths,
+    /// Session persistence manager.
+    session_manager: Arc<SessionManager>,
 }
 
 impl std::fmt::Debug for SessionRouter {
@@ -104,6 +108,7 @@ impl SessionRouter {
         agent_config: Arc<AgentConfig>,
         observer_tx: Option<mpsc::Sender<ObserverEvent>>,
         paths: RuntimePaths,
+        session_manager: Arc<SessionManager>,
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
@@ -118,6 +123,7 @@ impl SessionRouter {
             agent_config,
             observer_tx,
             paths,
+            session_manager,
         }
     }
 
@@ -154,6 +160,15 @@ impl SessionRouter {
         // Create a new session
         let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
         let session_cfg = self.build_session_config(session_key.clone(), user_id);
+
+        // Persist the new session to SQLite for crash recovery.
+        if let Err(e) = self
+            .session_manager
+            .create_session(&session_key, user_id, "telegram")
+            .await
+        {
+            warn!(error = %e, session = %session_key, "failed to persist new session");
+        }
 
         let spawn_key = session_key.clone();
         tokio::spawn(async move {
@@ -197,6 +212,38 @@ impl SessionRouter {
         Ok(())
     }
 
+    /// Route an inbound WhatsApp message to the session that owns the brief.
+    ///
+    /// Looks up the session by `session_id` and dispatches an
+    /// [`SessionEvent::InboundMessage`] event to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session channel send fails.
+    pub async fn route_inbound(
+        &self,
+        brief_id: String,
+        session_id: String,
+        from: String,
+        text: String,
+    ) -> anyhow::Result<()> {
+        let sessions = self.sessions.lock().await;
+        if let Some(tx) = sessions.get(&session_id) {
+            tx.send(SessionEvent::InboundMessage {
+                brief_id,
+                from,
+                text,
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("failed to send inbound message to session {session_id}: {e}")
+            })?;
+        } else {
+            warn!(session_id = %session_id, "no active session for inbound message");
+        }
+        Ok(())
+    }
+
     /// Remove and shut down a session for the given user.
     ///
     /// Sends a [`SessionEvent::Shutdown`] to the session task and removes it
@@ -206,6 +253,10 @@ impl SessionRouter {
         let session_key = format!("user_{user_id}");
         let mut sessions = self.sessions.lock().await;
         if let Some(tx) = sessions.remove(&session_key) {
+            // Mark the session as completed in SQLite.
+            if let Err(e) = self.session_manager.complete_session(&session_key).await {
+                warn!(error = %e, session = %session_key, "failed to mark session completed");
+            }
             let _ = tx.send(SessionEvent::Shutdown).await;
             true
         } else {
@@ -263,6 +314,7 @@ impl SessionRouter {
             identity_document,
             agents_md_content,
             user_md_content,
+            session_manager: Arc::clone(&self.session_manager),
         }
     }
 }

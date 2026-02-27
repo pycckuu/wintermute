@@ -106,7 +106,7 @@ async fn setup_memory_engine() -> MemoryEngine {
 #[test]
 fn core_tool_definitions_returns_eight_tools() {
     let defs = core_tool_definitions();
-    assert_eq!(defs.len(), 8, "should have exactly 8 core tools");
+    assert_eq!(defs.len(), 10, "should have exactly 10 core tools");
 }
 
 #[test]
@@ -120,7 +120,9 @@ fn core_tool_definitions_have_correct_names() {
     assert!(names.contains(&"browser"));
     assert!(names.contains(&"memory_search"));
     assert!(names.contains(&"memory_save"));
-    assert!(names.contains(&"send_telegram"));
+    assert!(names.contains(&"send_message"));
+    assert!(names.contains(&"manage_brief"));
+    assert!(names.contains(&"read_messages"));
     assert!(names.contains(&"create_tool"));
 }
 

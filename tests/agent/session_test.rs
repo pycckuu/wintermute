@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use wintermute::agent::approval::ApprovalManager;
 use wintermute::agent::budget::DailyBudget;
 use wintermute::agent::policy::{PolicyContext, RateLimiter};
+use wintermute::agent::session_manager::SessionManager;
 use wintermute::agent::SessionRouter;
 use wintermute::agent::TelegramOutbound;
 use wintermute::config::{
@@ -47,6 +48,7 @@ fn make_config() -> Config {
         egress: EgressConfig::default(),
         privacy: PrivacyConfig::default(),
         browser: wintermute::config::BrowserConfig::default(),
+        whatsapp: wintermute::config::WhatsAppConfig::default(),
     }
 }
 
@@ -59,6 +61,8 @@ fn make_agent_config() -> AgentConfig {
         },
         heartbeat: HeartbeatConfig::default(),
         learning: LearningConfig::default(),
+        sessions: wintermute::config::SessionsConfig::default(),
+        messaging: wintermute::config::MessagingConfig::default(),
         scheduled_tasks: vec![],
         services: vec![],
     }
@@ -129,6 +133,24 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
             id INTEGER PRIMARY KEY, domain TEXT NOT NULL UNIQUE,
             approved_by TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
         )",
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            channel TEXT NOT NULL DEFAULT 'telegram',
+            channel_context TEXT, budget_tokens_used INTEGER DEFAULT 0,
+            budget_paused BOOLEAN DEFAULT FALSE,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT, crash_reason TEXT
+        )",
+        "CREATE TABLE IF NOT EXISTS task_briefs (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, contact_id INTEGER,
+            objective TEXT NOT NULL, shareable_info TEXT NOT NULL, constraints TEXT NOT NULL,
+            escalation_triggers TEXT, commitment_level TEXT NOT NULL, tone TEXT,
+            status TEXT NOT NULL DEFAULT 'draft', outcome_summary TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT
+        )",
     ] {
         sqlx::query(sql)
             .execute(&db)
@@ -136,6 +158,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
             .expect("failed to create table");
     }
 
+    let session_manager = Arc::new(SessionManager::new(db.clone()));
     let memory = Arc::new(
         MemoryEngine::new(db, None)
             .await
@@ -184,6 +207,8 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));
@@ -222,6 +247,7 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         Arc::new(make_agent_config()),
         None,
         paths,
+        session_manager,
     );
 
     (session_router, telegram_rx)

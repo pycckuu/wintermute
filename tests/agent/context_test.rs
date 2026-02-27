@@ -26,6 +26,7 @@ fn system_prompt_includes_personality() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("You are a helpful AI."));
 }
@@ -42,6 +43,7 @@ fn system_prompt_includes_docker_executor() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Docker sandbox"));
 }
@@ -58,6 +60,7 @@ fn system_prompt_includes_direct_executor() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Direct"));
 }
@@ -97,6 +100,7 @@ fn system_prompt_includes_memories_when_provided() {
         &memories,
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Relevant Memories"));
     assert!(prompt.contains("User prefers dark mode"));
@@ -117,6 +121,7 @@ fn system_prompt_omits_memory_section_when_empty() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(!prompt.contains("Relevant Memories"));
 }
@@ -133,6 +138,7 @@ fn system_prompt_includes_pending_approvals() {
         &[],
         3,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Pending approvals: 3"));
 }
@@ -149,6 +155,7 @@ fn system_prompt_omits_approvals_when_zero() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(!prompt.contains("Pending approvals"));
 }
@@ -165,6 +172,7 @@ fn system_prompt_includes_current_time() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("2026-02-19 12:00:00 UTC"));
 }
@@ -181,6 +189,7 @@ fn system_prompt_includes_identity_document_when_provided() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("# Wintermute"));
     assert!(prompt.contains("You are Wintermute."));
@@ -198,6 +207,7 @@ fn system_prompt_includes_dynamic_tool_count() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("5 dynamic tool(s)"));
 }
@@ -214,6 +224,7 @@ fn system_prompt_includes_user_md_when_provided() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Long-Term Memory"));
     assert!(prompt.contains("Dark mode"));
@@ -232,6 +243,7 @@ fn system_prompt_omits_user_md_when_empty() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(!prompt.contains("Long-Term Memory"));
 }
@@ -248,6 +260,7 @@ fn system_prompt_includes_agents_md_when_provided() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(prompt.contains("Lessons Learned"));
     assert!(prompt.contains("Always validate tool input"));
@@ -265,8 +278,64 @@ fn system_prompt_omits_agents_md_when_empty() {
         &[],
         0,
         "2026-02-19 12:00:00 UTC",
+        None,
     );
     assert!(!prompt.contains("Lessons Learned"));
+}
+
+#[test]
+fn system_prompt_includes_active_briefs_when_provided() {
+    let briefs_text =
+        "## Active Task Briefs\n- [brief-1] contact #42: Book a meeting (status: active)\n";
+    let prompt = assemble_system_prompt(
+        "personality",
+        None,
+        None,
+        None,
+        ExecutorKind::Docker,
+        0,
+        &[],
+        0,
+        "2026-02-19 12:00:00 UTC",
+        Some(briefs_text),
+    );
+    assert!(prompt.contains("Active Task Briefs"));
+    assert!(prompt.contains("brief-1"));
+    assert!(prompt.contains("Book a meeting"));
+}
+
+#[test]
+fn system_prompt_omits_active_briefs_when_none() {
+    let prompt = assemble_system_prompt(
+        "personality",
+        None,
+        None,
+        None,
+        ExecutorKind::Docker,
+        0,
+        &[],
+        0,
+        "2026-02-19 12:00:00 UTC",
+        None,
+    );
+    assert!(!prompt.contains("Active Task Briefs"));
+}
+
+#[test]
+fn system_prompt_omits_active_briefs_when_empty() {
+    let prompt = assemble_system_prompt(
+        "personality",
+        None,
+        None,
+        None,
+        ExecutorKind::Docker,
+        0,
+        &[],
+        0,
+        "2026-02-19 12:00:00 UTC",
+        Some(""),
+    );
+    assert!(!prompt.contains("Active Task Briefs"));
 }
 
 // ---------------------------------------------------------------------------

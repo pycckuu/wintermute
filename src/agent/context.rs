@@ -44,6 +44,7 @@ pub fn assemble_system_prompt(
     memories: &[Memory],
     pending_approvals: usize,
     current_time: &str,
+    active_briefs_summary: Option<&str>,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
@@ -97,6 +98,13 @@ pub fn assemble_system_prompt(
             memory_section.push_str(&format!("- [{kind}] {}\n", mem.content));
         }
         sections.push(memory_section);
+    }
+
+    // Section 6.5: Active task briefs
+    if let Some(briefs) = active_briefs_summary {
+        if !briefs.is_empty() {
+            sections.push(briefs.to_owned());
+        }
     }
 
     // Section 7: Current context

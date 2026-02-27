@@ -48,6 +48,10 @@ pub struct Config {
     /// Browser automation sidecar configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
+
+    /// WhatsApp sidecar configuration.
+    #[serde(default)]
+    pub whatsapp: WhatsAppConfig,
 }
 
 /// Top-level agent-owned configuration.
@@ -64,6 +68,14 @@ pub struct AgentConfig {
     /// Learning and promotion behavior settings.
     #[serde(default)]
     pub learning: LearningConfig,
+
+    /// Session persistence settings.
+    #[serde(default)]
+    pub sessions: SessionsConfig,
+
+    /// Outbound messaging settings.
+    #[serde(default)]
+    pub messaging: MessagingConfig,
 
     /// Scheduled built-in or dynamic tasks.
     #[serde(default)]
@@ -90,6 +102,27 @@ pub struct ServiceConfig {
     /// Restart policy.
     #[serde(default)]
     pub restart: Option<String>,
+}
+
+/// Outbound messaging configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessagingConfig {
+    /// How often to update the user during outbound tasks.
+    #[serde(default = "default_update_frequency")]
+    pub update_frequency: String,
+
+    /// Default commitment level for new briefs.
+    #[serde(default = "default_commitment")]
+    pub default_commitment: String,
+}
+
+impl Default for MessagingConfig {
+    fn default() -> Self {
+        Self {
+            update_frequency: default_update_frequency(),
+            default_commitment: default_commitment(),
+        }
+    }
 }
 
 /// Model routing: default model, per-role and per-skill overrides.
@@ -246,6 +279,18 @@ pub struct PrivacyConfig {
     /// Domains blocked entirely for outbound requests.
     #[serde(default)]
     pub blocked_domains: Vec<String>,
+
+    /// Strings that should never be shared in outbound messages.
+    #[serde(default)]
+    pub never_share: Vec<String>,
+
+    /// Custom private terms for the outbound redactor.
+    #[serde(default)]
+    pub private_terms: Vec<String>,
+
+    /// Whether briefs require user confirmation before activating.
+    #[serde(default = "default_true")]
+    pub require_brief_confirmation: bool,
 }
 
 impl Default for EgressConfig {
@@ -287,6 +332,26 @@ impl Default for BrowserConfig {
             auto_submit: false,
             standalone_fallback: default_standalone_fallback(),
             image: default_browser_image(),
+        }
+    }
+}
+
+/// WhatsApp sidecar configuration (human-owned).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhatsAppConfig {
+    /// Enable WhatsApp integration.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Docker image for the wintermute-whatsapp sidecar.
+    #[serde(default = "default_whatsapp_image")]
+    pub image: String,
+}
+
+impl Default for WhatsAppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            image: default_whatsapp_image(),
         }
     }
 }
@@ -367,6 +432,32 @@ impl Default for LearningConfig {
             promotion_mode: PromotionMode::default(),
             auto_promote_threshold: default_auto_promote_threshold(),
             reflection: true,
+        }
+    }
+}
+
+/// Session persistence and timeout configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionsConfig {
+    /// Idle timeout for Telegram sessions in seconds (default 300 = 5 min).
+    #[serde(default = "default_session_idle_timeout")]
+    pub idle_timeout_secs: u64,
+
+    /// Max active sessions (default 10).
+    #[serde(default = "default_max_active_sessions")]
+    pub max_active_sessions: usize,
+
+    /// Enable crash recovery on startup (default true).
+    #[serde(default = "default_true")]
+    pub crash_recovery: bool,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_secs: default_session_idle_timeout(),
+            max_active_sessions: default_max_active_sessions(),
+            crash_recovery: true,
         }
     }
 }
@@ -491,11 +582,23 @@ fn default_auto_promote_threshold() -> u32 {
 fn default_true() -> bool {
     true
 }
+fn default_session_idle_timeout() -> u64 {
+    300
+}
+fn default_max_active_sessions() -> usize {
+    10
+}
 fn default_proactive_interval_mins() -> u32 {
     30
 }
 fn default_proactive_budget() -> u64 {
     5000
+}
+fn default_update_frequency() -> String {
+    "milestone".to_owned()
+}
+fn default_commitment() -> String {
+    "negotiate_only".to_owned()
 }
 fn default_cdp_port() -> u16 {
     9222
@@ -505,6 +608,9 @@ fn default_standalone_fallback() -> bool {
 }
 fn default_browser_image() -> String {
     crate::executor::playwright::BROWSER_IMAGE.to_owned()
+}
+fn default_whatsapp_image() -> String {
+    "ghcr.io/pycckuu/wintermute-whatsapp:latest".to_owned()
 }
 
 /// Load the human-owned config from a TOML file.

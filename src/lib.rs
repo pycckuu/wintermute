@@ -16,7 +16,9 @@ pub mod memory;
 pub mod providers;
 
 pub mod agent;
+pub mod messaging;
 pub mod telegram;
+pub mod whatsapp;
 
 pub mod tools;
 

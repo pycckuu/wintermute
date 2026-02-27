@@ -109,7 +109,8 @@ pub fn check_policy(
         "web_request" => check_domain_policy(input, ctx, is_domain_trusted),
         "browser" => check_browser_policy(input, ctx, is_domain_trusted),
         "docker_manage" => check_docker_manage(input),
-        "memory_search" | "memory_save" | "send_telegram" | "create_tool" => PolicyDecision::Allow,
+        "memory_search" | "memory_save" | "send_message" | "create_tool" | "manage_brief"
+        | "read_messages" => PolicyDecision::Allow,
         // Dynamic tools execute inside the sandbox via the executor, so they are allowed.
         _ => PolicyDecision::Allow,
     }

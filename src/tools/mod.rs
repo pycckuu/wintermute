@@ -11,7 +11,10 @@ pub mod create_tool;
 pub mod docker;
 pub mod escalate;
 pub mod flatline;
+pub mod manage_brief;
+pub mod read_messages;
 pub mod registry;
+pub mod send_message;
 
 use std::sync::Arc;
 
@@ -24,9 +27,11 @@ use crate::agent::TelegramOutbound;
 use crate::executor::redactor::Redactor;
 use crate::executor::Executor;
 use crate::memory::MemoryEngine;
+use crate::messaging::outbound_composer::OutboundComposer;
 use crate::providers::router::ModelRouter;
 use crate::providers::ToolDefinition;
 use crate::tools::browser::BrowserBridge;
+use crate::whatsapp::client::WhatsAppClient;
 
 // ---------------------------------------------------------------------------
 // ToolResult
@@ -137,12 +142,18 @@ pub struct ToolRouter {
     model_router: Option<Arc<ModelRouter>>,
     /// Shared daily budget for escalation cost tracking.
     daily_budget: Option<Arc<DailyBudget>>,
+    /// Optional WhatsApp client for outbound messaging.
+    whatsapp_client: Option<Arc<WhatsAppClient>>,
+    /// Optional outbound composer for brief-scoped message generation.
+    outbound_composer: Option<Arc<OutboundComposer>>,
 }
 
 impl std::fmt::Debug for ToolRouter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRouter")
             .field("has_telegram_tx", &self.telegram_tx.is_some())
+            .field("has_whatsapp_client", &self.whatsapp_client.is_some())
+            .field("has_outbound_composer", &self.outbound_composer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -165,6 +176,8 @@ impl ToolRouter {
         flatline_root: Option<std::path::PathBuf>,
         model_router: Option<Arc<ModelRouter>>,
         daily_budget: Option<Arc<DailyBudget>>,
+        whatsapp_client: Option<Arc<WhatsAppClient>>,
+        outbound_composer: Option<Arc<OutboundComposer>>,
     ) -> Self {
         Self {
             executor,
@@ -181,6 +194,8 @@ impl ToolRouter {
             flatline_root,
             model_router,
             daily_budget,
+            whatsapp_client,
+            outbound_composer,
         }
     }
 
@@ -242,20 +257,40 @@ impl ToolRouter {
             ),
             "memory_search" => into_tool_result(core::memory_search(&self.memory, input).await),
             "memory_save" => into_tool_result(core::memory_save(&self.memory, input).await),
-            "send_telegram" => {
+            "send_message" => {
                 let resolved_user_id =
                     session_user_id.or_else(|| input.get("user_id").and_then(|v| v.as_i64()));
                 match (&self.telegram_tx, resolved_user_id) {
                     (Some(tx), Some(user_id)) => into_tool_result(
-                        core::send_telegram(tx, user_id, input, self.executor.workspace_dir())
-                            .await,
+                        send_message::send_message(
+                            tx,
+                            user_id,
+                            input,
+                            self.executor.workspace_dir(),
+                            self.whatsapp_client.as_ref(),
+                            self.outbound_composer.as_ref(),
+                            self.memory.pool(),
+                        )
+                        .await,
                     ),
                     (Some(_), None) => {
-                        ToolResult::error("send_telegram requires a session user context")
+                        ToolResult::error("send_message requires a session user context")
                     }
                     (None, _) => ToolResult::error("telegram not configured"),
                 }
             }
+            "manage_brief" => {
+                // Use authenticated session key from the caller context, not
+                // from the LLM-controlled input, to prevent cross-session
+                // brief manipulation.
+                let session_id = session_user_id
+                    .map(|uid| format!("user_{uid}"))
+                    .unwrap_or_else(|| "unknown".to_owned());
+                into_tool_result(
+                    manage_brief::manage_brief(self.memory.pool(), &session_id, input).await,
+                )
+            }
+            "read_messages" => into_tool_result(read_messages::read_messages(input).await),
             "create_tool" => into_tool_result(
                 core::handle_create_tool(&*self.executor, &self.registry, input).await,
             ),

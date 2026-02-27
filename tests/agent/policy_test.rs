@@ -112,8 +112,10 @@ fn policy_allows_safe_tools() {
     for tool in &[
         "memory_search",
         "memory_save",
-        "send_telegram",
+        "send_message",
         "create_tool",
+        "manage_brief",
+        "read_messages",
     ] {
         let result = check_policy(tool, &input, &ctx, &always_false);
         assert_eq!(result, PolicyDecision::Allow, "tool: {tool}");
