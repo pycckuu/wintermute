@@ -31,6 +31,7 @@ use crate::providers::{
 use crate::tools::ToolRouter;
 
 use super::approval::ApprovalManager;
+use super::session_manager::SessionManager;
 
 // ---------------------------------------------------------------------------
 // Session events
@@ -43,6 +44,15 @@ pub enum SessionEvent {
     UserMessage(String),
     /// An approval callback has been resolved.
     ApprovalResolved(ApprovalResult),
+    /// An incoming message from a WhatsApp contact via an active brief.
+    InboundMessage {
+        /// The brief ID that this message is associated with.
+        brief_id: String,
+        /// WhatsApp JID of the sender.
+        from: String,
+        /// Message text content.
+        text: String,
+    },
     /// Graceful shutdown signal.
     Shutdown,
 }
@@ -85,6 +95,8 @@ pub struct SessionConfig {
     pub agents_md_content: Option<String>,
     /// Loaded USER.md content (consolidated long-term memory).
     pub user_md_content: Option<String>,
+    /// Session persistence manager for checkpointing state.
+    pub session_manager: Arc<SessionManager>,
 }
 
 impl std::fmt::Debug for SessionConfig {
@@ -232,6 +244,8 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     &mut tools_modified,
                 )
                 .await;
+
+                checkpoint_session(&cfg).await;
             }
             SessionEvent::ApprovalResolved(result) => {
                 debug!(session_id = %cfg.session_id, "received approval resolution");
@@ -245,6 +259,73 @@ pub async fn run_session(cfg: SessionConfig, mut event_rx: mpsc::Receiver<Sessio
                     &mut tools_modified,
                 )
                 .await;
+
+                checkpoint_session(&cfg).await;
+            }
+            SessionEvent::InboundMessage {
+                brief_id,
+                from,
+                text,
+            } => {
+                last_turn_had_activity = true;
+                debug!(
+                    session_id = %cfg.session_id,
+                    %brief_id,
+                    %from,
+                    "received inbound WhatsApp message"
+                );
+
+                // Load the brief to validate it exists and is active
+                match crate::messaging::brief::load_brief(cfg.memory.pool(), &brief_id).await {
+                    Ok(brief) => {
+                        info!(
+                            brief_id = %brief.id,
+                            status = brief.status.as_str(),
+                            "inbound message matched brief"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(error = %e, %brief_id, "failed to load brief for inbound message");
+                    }
+                }
+
+                // Add an injected user message with inbound context
+                let injected =
+                    format!("[Inbound WhatsApp from {from} via brief {brief_id}]\n{text}");
+                conversation.push(Message {
+                    role: Role::User,
+                    content: MessageContent::Text(injected.clone()),
+                });
+
+                // Persist the inbound message to conversation log
+                let entry = ConversationEntry {
+                    session_id: cfg.session_id.clone(),
+                    role: "inbound".to_owned(),
+                    content: injected,
+                    tokens_used: None,
+                };
+                if let Err(e) = cfg.memory.save_conversation(entry).await {
+                    warn!(error = %e, "failed to save inbound conversation entry");
+                }
+
+                // Run the agent reasoning turn — the agent will decide how to respond.
+                // The agent may output [NO_REPLY] to indicate that no outbound
+                // message should be sent (e.g. for group messages, or when the
+                // brief is in a state where silence is appropriate). In that case
+                // the text flows through the normal send_text path to Telegram
+                // as an internal note, but no WhatsApp message is dispatched
+                // because the agent simply does not call the send_message tool.
+                run_agent_turn(
+                    &cfg,
+                    &mut conversation,
+                    &mut last_warned_percent,
+                    &mut compacted_this_session,
+                    &mut bootstrap_memories,
+                    &mut tools_modified,
+                )
+                .await;
+
+                checkpoint_session(&cfg).await;
             }
             SessionEvent::Shutdown => {
                 info!(session_id = %cfg.session_id, "session shutting down");
@@ -364,6 +445,26 @@ async fn run_agent_turn(
         );
         let core_tool_count = crate::tools::core::core_tool_definitions().len();
 
+        // Load active briefs for context injection
+        let active_briefs = match crate::messaging::brief::active_briefs_for_session(
+            cfg.memory.pool(),
+            &cfg.session_id,
+        )
+        .await
+        {
+            Ok(briefs) => {
+                if briefs.is_empty() {
+                    None
+                } else {
+                    Some(crate::messaging::brief::active_briefs_summary(&briefs))
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load active briefs");
+                None
+            }
+        };
+
         let system_prompt = assemble_system_prompt(
             &cfg.agent_config.personality.soul,
             cfg.identity_document.as_deref(),
@@ -374,6 +475,7 @@ async fn run_agent_turn(
             &memories,
             pending_approvals,
             &current_time,
+            active_briefs.as_deref(),
         );
 
         // Step 3: Resolve provider
@@ -687,6 +789,19 @@ async fn handle_approval_resolved(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Checkpoint the current session budget state to SQLite.
+async fn checkpoint_session(cfg: &SessionConfig) {
+    let total_used = cfg.budget.session_used();
+    let paused = cfg.budget.is_paused();
+    if let Err(e) = cfg
+        .session_manager
+        .checkpoint(&cfg.session_id, total_used, paused)
+        .await
+    {
+        warn!(error = %e, "session checkpoint failed");
+    }
+}
 
 /// Maximum combined memories (query results + bootstrap) to feed into context.
 const MAX_CONTEXT_MEMORIES: usize = 10;

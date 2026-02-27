@@ -12,6 +12,7 @@ use wintermute::agent::approval::ApprovalManager;
 use wintermute::agent::budget::{DailyBudget, SessionBudget};
 use wintermute::agent::policy::PolicyContext;
 use wintermute::agent::r#loop::{SessionConfig, SessionEvent};
+use wintermute::agent::session_manager::SessionManager;
 use wintermute::agent::TelegramOutbound;
 use wintermute::config::{
     AgentConfig, BudgetConfig, ChannelsConfig, Config, EgressConfig, HeartbeatConfig,
@@ -53,6 +54,7 @@ fn make_config() -> Config {
         egress: EgressConfig::default(),
         privacy: PrivacyConfig::default(),
         browser: wintermute::config::BrowserConfig::default(),
+        whatsapp: wintermute::config::WhatsAppConfig::default(),
     }
 }
 
@@ -65,6 +67,8 @@ fn make_agent_config() -> AgentConfig {
         },
         heartbeat: HeartbeatConfig::default(),
         learning: LearningConfig::default(),
+        sessions: wintermute::config::SessionsConfig::default(),
+        messaging: wintermute::config::MessagingConfig::default(),
         scheduled_tasks: vec![],
         services: vec![],
     }
@@ -90,6 +94,24 @@ async fn setup_memory_db(db: &sqlx::SqlitePool) {
             id INTEGER PRIMARY KEY, domain TEXT NOT NULL UNIQUE,
             approved_by TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
         )",
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY, user_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            channel TEXT NOT NULL DEFAULT 'telegram',
+            channel_context TEXT, budget_tokens_used INTEGER DEFAULT 0,
+            budget_paused BOOLEAN DEFAULT FALSE,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT, crash_reason TEXT
+        )",
+        "CREATE TABLE IF NOT EXISTS task_briefs (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, contact_id INTEGER,
+            objective TEXT NOT NULL, shareable_info TEXT NOT NULL, constraints TEXT NOT NULL,
+            escalation_triggers TEXT, commitment_level TEXT NOT NULL, tone TEXT,
+            status TEXT NOT NULL DEFAULT 'draft', outcome_summary TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT
+        )",
     ] {
         sqlx::query(sql)
             .execute(db)
@@ -112,6 +134,19 @@ fn session_event_user_message_can_be_constructed() {
 fn session_event_shutdown_can_be_constructed() {
     let event = SessionEvent::Shutdown;
     assert!(matches!(event, SessionEvent::Shutdown));
+}
+
+#[test]
+fn session_event_inbound_message_can_be_constructed() {
+    let event = SessionEvent::InboundMessage {
+        brief_id: "brief-001".to_owned(),
+        from: "1234567890@s.whatsapp.net".to_owned(),
+        text: "Hello from WhatsApp".to_owned(),
+    };
+    assert!(matches!(
+        event,
+        SessionEvent::InboundMessage { ref brief_id, .. } if brief_id == "brief-001"
+    ));
 }
 
 #[test]
@@ -228,8 +263,11 @@ async fn run_session_completes_on_shutdown() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "test-session".to_owned(),
         user_id: 12345,
@@ -246,6 +284,7 @@ async fn run_session_completes_on_shutdown() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     // Spawn the session task
@@ -327,8 +366,11 @@ async fn run_session_completes_on_channel_close() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "test-session-close".to_owned(),
         user_id: 12345,
@@ -345,6 +387,7 @@ async fn run_session_completes_on_channel_close() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -611,9 +654,12 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "overflow-retry-session".to_owned(),
         user_id: 12345,
@@ -630,6 +676,7 @@ async fn run_session_retries_on_context_overflow_and_succeeds() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -725,9 +772,12 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "overflow-fail-session".to_owned(),
         user_id: 12345,
@@ -744,6 +794,7 @@ async fn run_session_context_overflow_exhausts_retries_and_sends_error() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -845,9 +896,12 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "budget-gate-session".to_owned(),
         user_id: 12345,
@@ -864,6 +918,7 @@ async fn security_invariant_budget_check_happens_before_provider_call() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));
@@ -959,9 +1014,12 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(16);
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
     let cfg = SessionConfig {
         session_id: "browser-policy-loop-session".to_owned(),
         user_id: 12345,
@@ -978,6 +1036,7 @@ async fn run_session_applies_browser_policy_to_tool_use_integration() {
         identity_document: None,
         agents_md_content: None,
         user_md_content: None,
+        session_manager,
     };
 
     let handle = tokio::spawn(wintermute::agent::r#loop::run_session(cfg, event_rx));

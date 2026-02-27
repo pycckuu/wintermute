@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use wintermute::agent::approval::ApprovalManager;
 use wintermute::agent::budget::DailyBudget;
 use wintermute::agent::policy::{PolicyContext, RateLimiter};
+use wintermute::agent::session_manager::SessionManager;
 use wintermute::agent::{SessionRouter, TelegramOutbound};
 use wintermute::config::{
     load_default_agent_config, load_default_config, runtime_paths, RuntimePaths,
@@ -43,6 +44,8 @@ use wintermute::tools::ToolRouter;
 
 const BOOTSTRAP_MIGRATION: &str = "001_schema.sql";
 const MEMORY_MIGRATION: &str = "002_memory.sql";
+const SESSIONS_MIGRATION: &str = "003_sessions.sql";
+const BRIEFS_MIGRATION: &str = "004_briefs.sql";
 
 /// Wintermute — a self-coding AI agent.
 #[derive(Parser)]
@@ -207,6 +210,18 @@ async fn handle_start() -> anyhow::Result<()> {
         .await
         .context("failed to create sqlite pool for memory engine")?;
     apply_memory_migration(&pool).await?;
+    apply_migration(
+        &pool,
+        SESSIONS_MIGRATION,
+        include_str!("../migrations/003_sessions.sql"),
+    )
+    .await?;
+    apply_migration(
+        &pool,
+        BRIEFS_MIGRATION,
+        include_str!("../migrations/004_briefs.sql"),
+    )
+    .await?;
 
     let memory = Arc::new(
         MemoryEngine::new(pool, None)
@@ -296,6 +311,54 @@ async fn handle_start() -> anyhow::Result<()> {
     let agent_config_arc = Arc::new(agent_config);
     let router_arc = Arc::new(router);
 
+    // WhatsApp sidecar detection (optional, Phase 3)
+    if config_arc.whatsapp.enabled {
+        if let Some(ref docker) = docker_client {
+            match wintermute::whatsapp::setup::ensure_container(docker, &config_arc.whatsapp.image)
+                .await
+            {
+                Ok(()) => {
+                    let wa_client = wintermute::whatsapp::client::WhatsAppClient::default_url();
+                    if wa_client.health_check().await.unwrap_or(false) {
+                        info!("WhatsApp sidecar connected");
+                    } else {
+                        warn!("WhatsApp sidecar started but not yet connected — scan QR");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "WhatsApp sidecar failed to start");
+                }
+            }
+        } else {
+            warn!("WhatsApp enabled but Docker not available");
+        }
+    }
+
+    // Build WhatsApp client and outbound composer for the tool router.
+    let whatsapp_client_arc: Option<Arc<wintermute::whatsapp::client::WhatsAppClient>> =
+        if config_arc.whatsapp.enabled {
+            Some(Arc::new(
+                wintermute::whatsapp::client::WhatsAppClient::default_url(),
+            ))
+        } else {
+            None
+        };
+
+    let outbound_composer_arc: Option<
+        Arc<wintermute::messaging::outbound_composer::OutboundComposer>,
+    > = {
+        let outbound_redactor = wintermute::messaging::outbound_redactor::OutboundRedactor::new(
+            config_arc.privacy.private_terms.clone(),
+        );
+        Some(Arc::new(
+            wintermute::messaging::outbound_composer::OutboundComposer::new(
+                Arc::clone(&router_arc),
+                Arc::clone(&daily_budget),
+                outbound_redactor,
+            ),
+        ))
+    };
+
     let tool_router = Arc::new(ToolRouter::new(
         Arc::clone(&executor),
         redactor,
@@ -311,6 +374,8 @@ async fn handle_start() -> anyhow::Result<()> {
         flatline_root,
         Some(Arc::clone(&router_arc)),
         Some(Arc::clone(&daily_budget)),
+        whatsapp_client_arc,
+        outbound_composer_arc,
     ));
 
     // Phase 3: Observer channel + background task
@@ -332,6 +397,24 @@ async fn handle_start() -> anyhow::Result<()> {
         None
     };
 
+    // Session persistence: create manager and recover crashed sessions.
+    let session_manager = Arc::new(SessionManager::new(memory.pool().clone()));
+    if agent_config_arc.sessions.crash_recovery {
+        if let Err(e) = session_manager.mark_crashed_sessions().await {
+            warn!(error = %e, "failed to mark crashed sessions");
+        }
+        match session_manager.recover_sessions().await {
+            Ok(recovered) if !recovered.is_empty() => {
+                info!(count = recovered.len(), "recovered sessions from crash");
+                // Session re-spawn will come in a later phase; for now just log.
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "failed to recover sessions");
+            }
+        }
+    }
+
     let session_router = Arc::new(SessionRouter::new(
         Arc::clone(&router_arc),
         Arc::clone(&tool_router),
@@ -344,7 +427,124 @@ async fn handle_start() -> anyhow::Result<()> {
         Arc::clone(&agent_config_arc),
         observer_tx,
         paths.clone(),
+        Arc::clone(&session_manager),
     ));
+
+    // Phase 4: WhatsApp event listener for autonomous inbound message routing.
+    if config_arc.whatsapp.enabled {
+        let wa_base_url = format!(
+            "http://127.0.0.1:{}",
+            wintermute::whatsapp::client::DEFAULT_BRIDGE_PORT
+        );
+        let (wa_event_tx, mut wa_event_rx) =
+            mpsc::channel::<wintermute::whatsapp::events::WhatsAppEvent>(128);
+        wintermute::whatsapp::events::spawn_event_listener(wa_base_url, wa_event_tx);
+
+        let wa_session_router = Arc::clone(&session_router);
+        let wa_memory_pool = memory.pool().clone();
+        let wa_telegram_tx = telegram_tx.clone();
+        let wa_notify_user_id = config_arc
+            .channels
+            .telegram
+            .allowed_users
+            .first()
+            .copied()
+            .unwrap_or(0);
+
+        tokio::spawn(async move {
+            while let Some(event) = wa_event_rx.recv().await {
+                match event {
+                    wintermute::whatsapp::events::WhatsAppEvent::Message {
+                        jid,
+                        text,
+                        from_me,
+                        ..
+                    } => {
+                        // Skip messages sent by the agent itself
+                        if from_me {
+                            continue;
+                        }
+
+                        match wintermute::whatsapp::router::route_incoming(&wa_memory_pool, &jid)
+                            .await
+                        {
+                            Ok(wintermute::whatsapp::router::RouteResult::Routed {
+                                brief_id,
+                                session_id,
+                            }) => {
+                                // Audit-log the inbound message for compliance.
+                                if let Err(e) = wintermute::messaging::audit::log_outbound(
+                                    &wa_memory_pool,
+                                    Some(&brief_id),
+                                    &session_id,
+                                    "whatsapp",
+                                    &jid,
+                                    &text,
+                                    "inbound",
+                                    None,
+                                    false,
+                                )
+                                .await
+                                {
+                                    warn!(error = %e, "failed to audit-log inbound WhatsApp message");
+                                }
+
+                                if let Err(e) = wa_session_router
+                                    .route_inbound(
+                                        brief_id.clone(),
+                                        session_id.clone(),
+                                        jid.clone(),
+                                        text,
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        error = %e,
+                                        %brief_id,
+                                        %session_id,
+                                        "failed to route inbound WhatsApp message"
+                                    );
+                                }
+                            }
+                            Ok(wintermute::whatsapp::router::RouteResult::Unhandled {
+                                jid: unhandled_jid,
+                            }) => {
+                                info!(jid = %unhandled_jid, "unhandled WhatsApp message (no active brief)");
+                                // Forward to user via Telegram for awareness
+                                let preview = if text.len() > 200 {
+                                    // Use char-boundary-safe truncation to avoid
+                                    // panicking on multi-byte UTF-8 (e.g. emoji).
+                                    let end = text.floor_char_boundary(200);
+                                    format!("{}...", &text[..end])
+                                } else {
+                                    text
+                                };
+                                let notify = wintermute::agent::TelegramOutbound {
+                                    user_id: wa_notify_user_id,
+                                    text: Some(format!(
+                                        "[WhatsApp] Unhandled message from {unhandled_jid}: {preview}"
+                                    )),
+                                    file_path: None,
+                                    approval_keyboard: None,
+                                };
+                                let _ = wa_telegram_tx.send(notify).await;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, %jid, "WhatsApp message routing failed");
+                            }
+                        }
+                    }
+                    wintermute::whatsapp::events::WhatsAppEvent::Connected => {
+                        info!("WhatsApp connected");
+                    }
+                    wintermute::whatsapp::events::WhatsAppEvent::Disconnected { reason } => {
+                        warn!(reason = ?reason, "WhatsApp disconnected");
+                    }
+                }
+            }
+        });
+        info!("WhatsApp event listener spawned");
+    }
 
     // Phase 3: Heartbeat background task with graceful shutdown via Ctrl+C.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -698,6 +898,50 @@ async fn apply_bootstrap_migration(paths: &RuntimePaths) -> anyhow::Result<()> {
             .context("failed to persist memory migration marker")?;
     }
 
+    // Apply sessions migration (003) if not yet applied.
+    let applied_003: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM migrations WHERE name = ?1")
+            .bind(SESSIONS_MIGRATION)
+            .fetch_optional(&mut connection)
+            .await
+            .context("failed to check sessions migration")?;
+
+    if applied_003.is_none() {
+        let sessions_script = include_str!("../migrations/003_sessions.sql");
+        sqlx::raw_sql(sessions_script)
+            .execute(&mut connection)
+            .await
+            .context("failed to apply sessions migration")?;
+
+        sqlx::query("INSERT OR IGNORE INTO migrations(name) VALUES (?1)")
+            .bind(SESSIONS_MIGRATION)
+            .execute(&mut connection)
+            .await
+            .context("failed to persist sessions migration marker")?;
+    }
+
+    // Apply briefs migration (004) if not yet applied.
+    let applied_004: Option<(String,)> =
+        sqlx::query_as("SELECT name FROM migrations WHERE name = ?1")
+            .bind(BRIEFS_MIGRATION)
+            .fetch_optional(&mut connection)
+            .await
+            .context("failed to check briefs migration")?;
+
+    if applied_004.is_none() {
+        let briefs_script = include_str!("../migrations/004_briefs.sql");
+        sqlx::raw_sql(briefs_script)
+            .execute(&mut connection)
+            .await
+            .context("failed to apply briefs migration")?;
+
+        sqlx::query("INSERT OR IGNORE INTO migrations(name) VALUES (?1)")
+            .bind(BRIEFS_MIGRATION)
+            .execute(&mut connection)
+            .await
+            .context("failed to persist briefs migration marker")?;
+    }
+
     Ok(())
 }
 
@@ -723,6 +967,27 @@ async fn apply_memory_migration(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
             .context("failed to persist memory migration marker")?;
     }
 
+    Ok(())
+}
+
+/// Apply a named migration if it has not already been applied.
+async fn apply_migration(pool: &sqlx::SqlitePool, name: &str, script: &str) -> anyhow::Result<()> {
+    let applied: Option<(String,)> = sqlx::query_as("SELECT name FROM migrations WHERE name = ?1")
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .context("failed to check migration")?;
+    if applied.is_none() {
+        sqlx::raw_sql(script)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to apply migration {name}"))?;
+        sqlx::query("INSERT OR IGNORE INTO migrations(name) VALUES (?1)")
+            .bind(name)
+            .execute(pool)
+            .await
+            .with_context(|| format!("failed to persist migration marker {name}"))?;
+    }
     Ok(())
 }
 

@@ -131,10 +131,23 @@ async fn maybe_run_proactive_check(
         .format("%Y-%m-%d %H:%M:%S UTC")
         .to_string();
     let session_count = deps.session_router.session_count().await;
-    let context_summary = format!(
+    let mut context_summary = format!(
         "Current time: {now_str}\nUptime: {:?}\nActive sessions: {session_count}",
         start_time.elapsed(),
     );
+
+    // Append active brief context for proactive awareness (e.g. stale brief detection)
+    match crate::messaging::brief::all_active_briefs(deps.memory.pool()).await {
+        Ok(briefs) if !briefs.is_empty() => {
+            let brief_summary = crate::messaging::brief::active_briefs_summary(&briefs);
+            context_summary.push('\n');
+            context_summary.push_str(&brief_summary);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            warn!(error = %e, "failed to load active briefs for proactive check");
+        }
+    }
 
     match proactive::run_proactive_check(
         &deps.router,

@@ -5,16 +5,13 @@
 //! Tool definitions (name, description, JSON Schema) are returned by
 //! [`core_tool_definitions`].
 
-use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 use url::Url;
 
 use crate::agent::policy::{ssrf_check, RateLimiter};
-use crate::agent::TelegramOutbound;
 use crate::executor::{ExecOptions, Executor};
 use crate::memory::{Memory, MemoryEngine, MemoryKind, MemorySource, MemoryStatus};
 use crate::providers::ToolDefinition;
@@ -482,76 +479,6 @@ pub async fn memory_save(
 }
 
 // ---------------------------------------------------------------------------
-// send_telegram
-// ---------------------------------------------------------------------------
-
-/// Send a message to the user via Telegram.
-///
-/// Container paths starting with `/workspace/` are automatically resolved to
-/// the host-side workspace directory so that files created inside Docker
-/// (e.g. browser screenshots) can be sent as attachments.
-///
-/// # Errors
-///
-/// Returns [`ToolError::InvalidInput`] if `text` is missing or the file path
-/// is outside the workspace, or [`ToolError::ExecutionFailed`] if sending fails.
-pub async fn send_telegram(
-    tx: &mpsc::Sender<TelegramOutbound>,
-    user_id: i64,
-    input: &serde_json::Value,
-    workspace_dir: &Path,
-) -> Result<String, ToolError> {
-    let text = input
-        .get("text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError::InvalidInput("missing required field: text".to_owned()))?;
-
-    let file = input.get("file").and_then(|v| v.as_str());
-
-    // Map container paths (/workspace/...) to host paths. Reject paths that
-    // don't use the /workspace/ prefix to prevent host filesystem probing.
-    let resolved_file = if let Some(f) = file {
-        let relative = f.strip_prefix("/workspace/").ok_or_else(|| {
-            ToolError::InvalidInput("file path must start with /workspace/".to_owned())
-        })?;
-        Some(workspace_dir.join(relative).to_string_lossy().into_owned())
-    } else {
-        None
-    };
-
-    // Validate the file exists and is within the workspace directory.
-    // Both paths are canonicalized to prevent symlink-based escapes.
-    if let Some(ref path) = resolved_file {
-        let canonical = Path::new(path)
-            .canonicalize()
-            .map_err(|e| ToolError::InvalidInput(format!("file not accessible: {e}")))?;
-        let canonical_workspace = workspace_dir
-            .canonicalize()
-            .map_err(|e| ToolError::ExecutionFailed(format!("workspace not accessible: {e}")))?;
-        if !canonical.starts_with(&canonical_workspace) {
-            return Err(ToolError::InvalidInput(
-                "file path must be within the workspace directory".to_owned(),
-            ));
-        }
-    }
-
-    let outbound = TelegramOutbound {
-        user_id,
-        text: Some(text.to_owned()),
-        file_path: resolved_file,
-        approval_keyboard: None,
-    };
-
-    // Use try_send to avoid blocking the async task.
-    tx.try_send(outbound).map_err(|e| {
-        warn!(error = %e, "telegram send failed");
-        ToolError::ExecutionFailed(format!("failed to send telegram message: {e}"))
-    })?;
-
-    Ok("Message sent to Telegram".to_owned())
-}
-
-// ---------------------------------------------------------------------------
 // create_tool (dispatches to create_tool module)
 // ---------------------------------------------------------------------------
 
@@ -612,7 +539,7 @@ pub async fn handle_create_tool(
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-/// Return definitions for all 8 core tools.
+/// Return definitions for all core tools.
 pub fn core_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -722,21 +649,113 @@ pub fn core_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "send_telegram".to_owned(),
-            description: "Send a message or file to the user via Telegram.".to_owned(),
+            name: "send_message".to_owned(),
+            description: "Send a message. Telegram to user: direct. WhatsApp to contact: requires active brief, composed in restricted context.".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["telegram", "whatsapp"],
+                        "default": "telegram",
+                        "description": "Message channel."
+                    },
+                    "to": {
+                        "type": "string",
+                        "default": "user",
+                        "description": "Recipient identifier."
+                    },
                     "text": {
                         "type": "string",
-                        "description": "The message text to send (HTML formatted)."
+                        "description": "For Telegram: direct text. For WhatsApp: your INTENT (outbound composer writes actual message)."
+                    },
+                    "brief_id": {
+                        "type": "string",
+                        "description": "Required for WhatsApp messages."
                     },
                     "file": {
                         "type": "string",
-                        "description": "Optional file path to send as attachment. Container paths (/workspace/...) are resolved automatically."
+                        "description": "Optional file path from /workspace."
                     }
                 },
                 "required": ["text"]
+            }),
+        },
+        ToolDefinition {
+            name: "manage_brief".to_owned(),
+            description: "Create, update, or manage a task brief for outbound messaging.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "escalate", "propose", "complete", "cancel"],
+                        "description": "Action to perform on the brief."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID (auto-filled by agent)."
+                    },
+                    "brief_id": {
+                        "type": "string",
+                        "description": "Brief ID (required for update/escalate/propose/complete/cancel)."
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "What the agent should accomplish (required for create)."
+                    },
+                    "shareable_info": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Information approved for sharing."
+                    },
+                    "constraints": {
+                        "type": "array",
+                        "description": "Negotiation constraints."
+                    },
+                    "commitment_level": {
+                        "type": "string",
+                        "enum": ["can_commit", "negotiate_only", "information_only"],
+                        "description": "How much authority the agent has."
+                    },
+                    "escalation_triggers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Conditions that should trigger escalation."
+                    },
+                    "tone": {
+                        "type": "string",
+                        "description": "Tone guidance for the conversation."
+                    },
+                    "outcome_summary": {
+                        "type": "string",
+                        "description": "Summary of outcome (for complete/cancel)."
+                    },
+                    "escalation_reason": {
+                        "type": "string",
+                        "description": "Reason for escalation."
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolDefinition {
+            name: "read_messages".to_owned(),
+            description: "Read recent messages from a WhatsApp contact. Requires WhatsApp setup.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "contact": {
+                        "type": "string",
+                        "description": "Contact name or identifier to read messages from."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of messages to return (default 20).",
+                        "default": 20
+                    }
+                },
+                "required": ["contact"]
             }),
         },
         ToolDefinition {

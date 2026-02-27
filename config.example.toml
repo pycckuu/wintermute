@@ -43,3 +43,7 @@ cdp_port = 9222                    # Chrome DevTools Protocol port
 auto_submit = false                # never auto-submit forms (safety default)
 standalone_fallback = true         # start Docker sidecar if no CDP available
 image = "ghcr.io/pycckuu/wintermute-browser:latest"  # sidecar image
+
+[whatsapp]
+enabled = false                    # enable WhatsApp integration
+image = "ghcr.io/pycckuu/wintermute-whatsapp:latest"  # sidecar image

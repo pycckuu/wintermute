@@ -98,6 +98,8 @@ async fn build_router(executor: Arc<dyn Executor>, redactor: Redactor) -> ToolRo
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -304,6 +306,8 @@ async fn browser_output_is_redacted_when_bridge_is_configured() {
         None,
         None,
         None,
+        None,
+        None,
     );
 
     let input = json!({"action": "screenshot"});
@@ -354,12 +358,14 @@ async fn tool_definitions_returns_core_plus_dynamic() {
         None,
         None,
         None,
+        None,
+        None,
     );
 
     let defs = router.tool_definitions(10, None);
 
-    // Browser is hidden without a configured bridge: 7 visible core + 1 dynamic.
-    assert_eq!(defs.len(), 8, "should have 7 core + 1 dynamic tool");
+    // Browser is hidden without a configured bridge: 9 visible core + 1 dynamic.
+    assert_eq!(defs.len(), 10, "should have 9 core + 1 dynamic tool");
 
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
@@ -419,14 +425,16 @@ async fn tool_definitions_respects_max_dynamic_limit() {
         None,
         None,
         None,
+        None,
+        None,
     );
 
-    // max_dynamic = 1, so total should be 7 visible core + 1 dynamic = 8.
+    // max_dynamic = 1, so total should be 9 visible core + 1 dynamic = 10.
     let defs = router.tool_definitions(1, None);
     assert_eq!(
         defs.len(),
-        8,
-        "should have 7 core + at most 1 dynamic, got {}",
+        10,
+        "should have 9 core + at most 1 dynamic, got {}",
         defs.len()
     );
 }
@@ -479,10 +487,12 @@ async fn tool_definitions_with_query_prefers_relevant_dynamic_tool() {
         None,
         None,
         None,
+        None,
+        None,
     );
 
     let defs = router.tool_definitions(1, Some("weather forecast"));
-    assert_eq!(defs.len(), 8, "should have 7 core + 1 dynamic");
+    assert_eq!(defs.len(), 10, "should have 9 core + 1 dynamic");
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"weather_tool"));
     assert!(!names.contains(&"db_tool"));
@@ -508,6 +518,8 @@ async fn tool_definitions_include_browser_when_bridge_is_configured() {
         request_limiter,
         browser_limiter,
         Some(Arc::new(SecretBrowserBridge)),
+        None,
+        None,
         None,
         None,
         None,
