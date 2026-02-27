@@ -13,7 +13,8 @@ use wintermute::agent::SessionRouter;
 use wintermute::agent::TelegramOutbound;
 use wintermute::config::{
     AgentConfig, BudgetConfig, ChannelsConfig, Config, EgressConfig, HeartbeatConfig,
-    LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig, SandboxConfig, TelegramConfig,
+    LearningConfig, ModelsConfig, PersonalityConfig, PrivacyConfig, SandboxConfig,
+    SoulModificationMode, TelegramConfig,
 };
 use wintermute::executor::ExecutorKind;
 use wintermute::memory::MemoryEngine;
@@ -53,6 +54,7 @@ fn make_agent_config() -> AgentConfig {
     AgentConfig {
         personality: PersonalityConfig {
             name: "TestBot".to_owned(),
+            soul_modification: SoulModificationMode::default(),
             soul: "You are a test assistant.".to_owned(),
         },
         heartbeat: HeartbeatConfig::default(),
@@ -180,6 +182,8 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         None,
         None,
         None,
+        None,
+        None,
     ));
 
     let daily_budget = Arc::new(DailyBudget::new(1_000_000));
@@ -202,6 +206,8 @@ async fn build_session_router() -> (SessionRouter, mpsc::Receiver<TelegramOutbou
         identity_md: tmp_dir.path().join("IDENTITY.md"),
         user_md: tmp_dir.path().join("USER.md"),
         flatline_root: tmp_dir.path().join("flatline"),
+        agents_md: tmp_dir.path().join("AGENTS.md"),
+        docs_dir: tmp_dir.path().join("docs"),
     };
 
     let session_router = SessionRouter::new(

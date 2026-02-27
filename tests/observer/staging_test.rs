@@ -197,6 +197,7 @@ fn auto_config(threshold: u32) -> LearningConfig {
         enabled: true,
         promotion_mode: PromotionMode::Auto,
         auto_promote_threshold: threshold,
+        reflection: true,
     }
 }
 
@@ -277,6 +278,7 @@ async fn promotion_mode_off_is_noop() {
         enabled: true,
         promotion_mode: PromotionMode::Off,
         auto_promote_threshold: 1,
+        reflection: true,
     };
 
     let result = check_promotions(&engine, &off_config, &tx, 12345)

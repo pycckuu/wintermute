@@ -61,15 +61,22 @@ impl MessageContent {
     pub fn text(&self) -> String {
         match self {
             Self::Text(t) => t.clone(),
-            Self::Parts(parts) => parts
-                .iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect(),
+            Self::Parts(parts) => extract_text(parts),
         }
     }
+}
+
+/// Extract and concatenate all text from a slice of content parts.
+///
+/// Non-text parts (tool use, tool result) are silently skipped.
+pub fn extract_text(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A single structured content part.

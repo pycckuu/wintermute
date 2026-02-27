@@ -1,13 +1,8 @@
-FROM python:3.12-slim
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git jq bc coreutils \
+    python3 python3-pip python3-venv \
+    curl wget git jq bc coreutils ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash wintermute
-USER wintermute
 WORKDIR /workspace
-
-# Agent installs packages at runtime via pip install --user
-# Persists in ~/.local until container reset
-# requirements.txt auto-installed on container creation

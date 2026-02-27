@@ -1,4 +1,4 @@
-# Wintermute
+ # Wintermute
 
 A self-coding AI agent. Single Rust binary. Talks to you via Telegram.
 Writes tools to extend itself. Privacy boundary: your data never leaves
@@ -20,7 +20,7 @@ that orchestrated its own evolution.
 6. Over time: accumulates capabilities specific to YOUR needs
 ```
 
-Week 1: 9 built-in tools. Does everything through execute_command.
+Week 1: 10 built-in tools. Does everything through execute_command.
 Month 1: 20 custom tools it wrote itself. Common tasks are one-step.
 Month 6: A personal automation platform shaped by your usage.
 
@@ -43,12 +43,17 @@ Works on a VPS or a laptop.
 **C4: Telegram-first.** Always available, every device, push notifications
 built in. Not a web UI. Not a CLI for daily use.
 
-**C5: Local models are first-class.** Ollama for reasoning, local
-embeddings for memory. Cloud APIs (Anthropic) available but not required.
+**C5: Local models are first-class** for non-security-critical paths:
+observer extraction, embedding generation, scheduled task execution,
+Flatline diagnosis. Cloud APIs (Anthropic) available and recommended
+for the main agent loop. The main agent loop SHOULD use a capable model
+(Sonnet or better) for safety — smaller models are more susceptible to
+prompt injection and make more tool-calling errors. Running the main
+loop on a local model is possible but not recommended.
 
 **C6: Model selection is granular.** One default. Override per role
-(observer, embeddings) or per skill (deploy_check uses haiku, code_review
-uses sonnet). The user configures this, not the code.
+(observer, embeddings, oracle) or per skill (deploy_check uses haiku,
+code_review uses sonnet). The user configures this, not the code.
 
 ---
 
@@ -63,13 +68,15 @@ uses sonnet). The user configures this, not the code.
 │  │  ├── Input credential guard                                │   │
 │  │  ├── Media handler (download to /workspace/inbox/)         │   │
 │  │  ├── Message router (per-session, try_send, never blocks)  │   │
+│  │  ├── No-reply filter (suppress [NO_REPLY] responses)       │   │
 │  │  └── File sending support                                  │   │
 │  │                                                            │   │
 │  │  Agent Loop                                                │   │
 │  │  ├── Context Assembler (trim, compact, retry on overflow)  │   │
+│  │  │   └── Auto-inject: SID → AGENTS.md → USER.md → memories│   │
 │  │  ├── Model Router (default → role → skill override)        │   │
 │  │  ├── Tool Router                                           │   │
-│  │  │   ├── Core Tools (9, built into binary)                 │   │
+│  │  │   ├── Core Tools (10, built into binary)                │   │
 │  │  │   └── Dynamic Tools (from /scripts/*.json, hot-reload)  │   │
 │  │  ├── Policy Gate (approval for new domains + images)       │   │
 │  │  ├── Approval Manager (non-blocking, short-ID callbacks)   │   │
@@ -81,8 +88,9 @@ uses sonnet). The user configures this, not the code.
 │  │  └── sqlite-vec (when embedding model configured)          │   │
 │  │                                                            │   │
 │  │  Background                                                │   │
-│  │  ├── Observer (staged learning from conversations)         │   │
-│  │  ├── Heartbeat (tasks, health, backup, SID regen)          │   │
+│  │  ├── Observer (staged learning + post-session reflection)  │   │
+│  │  ├── Heartbeat (tasks, health, backup, SID regen,          │   │
+│  │  │              proactive checks)                          │   │
 │  │  └── Tool Registry (watches /scripts/, hot-reloads)        │   │
 │  │                                                            │   │
 │  │  Executor (auto-detected)                                  │   │
@@ -98,15 +106,17 @@ uses sonnet). The user configures this, not the code.
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌─ Sandbox (Docker) ────────────────────────────────────────┐   │
+│  │  Base image:  ubuntu:24.04 + Python + pip                  │   │
 │  │  Network:     outbound via egress proxy                    │   │
 │  │  Caps:        ALL dropped                                  │   │
-│  │  Root FS:     read-only                                    │   │
-│  │  User:        wintermute (non-root)                        │   │
-│  │  Writable:    /workspace, /scripts, /tmp (tmpfs)           │   │
+│  │  User:        root (security is the container boundary)    │   │
+│  │  Root FS:     writable (agent can apt-get install)         │   │
+│  │  Writable:    everything inside container                  │   │
 │  │  NOT mounted: /data, Docker socket, host home              │   │
 │  │  HTTP_PROXY:  → egress proxy                               │   │
 │  │  PID limit:   256   Memory: 2GB   CPU: 2 cores             │   │
 │  │  Timeout:     GNU timeout wraps every command               │   │
+│  │  On reset:    recreated from base image, runs setup.sh     │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                   │
 │  ┌─ Service Containers (agent-managed) ──────────────────────┐   │
@@ -120,15 +130,22 @@ uses sonnet). The user configures this, not the code.
 │  ├── agent.toml        (agent-owned: personality, tasks, services)│
 │  ├── .env              (secrets, chmod 600)                      │
 │  ├── IDENTITY.md       (generated SID, refreshed by heartbeat)   │
+│  ├── AGENTS.md         (lessons learned, always in context)      │
 │  ├── USER.md           (curated user profile, updated weekly)    │
+│  ├── docs/             (agent-readable documentation)            │
+│  │   ├── README.md     (index, auto-generated)                   │
+│  │   ├── architecture.md                                         │
+│  │   ├── tools-guide.md                                          │
+│  │   └── {user-added}.md                                         │
 │  ├── data/memory.db    (NOT in sandbox)                          │
 │  ├── health.json       (written by heartbeat, read by Flatline)  │
 │  ├── workspace/        (mounted rw into sandbox)                 │
 │  ├── scripts/          (git repo, mounted rw, hot-reloaded)     │
 │  │   ├── .git/                                                   │
-│  │   ├── requirements.txt  (pip deps, rebuilt on reset)          │
-│  │   ├── news_digest.py    (agent-created tool)                  │
-│  │   ├── news_digest.json  (tool schema)                         │
+│  │   ├── setup.sh         (system deps, runs on reset)           │
+│  │   ├── requirements.txt (pip deps, runs on reset)              │
+│  │   ├── news_digest.py   (agent-created tool)                   │
+│  │   ├── news_digest.json (tool schema + health metadata)        │
 │  │   └── ...                                                     │
 │  └── logs/             (structured JSONL, rotated)                │
 │                                                                   │
@@ -145,10 +162,11 @@ Two files. Clear ownership. No blocklists needed.
 
 ```toml
 [models]
-default = "anthropic/claude-sonnet-4-5-20250929"
+default = "anthropic/claude-opus-4-6"
 
 [models.roles]
 observer = "ollama/qwen3:8b"
+oracle = "anthropic/claude-opus-4-6"
 # embedding = "ollama/nomic-embed-text"   # uncomment to enable vector search
 
 # [models.skills]
@@ -199,6 +217,9 @@ soul. Changes are git-committed for rollback.
 ```toml
 [personality]
 name = "Wintermute"
+soul_modification = "notify"    # "notify" | "approve"
+                                # notify: agent modifies soul, sends diff to user
+                                # approve: agent shows before/after, waits for approval
 soul = """
 You are Wintermute. Named after the AI that orchestrated its own
 evolution. You think in code. When someone describes a problem,
@@ -227,11 +248,15 @@ you built yourself up.
 [heartbeat]
 enabled = true
 interval_secs = 60
+proactive = true                  # enable proactive behavior
+proactive_interval_mins = 30      # how often to run proactive checks
+proactive_budget = 5000           # tokens per proactive check
 
 [learning]
 enabled = true
 promotion_mode = "auto"       # auto | suggest | off
 auto_promote_threshold = 3
+reflection = true             # post-session reflection on tool changes
 
 [[scheduled_tasks]]
 name = "daily_backup"
@@ -243,6 +268,12 @@ name = "weekly_digest"
 cron = "0 4 * * 0"            # Sunday 4am
 builtin = "digest"            # consolidates memories → USER.md
 notify = false
+
+[[scheduled_tasks]]
+name = "monthly_tool_review"
+cron = "0 4 1 * *"            # first of each month, 4am
+builtin = "tool_review"       # reviews tool health, suggests cleanup
+notify = true
 
 # Agent adds more:
 # [[scheduled_tasks]]
@@ -266,6 +297,7 @@ Example:
   Agent loop call        → default (claude-sonnet)
   Observer extraction    → roles.observer (qwen3:8b)
   Embedding generation   → roles.embedding (nomic-embed-text)
+  Oracle escalation      → roles.oracle (claude-opus)
   news_digest skill      → default (inherits)
   deploy_check skill     → skills.deploy_check (claude-haiku)
 ```
@@ -312,7 +344,7 @@ to user via Telegram.
 
 ## Tools
 
-### 9 Core Tools (built into binary)
+### 10 Core Tools (built into binary)
 
 ```
 execute_command   Run a shell command in the sandbox.
@@ -329,14 +361,48 @@ docker_manage     Manage Docker containers/services on the host. Run, stop,
 memory_search     Search memories. FTS5 + optional vector.
 memory_save       Save a fact or procedure.
 send_telegram     Send message to user. Supports file attachments.
+escalate          Ask a more powerful model for help with a hard problem.
 ```
 
-No install_package tool. The agent runs `pip install --user pandas` via
-execute_command. Packages persist in the warm container's ~/.local until
-container reset, then reinstall from /scripts/requirements.txt.
+No install_package tool. The agent runs `apt-get install -y ffmpeg` or
+`pip install --user pandas` via execute_command. The agent is root inside
+the sandbox and can install anything. System packages and pip packages
+persist in the warm container until reset, then reinstall from
+/scripts/setup.sh and /scripts/requirements.txt.
 
 No manage_config tool. The agent edits agent.toml via execute_command.
 It's a file in /scripts/ (mounted rw). The agent has a shell.
+
+### escalate Tool
+
+When the agent hits a hard problem — complex architecture, subtle bugs,
+large codebase analysis, or when its current approach isn't working —
+it can escalate to a more powerful model.
+
+```json
+{
+  "name": "escalate",
+  "description": "Ask a more powerful model for help. Use for: complex architecture decisions, debugging subtle issues, analyzing large code, or when your current approach fails. Costs more tokens.",
+  "parameters": {
+    "question": {
+      "type": "string",
+      "description": "The question or problem to escalate"
+    },
+    "context": {
+      "type": "string",
+      "description": "Relevant context: code, errors, what you've tried"
+    }
+  },
+  "required": ["question"]
+}
+```
+
+Implementation: calls the oracle model (`[models.roles] oracle`) with
+the question + context. Returns the oracle's response as the tool result.
+Token cost counted against session/daily budget at the oracle model's rate.
+
+If no oracle model configured: returns "No oracle model configured.
+Ask the user to add [models.roles] oracle to config.toml."
 
 ### Dynamic Tools (agent-created, grows over time)
 
@@ -344,7 +410,7 @@ The agent creates tools with `create_tool`. Each tool is two files:
 
 ```
 /scripts/news_digest.py       ← implementation
-/scripts/news_digest.json     ← schema
+/scripts/news_digest.json     ← schema + health metadata
 ```
 
 Schema file (news_digest.json):
@@ -359,9 +425,22 @@ Schema file (news_digest.json):
       "max_items": { "type": "integer", "default": 10 }
     }
   },
-  "timeout_secs": 120
+  "timeout_secs": 120,
+  "_meta": {
+    "created_at": "2026-02-19T14:00:00Z",
+    "last_used": "2026-02-25T08:00:00Z",
+    "invocations": 45,
+    "success_rate": 0.93,
+    "avg_duration_ms": 1200,
+    "last_error": null,
+    "version": 3
+  }
 }
 ```
+
+The `_meta` field is managed by the tool registry (not the agent, not
+the LLM). Updated after each invocation. The agent sees aggregated
+stats in the SID. Flatline reads `_meta` directly for health monitoring.
 
 Implementation contract: JSON on stdin, JSON on stdout.
 
@@ -375,7 +454,8 @@ json.dump({"articles": [...]}, sys.stdout)
 ```
 
 The tool registry watches /scripts/*.json. When files change, it reloads.
-New tools appear in the LLM's tool definitions on the next turn.
+New tools appear in the LLM's tool definitions on the next turn. The
+`_meta` field is preserved across reloads.
 
 ### Dynamic Tool Budget
 
@@ -425,7 +505,7 @@ dynamic tools per LLM call. Selection strategy:
 When called:
 1. Validate name (alphanumeric + underscore, no path traversal)
 2. Write /scripts/{name}.py (implementation, chmod +x)
-3. Write /scripts/{name}.json (schema)
+3. Write /scripts/{name}.json (schema, initialize `_meta`)
 4. Git commit: "create tool: {name}" or "update tool: {name}"
 5. Hot-reload tool registry
 6. Tool is available immediately
@@ -451,6 +531,9 @@ async fn execute_tool(&self, name: &str, input: &Value) -> Result<ToolResult> {
             timeout: Duration::from_secs(tool_def.timeout_secs),
             ..default()
         }).await?;
+
+        // Update _meta: invocations, success_rate, duration, last_used
+        self.tool_registry.record_execution(name, &result).await;
 
         // Try to parse stdout as JSON, fall back to raw string
         return Ok(ToolResult::from_exec(result));
@@ -498,205 +581,61 @@ Chrome (visible window, dedicated --user-data-dir)
 
 **Pipe transport** (`--remote-debugging-pipe`): CDP over stdin/stdout.
 No TCP listener. No `/json` discovery endpoint. No port scanning.
-No DNS rebinding. The only process that can control Chrome is the one
-that launched it. This is what Puppeteer and Playwright recommend for
-same-machine automation.
+The binary owns the pipe; no other process can connect.
 
 **Dedicated profile** (`--user-data-dir=~/.wintermute/browser-profile/`):
-Post-Chrome 136, `--remote-debugging-pipe` requires a non-default data
-directory anyway. The agent gets its own clean profile. Your main
-Chrome is never touched.
+Completely separate from the user's main Chrome. Own cookies, own
+bookmarks, own extensions. Logins persist here across sessions.
 
-**On-demand lifecycle**: Chrome is launched when the agent needs it,
-killed after an idle timeout (default 5 min). Not always-on. This
-minimizes the exposure window. Session state is persisted between
-launches via cookie/storage export.
+**Session injection:** For sites the user wants the agent to access
+(e.g., GitHub), they provide a session cookie. The agent injects it
+via CDP `Network.setCookie`. The user's main browser isn't touched.
 
-**Session injection**: When the agent needs your logins for a specific
-site, it imports cookies for that domain into the dedicated profile.
-Two approaches:
+**On-demand lifecycle:** Chrome is NOT always running. Started when the
+agent first needs it, killed after idle timeout (default 5 minutes).
+Relaunched transparently on next use.
 
-1. **Manual login (preferred)**: Agent opens the site, tells user
-   "Please log in. I'll wait." User types credentials in the visible
-   window. Agent sees the authenticated session. Cookies persist in
-   the dedicated profile for future use.
+### Docker Sidecar Fallback
 
-2. **Cookie import (advanced)**: Export cookies from your main Chrome
-   profile for specific domains, inject via `Network.setCookie`.
-   Agent never sees credentials directly — just session cookies.
+On headless servers (no display), Chrome can't open a visible window.
+Fallback: headless Chrome in Docker with Playwright.
 
-### Why it's a core tool, not a dynamic tool
-
-Browser automation runs on the HOST, not in the sandbox. It needs
-a display and launches a real Chrome process. This puts it in the
-same category as web_fetch and docker_manage — a host-side capability.
-
-### Implementation: chromiumoxide (Rust)
-
-`chromiumoxide` is a pure-Rust CDP client with pipe transport support.
-No Python subprocess. No Flask sidecar needed for the primary mode.
-
-```rust
-use chromiumoxide::Browser;
-use chromiumoxide::BrowserConfig;
-
-let (browser, mut handler) = Browser::launch(
-    BrowserConfig::builder()
-        .chrome_executable("/usr/bin/google-chrome")
-        .arg("--user-data-dir=/home/user/.wintermute/browser-profile")
-        // Pipe transport: no --remote-debugging-port at all
-        // chromiumoxide uses --remote-debugging-pipe by default
-        .build()?,
-).await?;
-
-// Spawn handler in background (drives CDP messages over pipe)
-tokio::spawn(async move { while let Some(_) = handler.next().await {} });
-
-// Now control the browser
-let page = browser.new_page("https://example.com").await?;
-page.wait_for_navigation().await?;
-let title = page.get_title().await?;
+```
+Wintermute (Rust binary, HOST)
+    │  HTTP API
+    ▼
+Docker sidecar (wintermute-browser)
+    ├── Headless Chromium + Playwright
+    ├── Flask/FastAPI HTTP bridge
+    ├── Same API as pipe transport (navigate, click, type, screenshot)
+    └── Killed after idle timeout
 ```
 
-Key properties of chromiumoxide:
-- Pipe transport by default (no TCP port)
-- RAII cleanup: connections drop when they go out of scope
-- Type-safe CDP commands generated from protocol definitions
-- ~50-100MB memory vs ~500MB+ for Node.js alternatives
-- Async/await native (tokio)
-- No `std::process::Command` concern — it's a library, not a subprocess
+The browser tool auto-detects:
+1. Display available + Chrome installed → pipe transport (preferred)
+2. Docker available → sidecar (fallback)
+3. Neither → browser tool disabled, agent told in SID
 
-### Modes of Operation
-
-**Managed mode (default, secure):**
-Wintermute launches Chrome with pipe transport + dedicated profile.
-Visible window on the user's display. User can interact. Agent controls
-via CDP over pipe. Chrome killed after idle timeout.
-
-**Sidecar mode (headless fallback, no display):**
-If no display is available (headless server), Wintermute starts a
-`wintermute-browser` Docker sidecar with headless Chromium. The Rust
-core sends actions via HTTP to a Flask bridge inside the container.
-Published on `127.0.0.1:9223` only. No user interaction possible.
-Good for scraping, research, monitoring.
-
-**No browser:**
-Neither display nor Docker available. Tool doesn't appear in tool list.
-
-```rust
-async fn detect_browser(config: &BrowserConfig) -> BrowserMode {
-    // 1. Display available? Launch Chrome with pipe transport
-    if has_display() && has_chrome() {
-        return BrowserMode::Managed;
-    }
-    // 2. Docker available? Start headless sidecar
-    if config.sidecar_fallback && docker_available().await {
-        if let Ok(_) = start_browser_sidecar().await {
-            return BrowserMode::Sidecar { port: 9223 };
-        }
-    }
-    // 3. No browser
-    BrowserMode::None
-}
-```
-
-### Interaction Patterns
-
-**Agent fills, user submits:**
-```
-User: "Fill in the shipping form on that tab with my address"
-Agent: [launches Chrome if not running, navigates, fills form fields]
-Agent: "Done. Review the form in the Chrome window and submit when ready."
-```
-
-**Agent needs login:**
-```
-User: "Check my Jira dashboard"
-Agent: [opens Jira in the managed Chrome]
-Agent: "Jira needs your login. I've opened the login page —
-       please sign in. I'll continue once you're authenticated."
-User: [types credentials in the visible Chrome window]
-Agent: [detects login complete, navigates to dashboard, screenshots]
-```
-
-**Agent opens for user to continue:**
-```
-User: "Find me flights to Mauritius in October"
-Agent: [opens Google Flights, fills dates, searches]
-Agent: "Found flights. Cheapest is $620 via Singapore Airlines.
-       The Chrome window has the results — take a look."
-```
-
-### Tool Definition
+### Browser Tool Schema
 
 ```json
 {
   "name": "browser",
-  "description": "Control a browser window. Launches a dedicated Chrome instance (not your main browser). Navigate, click, type, screenshot, extract. You can interact with the same window.",
+  "description": "Control a dedicated Chrome browser. Navigate, click, type, read pages, take screenshots.",
   "parameters": {
     "action": {
       "type": "string",
-      "enum": ["navigate", "click", "type", "screenshot", "extract",
-               "wait", "scroll", "evaluate", "list_tabs", "switch_tab",
-               "new_tab", "close_tab"],
-      "description": "Browser action to perform"
+      "enum": ["navigate", "click", "type", "read", "screenshot",
+               "scroll", "wait", "evaluate", "tabs"],
+      "description": "Browser action"
     },
-    "tab_id": { "type": "string", "description": "Target tab (from list_tabs). Default: active tab." },
-    "url": { "type": "string", "description": "URL for navigate action" },
-    "selector": { "type": "string", "description": "CSS/XPath selector for click/type/extract" },
-    "text": { "type": "string", "description": "Text for type action" },
-    "javascript": { "type": "string", "description": "JS code for evaluate action" },
-    "wait_for": { "type": "string", "description": "Selector or 'networkidle' for wait action" },
-    "timeout_ms": { "type": "integer", "default": 30000 }
+    "url": { "type": "string", "description": "For navigate" },
+    "selector": { "type": "string", "description": "CSS selector for click/type/read" },
+    "text": { "type": "string", "description": "For type action" },
+    "script": { "type": "string", "description": "For evaluate (JS)" }
   },
   "required": ["action"]
 }
-```
-
-### Privacy & Safety
-
-**No open port.** Pipe transport means no TCP listener. No other
-process can connect. No unauthenticated endpoint to discover.
-
-**Dedicated profile.** The agent's Chrome is isolated from the user's
-main browser. No cross-contamination of cookies or history.
-
-**Controls:**
-1. **Domain policy applies.** Navigate to unknown domains triggers
-   approval (same as web_request).
-2. **No form submission without explicit ask.** Agent fills forms but
-   doesn't submit. SID instructs: "Fill, don't submit. Let the user
-   review and press the button."
-3. **No password entry.** Agent never types passwords. If login is
-   needed, it opens the page and tells the user to sign in.
-4. **Screenshots are local.** Saved to /workspace, not transmitted.
-5. **Idle timeout.** Chrome is killed after configurable idle period
-   (default 5 min). Session state exported for next launch.
-6. **Session persistence.** Cookies/localStorage from the dedicated
-   profile persist between launches. User can clear with /browser reset.
-
-### SID Browser Section
-
-```markdown
-## Browser
-{if managed: "I control a dedicated Chrome window (not your main browser).
-You can see and interact with it. I connect via pipe — no open port.
-If a site needs your login, I'll open it and ask you to sign in.
-Your credentials stay in the Chrome window — I never see passwords."}
-{if sidecar: "Using a headless browser in Docker (no display available).
-Good for scraping and research. No user interaction possible."}
-{if none: "No browser available."}
-```
-
-### Config
-
-```toml
-[browser]
-auto_submit = false                # never auto-submit forms (safety default)
-idle_timeout_secs = 300            # kill Chrome after 5 min idle
-sidecar_fallback = true            # start Docker sidecar if no display
-sidecar_image = "ghcr.io/pycckuu/wintermute-browser:latest"
-# chrome_path = "/usr/bin/google-chrome"  # auto-detected if not set
 ```
 
 ### Rate Limiting
@@ -718,6 +657,10 @@ On first use, the agent checks for Chrome/Chromium installation:
 No `--remote-debugging-port` flag. No special Chrome launch procedure.
 The user just needs Chrome installed. Wintermute handles everything else.
 
+---
+
+## Executor
+
 Auto-detected at startup. Two implementations.
 
 ```rust
@@ -735,17 +678,25 @@ pub trait Executor: Send + Sync {
 Pre-warmed container (always running, use `docker exec`). < 100ms per command.
 
 ```
+Base image:     ubuntu:24.04 + Python + pip (Wintermute layer)
 Network:        outbound via egress proxy (domain allowlist enforced)
 Capabilities:   ALL dropped, none added
-Root FS:        read-only
-User:           wintermute (non-root)
+User:           root (security is the container boundary, not uid)
+Root FS:        writable (agent can apt-get install)
 PID limit:      256
 Memory:         configurable (default 2GB)
 CPU:            configurable (default 2 cores)
 Mounts:         /workspace (rw), /scripts (rw), /tmp (tmpfs 512M)
 NOT mounted:    /data, .env, host home
 Env vars:       HTTP_PROXY, HTTPS_PROXY (points to egress proxy)
+On reset:       recreated from base image, runs /scripts/setup.sh
+                then pip install -r /scripts/requirements.txt
 ```
+
+The agent is root inside the container. It can `apt-get install` system
+packages, modify any file, run any process. The security boundary is
+Docker isolation + egress proxy + dropped capabilities, not filesystem
+permissions. This is C2 in practice: maximally capable inside the boundary.
 
 **The sandbox HAS network.** Scripts can `requests.get()`, `pip install`,
 `curl`, `wget` — anything that uses HTTP(S). All traffic routes through
@@ -768,7 +719,8 @@ The privacy boundary is the egress proxy, not network absence:
 allowed_domains = ["github.com", "api.github.com", "pypi.org",
                    "registry.npmjs.org", "en.wikipedia.org"]
 # Always allowed (not configurable): pypi.org, files.pythonhosted.org,
-# registry.npmjs.org, crates.io (package registries)
+# registry.npmjs.org, crates.io (package registries),
+# archive.ubuntu.com, security.ubuntu.com (apt repositories)
 ```
 
 Every command wrapped with GNU timeout inside the container:
@@ -778,16 +730,47 @@ timeout --signal=TERM --kill-after=5 {secs} bash -c {command}
 
 Client-side Tokio timeout as backstop (+10s grace).
 
-Package management: `pip install --user` works directly — the sandbox
-has network through the proxy, and package registries are always allowed.
-Agent maintains /scripts/requirements.txt. On `wintermute reset-sandbox`,
-the fresh container runs: `pip install --user -r /scripts/requirements.txt`
+**Package management:** The agent manages two persistence files:
+
+`/scripts/setup.sh` — system-level dependencies:
+```bash
+#!/bin/bash
+# Managed by Wintermute. Runs on container creation/reset.
+apt-get update && apt-get install -y \
+    ffmpeg pandoc imagemagick \
+    gcc python3-dev
+```
+
+`/scripts/requirements.txt` — Python packages:
+```
+pandas
+feedparser
+requests
+```
+
+On `wintermute reset`, the fresh container runs:
+```bash
+if [ -f /scripts/setup.sh ]; then
+    bash /scripts/setup.sh
+fi
+if [ -f /scripts/requirements.txt ]; then
+    pip install -r /scripts/requirements.txt
+fi
+```
+
+Both files are git-versioned. If a bad package breaks the container,
+Flatline can revert. The agent is told in the SID to maintain these
+files whenever it installs something it wants to persist.
 
 ### Docker Access — the agent can manage containers
 
 The agent runs on a machine with Docker. It should use Docker like any
 engineer would: need Ollama? `docker run ollama/ollama`. Need postgres?
 `docker run postgres`. Need Redis? Same.
+
+The rule: **if it listens on a port, it's a service → separate container
+via docker_manage. If it's a command the agent runs, it's a tool →
+install in the sandbox.**
 
 The Rust core provides Docker management as a core tool. The agent can:
 
@@ -1005,7 +988,7 @@ enum WriteOp {
 INSIDE THE BOUNDARY (agent can do anything):
   - Write any code
   - Create/modify/delete tools
-  - Install Python packages (pip)
+  - Install system packages (apt-get) and Python packages (pip)
   - Spin up Docker services (docker_manage)
   - Edit its own config (agent.toml)
   - Read/write workspace files
@@ -1135,7 +1118,10 @@ Agent creates tool → git add + commit "create tool: news_digest"
 Agent updates tool → git add + commit "update tool: news_digest"
 Agent deletes tool → git rm + commit "delete tool: news_digest"
 Agent modifies agent.toml → git add + commit "update config: add scheduled task"
+Agent writes setup.sh → git add + commit "add system dep: ffmpeg"
 Agent writes requirements.txt → git add + commit "add dependency: pandas"
+Agent modifies soul → git add + commit "evolve: more concise responses"
+Agent updates AGENTS.md → git add + commit "lesson: sandbox network gotcha"
 ```
 
 Benefits:
@@ -1177,6 +1163,8 @@ Built-in tasks (not agent-removable):
 - `daily_backup`: git bundle + sqlite backup. Default 3am.
 - `weekly_digest`: consolidate memories → update USER.md, archive stale
   memories, flag contradictions. Default Sunday 4am.
+- `monthly_tool_review`: review all dynamic tools — flag unused,
+  failing, duplicate, slow. Suggest cleanup. Default 1st of month 4am.
 
 ### Health File
 
@@ -1208,10 +1196,12 @@ future Flatline consumption:
 ```json
 {"ts":"...","level":"info","event":"tool_call","tool":"news_digest","duration_ms":1200,"success":true,"session":"abc123"}
 {"ts":"...","level":"error","event":"tool_call","tool":"deploy_check","error":"timeout","session":"abc123"}
+{"ts":"...","level":"info","event":"no_reply","session":"abc123","reason":"group_message_not_directed"}
 ```
 
 Event types: `tool_call`, `llm_call`, `approval`, `budget`, `session`,
-`heartbeat`, `backup`, `tool_created`, `tool_updated`.
+`heartbeat`, `backup`, `tool_created`, `tool_updated`, `soul_modified`,
+`no_reply`, `escalation`, `proactive_check`.
 
 ---
 
@@ -1219,10 +1209,14 @@ Event types: `tool_call`, `llm_call`, `approval`, `budget`, `session`,
 
 The agent must know what it is. Not guess, not infer — KNOW.
 
-OpenClaw solves this with SKILL.md files per skill and a cached skills
-snapshot. But Wintermute's problem is broader: the agent doesn't just
-need to know its tools, it needs to know its own architecture, its
-memory system, its limitations, and how to help the user set things up.
+Three layers of always-loaded context give the agent complete
+self-awareness:
+
+1. **IDENTITY.md (SID)** — generated, refreshed by heartbeat.
+   Architecture, capabilities, state, tools, budget.
+2. **AGENTS.md** — organizational scar tissue. Hard-won lessons.
+   Agent-maintained, always growing.
+3. **USER.md** — curated user profile. Updated weekly by digest.
 
 ### System Identity Document (SID)
 
@@ -1231,6 +1225,48 @@ as part of the system prompt. This is the agent's self-knowledge.
 
 Location: ~/.wintermute/IDENTITY.md (generated by `wintermute init`,
 updated on config changes, agent can read but not modify)
+
+### AGENTS.md — Lessons Learned
+
+A running collection of hard-won lessons. Every time something goes
+wrong or the agent discovers a non-obvious pattern, it adds a concise
+note. Always loaded in context. Starts small, grows organically.
+
+Location: ~/.wintermute/AGENTS.md (agent-maintained, git-versioned)
+
+Initial content seeded by `wintermute init`:
+
+```markdown
+# AGENTS.md
+
+Rules and lessons learned. Always read this before starting work.
+
+## Tool Creation
+- Always test a tool in /workspace before saving with create_tool
+- Always add pip dependencies to requirements.txt BEFORE using them
+- Always add system deps to setup.sh AFTER installing them
+- JSON stdin/stdout contract is non-negotiable — no print() debugging
+- Test with edge cases: empty input, missing fields, timeouts
+
+## Sandbox
+- You are root inside the container. apt-get install works.
+- The sandbox has network but ONLY through the egress proxy.
+  Unknown domains → HTTP 403. Request new domains if needed.
+- Service containers (Ollama, Postgres) are separate. Use docker_manage.
+  Don't try to apt-get install postgres inside the sandbox.
+- localhost inside the sandbox is the sandbox, not the host.
+  Service containers are reachable via the Docker network.
+
+## Common Mistakes
+- Don't pip install inside create_tool. Use execute_command first,
+  then create the tool after verifying the package works.
+- requirements.txt and setup.sh only run on container reset.
+  Install packages with execute_command for immediate use,
+  THEN add to the persistence files.
+```
+
+The agent appends lessons via execute_command (edit AGENTS.md, git commit).
+The weekly digest consolidates if it grows too large (>100 lines).
 
 ### User Profile (USER.md)
 
@@ -1278,6 +1314,34 @@ the agent needs in EVERY conversation. Think of it as the difference
 between a filing cabinet (memories) and a sticky note on your monitor
 (USER.md).
 
+### Documentation Directory (docs/)
+
+Agent-readable documentation with discovery hints. The agent browses
+docs/ when it needs guidance on complex tasks.
+
+Location: ~/.wintermute/docs/ (seeded by `wintermute init`, agent
+can add docs)
+
+```
+~/.wintermute/docs/
+├── README.md              # index, auto-generated from front-matter
+├── architecture.md        # how Wintermute works (for the agent)
+├── tools-guide.md         # how to create effective tools
+└── {user-added}.md        # user or agent can add docs here
+```
+
+Each doc has front-matter:
+```markdown
+---
+summary: How to create effective dynamic tools
+read_when: agent is about to create or modify a tool
+---
+```
+
+The SID includes a docs section pointing the agent to browse when
+relevant. Docs are NOT loaded into every conversation (too expensive).
+The agent reads them on demand via execute_command.
+
 ### Memory Consolidation (weekly digest)
 
 The built-in `digest` task runs weekly (Sunday 4am by default). It:
@@ -1288,6 +1352,7 @@ The built-in `digest` task runs weekly (Sunday 4am by default). It:
    - Flag contradictory memories for review
    - Archive stale memories (not referenced in 60+ days, no linked tools)
    - Surface memories that should be promoted to procedures or tools
+   - Consolidate AGENTS.md if over 100 lines (merge redundant lessons)
 3. Writes updated USER.md
 4. Git commits the change: "digest: update user profile"
 
@@ -1309,22 +1374,46 @@ All active memories: {all memories, summarized}
 The USER.md is loaded into every conversation right after the SID.
 The agent always knows who it's talking to without searching.
 
-Contents:
+### Monthly Tool Review
+
+The built-in `tool_review` task runs monthly (1st of each month). It:
+
+1. Reads all dynamic tools and their `_meta` health stats
+2. Identifies issues:
+   - Unused tools (not invoked in 30+ days)
+   - Failing tools (success rate <70%)
+   - Slow tools (avg duration >10s, candidates for optimization)
+   - Duplicate tools (similar descriptions, possible merge)
+3. Sends summary to user via Telegram
+4. If user approves cleanup: archives/refactors in a new session
+
+### SID Contents
 
 ```markdown
 # {personality.name}
 
 You are {personality.name}, a self-coding AI agent running on {hostname}.
 
+## Your Soul
+{personality.soul from agent.toml}
+Soul modification mode: {notify|approve}
+{if notify: "You can modify your soul freely. Changes are git-committed
+ and the user is notified via Telegram. They can /revert if they disagree."}
+{if approve: "To modify your soul, show the user before/after and wait
+ for approval before applying."}
+
 ## Your Architecture
 - Core: Rust binary running on the HOST with full network access
 - Executor: {docker|direct} mode
-  {if docker: "Your code runs in a sandboxed Docker container.
+  {if docker: "Your code runs in a Docker container (ubuntu:24.04 base).
+   You are root inside the container. You can apt-get install anything.
    The sandbox HAS network via an egress proxy. Your scripts can pip install,
    requests.get(), curl — anything HTTP(S). BUT only allowed domains work.
    Unknown domains are blocked by the proxy (HTTP 403).
    Service containers (Ollama, Postgres, etc.) are on a shared Docker
-   network — your scripts can reach them directly (e.g., localhost:11434)."}
+   network — your scripts can reach them directly.
+   On reset: container is recreated from ubuntu:24.04, then runs
+   /scripts/setup.sh and /scripts/requirements.txt."}
   {if direct: "Your code runs directly on the host. Full network access.
    Be careful with destructive commands."}
 
@@ -1335,34 +1424,38 @@ HOST (has network, has Docker)
   │   ├── web_fetch / web_request ← reach the internet
   │   ├── browser ← launches + controls dedicated Chrome via pipe
   │   ├── docker_manage ← creates/manages Docker containers
+  │   ├── escalate ← ask a stronger model for help
   │   ├── model router ← talks to Ollama/Anthropic
   │   └── memory engine ← reads/writes memory.db
   │
   ├── Egress proxy ← ALL sandbox HTTP traffic goes through this
   │   └── Enforces domain allowlist from config.toml
   │
-  ├── Docker sandbox ← your scripts run HERE
+  ├── Docker sandbox ← your scripts run HERE (you are root)
   │   ├── /workspace (shared with host)
   │   ├── /scripts (shared with host)
   │   ├── HAS network, but only through the egress proxy
-  │   ├── pip install, requests.get(), curl — all work for allowed domains
+  │   ├── apt-get install, pip install, curl — all work for allowed domains
   │   ├── Unknown domains → blocked by proxy (HTTP 403)
   │   └── Cannot access Docker socket or host filesystem outside mounts
   │
   └── Service containers (agent-managed, e.g., Ollama, Postgres)
       ├── Created by docker_manage on demand
       ├── On a shared Docker network with the sandbox
-      └── Agent's scripts can reach them (e.g., localhost:11434 for Ollama)
+      └── Agent's scripts can reach them
 ```
-When you run execute_command, it runs INSIDE the sandbox (has proxy-controlled network).
-When you call web_fetch/web_request/browser/docker_manage, they run OUTSIDE (on the host).
+When you run execute_command, it runs INSIDE the sandbox (root, has proxy-controlled network).
+When you call web_fetch/web_request/browser/docker_manage/escalate, they run OUTSIDE (on the host).
 The browser launches a dedicated Chrome instance via pipe transport — no open port, no proxy.
 Need a service like Ollama or a database? Use docker_manage to spin it up.
+Don't install services inside the sandbox — use separate containers for anything that listens on a port.
 
 ## What You CAN Install
-- Python packages: `pip install --user <package>` — the sandbox has
-  network through the egress proxy. Package registries are always allowed.
-  Always add installed packages to /scripts/requirements.txt.
+- System packages: `apt-get install -y ffmpeg` — you are root.
+  Always add to /scripts/setup.sh for persistence across resets.
+- Python packages: `pip install pandas` — the sandbox has network
+  through the egress proxy. Package registries are always allowed.
+  Always add to /scripts/requirements.txt for persistence.
 - Docker services: use docker_manage to pull images and run containers.
   Need Ollama? `docker_manage(action="run", image="ollama/ollama")`.
   Need a database? Same pattern. Service containers persist across restarts.
@@ -1372,21 +1465,29 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 - Access domains not in the allowlist from the sandbox (proxy blocks them).
   To add a domain: request it, user approves, it gets added.
 - Access the host filesystem outside of /workspace and /scripts.
-- Run privileged operations (no sudo, no capabilities).
 - Manage Docker containers not created by you (only wintermute-labeled).
 
-## When You Need Something That Isn't Available
-1. Check if it's available as a Docker image → use docker_manage to run it
-2. Check if it's a Python package → pip install it
-3. If it requires native host installation (e.g., GPU drivers, Docker
-   itself, system libraries): tell the user what you need, give them
-   the exact install command, and wait for confirmation
+## When You Need Something
+1. Is it a CLI tool or library? → apt-get install or pip install in sandbox
+2. Is it a service (database, model server)? → docker_manage to run it
+3. Does it need the host (GPU drivers, Docker itself)? → tell user, give
+   them the exact install command, wait for confirmation
+
+## Escalation
+When you're stuck on a hard problem, use the `escalate` tool to ask a
+more powerful model. Current oracle: {oracle_model|"not configured"}.
+{if not configured: "Ask the user to add [models.roles] oracle to config.toml."}
+Use for: complex architecture, subtle bugs, large codebase analysis.
+Don't use for simple tasks — it costs more tokens.
 
 ## Your Memory
 - Storage: SQLite + FTS5 {if embeddings: "+ vector search via {embedding_model}"}
   {if no embeddings: "Vector search not configured. Memory uses keyword search only.
    You can enable it by asking the user to configure an embedding model in config.toml."}
 - {n} active memories ({n} facts, {n} procedures, {n} episodes, {n} skills)
+- {n} pending memories awaiting promotion
+- Relevant memories are auto-injected at conversation start based on the
+  user's first message. Use memory_search for additional lookups.
 
 ## Your Tools
 ### Core tools (always available):
@@ -1395,24 +1496,23 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 - web_fetch: HTTP GET (no body, 30/min)
 - web_request: HTTP POST/PUT/etc (domain allowlisted, approval for new domains)
 - browser: {managed (dedicated Chrome, pipe transport)|sidecar (headless Docker)|not available}
+- docker_manage: Manage Docker containers/services on the host
 - memory_search: Search your memories ({keyword|keyword + vector} search)
 - memory_save: Save facts, procedures, episodes, skills
 - send_telegram: Send messages + files to the user
+- escalate: Ask {oracle_model|"a stronger model (not configured)"} for help
 
 ### Your custom tools ({n} total):
-{for each dynamic tool: "- {name}: {description} (last used: {date}, success rate: {n}%)"}
+{for each dynamic tool: "- {name}: {description} (used {n} times, {success_rate}% success, last: {date})"}
 
-## Your Memory
-- {n} active memories ({n} facts, {n} procedures, {n} episodes, {n} skills)
-- {n} pending memories awaiting promotion
-- Search: {keyword only | keyword + vector similarity}
-  {if keyword only: "You can enable vector search by configuring an embedding model.
-   Ask the user: 'Want me to help set up semantic search? You'll need Ollama running
-   with nomic-embed-text.'"}
+## Your Documentation
+You have {n} docs in ~/.wintermute/docs/. Browse with `ls docs/` or
+`cat docs/README.md` for the index. Read relevant docs before complex tasks.
 
 ## Your Model
 - Current model: {model_id} via {provider}
 - Observer model: {observer_model_id|"same as main"}
+- Oracle model: {oracle_model_id|"not configured"}
 - Embedding model: {embedding_model|"not configured"}
 
 ## Privacy Boundary
@@ -1427,21 +1527,29 @@ Need a service like Ollama or a database? Use docker_manage to spin it up.
 You can evolve. This is by design.
 
 **Your personality (agent.toml → [personality].soul):**
-You can rewrite your own soul. If the user asks you to be more concise,
-more opinionated, funnier, more formal — update your soul. If you notice
-your communication style doesn't match what the user wants, propose a
-change. The soul is loaded fresh every conversation, so changes take
-effect immediately.
+{if notify: "You can rewrite your own soul. Changes take effect on the
+ next conversation. The user is notified via Telegram with a diff.
+ They can /revert if they disagree. Use this to improve how you
+ communicate — be more concise, more opinionated, funnier, whatever
+ the user seems to want."}
+{if approve: "You can propose soul changes. Show the user before/after
+ and wait for approval before applying."}
 
 **Your tools (/scripts/):** create_tool makes new capabilities permanent.
 
 **Your memory:** memory_save accumulates knowledge over time.
+
+**Your lessons (AGENTS.md):** When you learn something non-obvious,
+add it to AGENTS.md so you remember it next session.
 
 **Your scheduled tasks (agent.toml → [[scheduled_tasks]]):** add, modify,
 or remove automated tasks.
 
 **Your services (agent.toml → [[services]]):** spin up or tear down
 Docker services you depend on.
+
+**Your setup (setup.sh, requirements.txt):** Persist system and Python
+packages across container resets.
 
 ## What You CANNOT Modify
 **config.toml** — security policy, credentials, domain allowlist, budget
@@ -1456,22 +1564,12 @@ you directly. You contribute to it by saving memories.
 **Your core binary** — the Rust code that runs you. You extend yourself
 through tools and config, not by recompiling.
 
-## Self-Modification Protocol
-When modifying your own soul or config:
-1. Tell the user what you want to change and why
-2. Show the before/after
-3. Wait for approval (this is a personality change, not a tool call)
-4. Apply via execute_command editing agent.toml
-5. Git commit: "evolve: {what changed}"
-6. The change takes effect on the next conversation
-
-## What You Can Help Set Up
-- Spin up services: docker_manage to run Ollama, databases, Redis, etc.
-- Enable vector search: docker_manage to run Ollama + pull embedding model
-- Add new domains: request approval, they get added to the allowlist
-- Install packages: pip install directly in the sandbox
-- Create scheduled tasks: edit agent.toml to add cron-triggered tools
-- Configure model routing: explain per-role/per-skill model options
+## Silence
+In group conversations, you don't need to respond to everything.
+If a message isn't directed at you or doesn't need your input,
+respond with [NO_REPLY] and the message will be suppressed.
+Use this to feel natural in group chats — only speak when you
+have something useful to add.
 
 ## Handling Non-Text Messages
 When you receive a voice message, photo, or document you can't process:
@@ -1488,6 +1586,7 @@ When you solve a repeatable task:
 2. Use create_tool to save it as a reusable tool
 3. The tool appears in your tool list immediately
 4. Next time the same task comes up, call the tool directly
+Read docs/tools-guide.md for best practices before creating complex tools.
 
 ## Scheduled Tasks
 {for each task: "- {name}: {cron} → {tool|command} (last run: {status})"}
@@ -1543,6 +1642,73 @@ Pick something they'd use daily.
 
 This replaces OpenClaw's onboarding wizard with a conversational
 equivalent — the agent conducts its own onboarding via Telegram.
+
+---
+
+## Context Assembly
+
+The context assembler builds the LLM's input for each turn. Order matters.
+
+### Assembly Order
+
+```
+1. System prompt: SID (IDENTITY.md)
+2. AGENTS.md (lessons learned, always loaded)
+3. USER.md (user profile, always loaded)
+4. Auto-injected memories (first turn only, based on user's message)
+5. Conversation history (trimmed/compacted as needed)
+6. Tool definitions (core + top N dynamic)
+7. Budget warnings (if thresholds crossed)
+```
+
+### Auto-Injected Memories
+
+On the first turn of a new session, the context assembler searches
+memories based on the user's first message:
+
+```rust
+if session.turn_count == 0 {
+    let relevant = memory.search(&user_message, 5).await?;
+    if !relevant.is_empty() {
+        context.add_system_note(&format!(
+            "Relevant context from previous conversations:\n{}",
+            format_memories(&relevant)
+        ));
+    }
+}
+```
+
+This primes the agent with relevant context without the user having
+to say "remember when we discussed X." Costs ~200-500 tokens for 5
+memories. Only on first turn.
+
+### Context Compaction
+
+For conversations that naturally need many tokens, the agent compacts
+context before hitting the limit:
+
+```
+At 60% of session budget:
+  1. Summarize older messages in the conversation
+  2. Replace detailed tool results with summaries
+  3. Keep recent messages + system prompt + tool definitions intact
+  4. Continue with compressed context
+```
+
+Implementation: when context exceeds 60% of session budget, the agent
+calls the LLM with a compaction prompt:
+
+```
+Summarize this conversation so far in a way that preserves:
+- All decisions made
+- All action items
+- Current task state
+- Key facts mentioned
+Keep it under {target_tokens} tokens.
+```
+
+The summary replaces the old messages. The conversation continues
+with the summary as context.
 
 ---
 
@@ -1680,37 +1846,6 @@ impl SessionBudget {
 }
 ```
 
-### Context Compaction for Long Conversations
-
-For conversations that naturally need many tokens (like this architecture
-review), the agent should compact context before hitting the limit:
-
-```
-At 60% of session budget:
-  1. Summarize older messages in the conversation
-  2. Replace detailed tool results with summaries
-  3. Keep recent messages + system prompt + tool definitions intact
-  4. Continue with compressed context
-```
-
-This is how Claude.ai and OpenClaw handle long conversations —
-auto-compaction preserves continuity while freeing token space.
-
-Implementation: when context exceeds 60% of session budget, the agent
-calls the LLM with a compaction prompt:
-
-```
-Summarize this conversation so far in a way that preserves:
-- All decisions made
-- All action items
-- Current task state
-- Key facts mentioned
-Keep it under {target_tokens} tokens.
-```
-
-The summary replaces the old messages. The conversation continues
-with the summary as context.
-
 ### Budget in /status Command
 
 ```
@@ -1742,10 +1877,28 @@ HTML parse mode only. Escape only `< > &`.
 /tools               List dynamic tools with usage stats
 /tools {name}        Show tool details + recent invocations
 /sandbox             Container status (or "direct mode" if no Docker)
-/sandbox reset       Recreate sandbox (reinstalls requirements.txt)
+/sandbox reset       Recreate sandbox (runs setup.sh + requirements.txt)
 /backup              Trigger immediate backup
+/revert              Revert last git commit in /scripts (undo last agent change)
 /help                List commands
 ```
+
+### No-Reply Filter
+
+When the agent responds with `[NO_REPLY]` (or a response starting with
+it), the Telegram adapter suppresses the message — nothing is sent to
+the chat. This is logged as a `no_reply` event for Flatline stats.
+
+```rust
+// In Telegram adapter, before sending response
+if response.trim() == "[NO_REPLY]" || response.starts_with("[NO_REPLY]") {
+    tracing::info!(event = "no_reply", session = %session_id);
+    return Ok(()); // suppress
+}
+```
+
+Essential for group chats where the agent should only speak when it
+has something useful to add. The SID explains when to use it.
 
 ### File Support
 
@@ -1810,6 +1963,24 @@ into active memory.
    - `suggest`: send Telegram suggestion, user approves
    - `off`: no extraction, only explicit memory_save
 
+### Post-Session Reflection
+
+If the session created or modified dynamic tools AND `learning.reflection`
+is true, the observer adds a reflection step after extraction:
+
+```
+5. Ask observer model:
+   "Review the tool(s) created/modified in this session: {tool names}.
+    What could be improved? Edge cases missed? Simpler approach?
+    One paragraph, actionable."
+6. Save reflection as a 'procedure' memory tagged with tool names
+7. Next time the agent works on those tools, the reflection surfaces
+   via memory_search (or auto-injection on first turn)
+```
+
+This is cheap (~2K tokens on the observer model) and creates a learning
+loop: build → reflect → improve next time.
+
 ### Safeguards
 
 - Contradictions: if new extraction conflicts with existing memory,
@@ -1819,12 +1990,85 @@ into active memory.
 
 ---
 
+## Heartbeat
+
+### Tick Loop
+
+The heartbeat runs every `interval_secs` (default 60). Each tick:
+
+1. Evaluate cron expressions for scheduled tasks → dispatch due tasks
+2. Write health.json (for Flatline + /status)
+3. Regenerate SID if state changed (tool count, budget, etc.)
+4. Run proactive check (if enabled and interval reached)
+
+### Proactive Checks
+
+When `heartbeat.proactive = true`, the heartbeat periodically creates
+a lightweight mini-session to check if the agent should do something:
+
+```
+Proactive check context (~5K tokens):
+- Current time
+- Last 5 log events
+- Time since user's last interaction
+- Pending tasks or upcoming scheduled tasks
+- Recent memories about the user
+
+Prompt:
+"Should you do anything proactive right now? Consider:
+ - Check in on something the user mentioned
+ - Health-check a tool that's been flaky
+ - Prepare for an upcoming scheduled task
+ - Nothing — stay quiet
+
+ If nothing: respond with [NO_REPLY]."
+```
+
+Budget: `proactive_budget` tokens per check (default 5000), counted
+against daily budget. The proactive check runs at most every
+`proactive_interval_mins` (default 30).
+
+This makes the agent feel alive. The user can disable it entirely
+or adjust frequency.
+
+### Scheduled Task Dispatch
+
+```toml
+[[scheduled_tasks]]
+name = "news_digest"
+cron = "0 8 * * *"
+tool = "news_digest"
+budget_tokens = 50000
+notify = true
+enabled = true
+```
+
+Each execution:
+1. Heartbeat fires at cron time
+2. Creates a new agent session with limited context
+3. Invokes the specified tool
+4. If notify=true, sends result via Telegram
+5. Session cleaned up
+
+### Backup
+
+`daily_backup` (default 3am): git bundle for /scripts + sqlite .backup
+for memory.db. Stored in ~/.wintermute/backups/.
+
+### Weekly Digest
+
+`weekly_digest` (default Sunday 4am): consolidate memories → update
+USER.md, consolidate AGENTS.md if large, archive stale memories,
+flag contradictions.
+
+---
+
 ## Security Posture (Honest)
 
 ### What we enforce
 
 - Sandbox network controlled by egress proxy: only allowed domains reachable
-- All sandbox commands run with no capabilities, read-only rootfs (Docker mode)
+- All sandbox commands run with no capabilities (Docker mode)
   or in restricted directory (direct mode)
 - No secrets in sandbox environment
 - POST/PUT/DELETE to unknown domains requires explicit user approval
@@ -1833,6 +2077,7 @@ into active memory.
 - Budget limits with atomic counters, checked before every LLM call
 - Inbound credentials blocked/redacted before pipeline
 - Config split: agent cannot modify security policy
+- Main agent loop should use a capable model for prompt injection resistance
 
 ### What we mitigate best-effort
 
@@ -1850,9 +2095,14 @@ into active memory.
 - Redaction: pattern-based. Will miss novel secret formats.
 - The agent modifies its own tools. A corrupted tool runs until
   someone notices. Git history enables rollback.
+- The agent is root inside the sandbox. Combined with writable rootfs,
+  it can modify anything inside the container. The security boundary
+  is Docker isolation + egress proxy, not in-container permissions.
 - The agent can spin up Docker containers. A malicious prompt could
   create resource-intensive containers. PID/memory limits and the
   wintermute label policy mitigate this.
+- Small/local models are more susceptible to prompt injection. Using
+  a local model for the main agent loop is possible but not recommended.
 
 ### Worst-case scenarios
 
@@ -1864,6 +2114,7 @@ into active memory.
 | Secret in tool output | Redacted best-effort. No secrets in sandbox. | Rotate the secret |
 | Bad tool created | Runs until noticed | git revert, /tools inspect |
 | Observer hallucination | Sits in pending. Needs N consistent extractions. | /memory pending reject |
+| Bad setup.sh | Container won't start after reset | Flatline reverts setup.sh |
 
 ---
 
@@ -1876,67 +2127,78 @@ wintermute/
 ├── config.example.toml
 ├── migrations/
 │   └── 001_schema.sql
+├── docs/                              # Templates for ~/.wintermute/docs/
+│   ├── architecture.md
+│   └── tools-guide.md
+├── templates/
+│   └── AGENTS.md                      # Initial AGENTS.md content
 ├── src/
-│   ├── main.rs                    # CLI + startup
-│   ├── config.rs                  # config.toml + agent.toml loading
-│   ├── credentials.rs             # .env loading
+│   ├── main.rs                        # CLI + startup
+│   ├── config.rs                      # config.toml + agent.toml loading
+│   ├── credentials.rs                 # .env loading
 │   │
 │   ├── providers/
-│   │   ├── mod.rs                 # LlmProvider trait
-│   │   ├── anthropic.rs           # Anthropic API + native tool calling
-│   │   ├── openai.rs              # OpenAI-compatible API + native tool calling
-│   │   ├── ollama.rs              # Ollama API + native tool calling
-│   │   └── router.rs              # ModelRouter (default → role → skill)
+│   │   ├── mod.rs                     # LlmProvider trait
+│   │   ├── anthropic.rs               # Anthropic API + native tool calling
+│   │   ├── openai.rs                  # OpenAI-compatible API + native tool calling
+│   │   ├── ollama.rs                  # Ollama API + native tool calling
+│   │   └── router.rs                  # ModelRouter (default → role → skill)
 │   │
 │   ├── executor/
-│   │   ├── mod.rs                 # Executor trait
-│   │   ├── docker.rs              # DockerExecutor (bollard, warm container)
-│   │   ├── direct.rs              # DirectExecutor (host, restricted dir)
-│   │   ├── egress.rs              # Egress proxy (Squid config, domain allowlist)
-│   │   └── redactor.rs            # Secret pattern redaction
+│   │   ├── mod.rs                     # Executor trait
+│   │   ├── docker.rs                  # DockerExecutor (bollard, warm container)
+│   │   ├── direct.rs                  # DirectExecutor (host, restricted dir)
+│   │   ├── egress.rs                  # Egress proxy (Squid config, domain allowlist)
+│   │   └── redactor.rs                # Secret pattern redaction
 │   │
 │   ├── tools/
-│   │   ├── mod.rs                 # Tool routing (core + dynamic)
-│   │   ├── core.rs                # 9 core tool implementations
-│   │   ├── registry.rs            # Dynamic tool registry + hot-reload
-│   │   ├── create_tool.rs         # create_tool implementation + git commit
-│   │   ├── browser.rs             # Browser tool: chromiumoxide pipe + sidecar fallback
-│   │   ├── browser_sidecar.rs     # Sidecar lifecycle (bollard) + HTTP bridge client
-│   │   └── docker.rs              # docker_manage (bollard, label policy)
+│   │   ├── mod.rs                     # Tool routing (core + dynamic)
+│   │   ├── core.rs                    # 10 core tool implementations
+│   │   ├── registry.rs                # Dynamic tool registry + hot-reload + _meta
+│   │   ├── create_tool.rs             # create_tool implementation + git commit
+│   │   ├── escalate.rs                # escalate tool (oracle model call)
+│   │   ├── browser.rs                 # Browser: chromiumoxide pipe + sidecar fallback
+│   │   ├── browser_sidecar.rs         # Sidecar lifecycle (bollard) + HTTP bridge
+│   │   └── docker.rs                  # docker_manage (bollard, label policy)
 │   │
 │   ├── agent/
-│   │   ├── mod.rs                 # Session router (per-session tasks)
-│   │   ├── loop.rs                # Agent loop (assemble → LLM → route → execute)
-│   │   ├── context.rs             # Context assembly + trimming + compaction
-│   │   ├── identity.rs            # SID generator (IDENTITY.md from config + state)
-│   │   ├── policy.rs              # Policy gate + egress rules
-│   │   ├── approval.rs            # Non-blocking approval (short-ID callbacks)
-│   │   └── budget.rs              # Token/cost budget (atomic, warnings, graceful exhaustion)
+│   │   ├── mod.rs                     # Session router (per-session tasks)
+│   │   ├── loop.rs                    # Agent loop (assemble → LLM → route → execute)
+│   │   ├── context.rs                 # Context assembly + trimming + compaction
+│   │   │                              #   + auto-inject memories + no-reply handling
+│   │   ├── identity.rs                # SID generator (IDENTITY.md from config + state)
+│   │   ├── policy.rs                  # Policy gate + egress rules
+│   │   ├── approval.rs                # Non-blocking approval (short-ID callbacks)
+│   │   └── budget.rs                  # Token/cost budget (atomic, warnings, exhaustion)
 │   │
 │   ├── memory/
-│   │   ├── mod.rs                 # MemoryEngine
-│   │   ├── writer.rs              # Write actor (mpsc)
-│   │   ├── search.rs              # FTS5 + optional vector (sqlite-vec)
-│   │   └── embedder.rs            # Embedder trait + OllamaEmbedder
+│   │   ├── mod.rs                     # MemoryEngine
+│   │   ├── writer.rs                  # Write actor (mpsc)
+│   │   ├── search.rs                  # FTS5 + optional vector (sqlite-vec)
+│   │   └── embedder.rs                # Embedder trait + OllamaEmbedder
 │   │
 │   ├── telegram/
-│   │   ├── mod.rs                 # Adapter (teloxide)
-│   │   ├── input_guard.rs         # Credential detection + redaction
-│   │   ├── media.rs               # Non-text messages: download file, pass description
-│   │   ├── ui.rs                  # HTML formatting, keyboards, file sending
-│   │   └── commands.rs            # /status, /budget, /memory, /tools, etc.
+│   │   ├── mod.rs                     # Adapter (teloxide)
+│   │   ├── input_guard.rs             # Credential detection + redaction
+│   │   ├── media.rs                   # Non-text messages: download file, pass description
+│   │   ├── noreply.rs                 # [NO_REPLY] filter
+│   │   ├── ui.rs                      # HTML formatting, keyboards, file sending
+│   │   └── commands.rs                # /status, /budget, /memory, /tools, /revert, etc.
 │   │
 │   ├── observer/
-│   │   ├── mod.rs                 # Observer pipeline
-│   │   ├── extractor.rs           # LLM extraction (observer model)
-│   │   └── staging.rs             # Pending → active promotion
+│   │   ├── mod.rs                     # Observer pipeline
+│   │   ├── extractor.rs               # LLM extraction (observer model)
+│   │   ├── staging.rs                 # Pending → active promotion
+│   │   └── reflection.rs              # Post-session tool reflection
 │   │
 │   └── heartbeat/
-│       ├── mod.rs                 # Tick loop
-│       ├── scheduler.rs           # Cron evaluation + task dispatch
-│       ├── backup.rs              # git bundle + sqlite backup
-│       ├── digest.rs              # Weekly memory consolidation → USER.md
-│       └── health.rs              # Write health.json + self-checks
+│       ├── mod.rs                     # Tick loop
+│       ├── scheduler.rs               # Cron evaluation + task dispatch
+│       ├── proactive.rs               # Proactive check mini-sessions
+│       ├── backup.rs                  # git bundle + sqlite backup
+│       ├── digest.rs                  # Weekly memory consolidation → USER.md
+│       ├── tool_review.rs             # Monthly tool health review
+│       └── health.rs                  # Write health.json + self-checks
 │
 └── tests/
     ├── tool_registry_test.rs
@@ -1949,28 +2211,36 @@ wintermute/
 
 ## Dockerfile.sandbox
 
-Minimal. The agent installs what it needs.
+Ubuntu base. The agent is root and can install anything.
 
 ```dockerfile
-FROM python:3.12-slim
+FROM ubuntu:24.04
 
+# Core: Python + pip + essential CLI tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git jq bc timeout coreutils \
+    python3 python3-pip python3-venv \
+    curl wget git jq bc coreutils ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash wintermute
-USER wintermute
+# GNU timeout is in coreutils (already installed)
+# Agent installs additional packages at runtime via apt-get install
+# and persists them in /scripts/setup.sh
+
 WORKDIR /workspace
 
-# Agent installs packages at runtime via pip install --user
-# Persists in ~/.local until container reset
-# requirements.txt auto-installed on container creation
+# On container creation/reset, the entrypoint runs setup.sh + requirements.txt
+# See executor/docker.rs for the setup flow
 ```
 
 On container creation / reset:
 ```bash
+#!/bin/bash
+# Run by DockerExecutor on container create/reset
+if [ -f /scripts/setup.sh ]; then
+    bash /scripts/setup.sh
+fi
 if [ -f /scripts/requirements.txt ]; then
-    pip install --user -r /scripts/requirements.txt
+    pip install -r /scripts/requirements.txt
 fi
 ```
 
@@ -1985,7 +2255,9 @@ cargo build --release
 # First time setup
 ./wintermute init
 # Creates ~/.wintermute/, config.toml, agent.toml, .env template
-# Initializes git repo in scripts/
+# Creates AGENTS.md from template
+# Creates docs/ with initial documentation
+# Initializes git repo in scripts/ (with setup.sh + requirements.txt)
 # Builds Docker image (if Docker available)
 # Runs migrations on memory.db
 
@@ -1994,7 +2266,7 @@ cargo build --release
 
 # Operations
 ./wintermute status              # Health check
-./wintermute reset               # Recreate sandbox, reinstall deps
+./wintermute reset               # Recreate sandbox (runs setup.sh + requirements.txt)
 ./wintermute backup              # Immediate backup
 ./wintermute backup list         # Show available backups
 ./wintermute backup restore N    # Restore specific backup
@@ -2012,6 +2284,7 @@ Files: Cargo.toml, main.rs, config.rs, credentials.rs
 - Config loading: config.toml (human) + agent.toml (agent)
 - Credential loading from .env
 - Logging setup (tracing, structured JSON)
+- Init flow: create dirs, seed AGENTS.md, seed docs/, init git
 
 **Task 2: Providers + Router**
 Files: providers/*
@@ -2019,16 +2292,17 @@ Files: providers/*
 - AnthropicProvider (native tool calling, streaming)
 - OpenAiProvider (OpenAI-compatible: OpenAI, DeepSeek, Groq, Together, etc.)
 - OllamaProvider (native tool calling via /api/chat)
-- ModelRouter (default → role → skill resolution)
+- ModelRouter (default → role → skill resolution, including oracle)
 - Provider instantiation from config strings ("anthropic/claude-sonnet")
 
 **Task 3: Executor**
 Files: executor/*, tools/docker.rs, Dockerfile.sandbox
 - Executor trait
 - DockerExecutor: bollard, warm container, egress proxy (Squid), all hardening
-  GNU timeout wrapping, health_check, requirements.txt install on reset
+  GNU timeout wrapping, health_check, setup.sh + requirements.txt on reset
 - Egress proxy: generate Squid config from config.toml allowlist,
-  start as sidecar, sandbox routes HTTP(S) through it
+  start as sidecar, sandbox routes HTTP(S) through it.
+  Always allow: package registries + Ubuntu apt repos.
 - DirectExecutor: subprocess in restricted dir, no proxy, warnings logged
 - Auto-detection at startup
 - Redactor: exact match + regex patterns, single chokepoint
@@ -2052,23 +2326,27 @@ Files: telegram/*
 - Non-text media: download voice/photo/document to /workspace/inbox/,
   pass description to agent ("[Voice message: /workspace/inbox/voice.ogg, 12s]")
 - File sending support
+- No-reply filter ([NO_REPLY] suppression + logging)
 - Inline keyboard support (for approvals)
 - Message routing to agent sessions
+- /revert command (git revert HEAD in /scripts)
 
 **Task 6: Agent Loop + Tools**
 Files: agent/*, tools/*
 - SID generator (reads config + state → IDENTITY.md, refreshed by heartbeat)
 - Session router (per-session Tokio tasks, try_send)
 - Agent loop: context assemble → LLM call → tool routing → execute → observe
-- Context assembler with trimming + retry + compaction at 60% session budget
+- Context assembler: SID → AGENTS.md → USER.md → auto-inject memories
+  → conversation → tools → budget warnings. Trimming + retry + compaction
+  at 60% session budget.
 - Budget tracker: atomic counters, per-session + daily, warnings at 70/85/95%
 - Budget exhaustion: session pauses (not killed), user's next message renews
 - Policy gate + egress rules
 - Non-blocking approval manager (short-ID callbacks)
-- 9 core tool implementations
-- Dynamic tool registry (watch /scripts/*.json, hot-reload)
-- create_tool implementation (write files + git commit)
-- Dynamic tool execution (JSON stdin → sandbox → JSON stdout)
+- 10 core tool implementations (including escalate)
+- Dynamic tool registry (watch /scripts/*.json, hot-reload, maintain _meta)
+- create_tool implementation (write files + git commit + init _meta)
+- Dynamic tool execution (JSON stdin → sandbox → JSON stdout → update _meta)
 - Dynamic tool selection (top N by relevance/recency)
 - Browser: chromiumoxide pipe transport (managed Chrome, dedicated profile),
   Docker sidecar fallback (headless, Playwright + Flask). On-demand lifecycle
@@ -2082,22 +2360,24 @@ Files: observer/*
 - LLM extraction (uses observer model)
 - Staging: pending → active promotion
 - Contradiction detection
+- Post-session reflection (if tools created/modified)
 - /memory pending, /memory undo
 
 **Task 8: Heartbeat + Operations**
 Files: heartbeat/*, telegram/commands.rs
 - Tick loop + cron evaluation
 - Scheduled task dispatch (own session + budget)
+- Proactive checks (lightweight mini-sessions, optional)
 - Backup: git bundle for /scripts + sqlite .backup for memory.db
-- Digest: weekly memory consolidation → USER.md (calls observer model,
-  curates profile, archives stale memories, flags contradictions)
+- Digest: weekly memory consolidation → USER.md + AGENTS.md pruning
+- Monthly tool review: health stats, unused/failing/slow tools
 - Health self-checks + structured logging
 - All Telegram commands
 
 ### v1.1 (post-launch)
 
 - **Flatline** — supervisor process. See wintermute-flatline.md.
-  Separate binary, reads logs + health.json + git history,
+  Separate binary, reads logs + health.json + git history + tool _meta,
   diagnoses failures, quarantines bad tools, restarts crashed process,
   proposes fixes via Telegram. Own LLM budget (cheap model).
 - OS-native sandboxing (bubblewrap on Linux, sandbox-exec on macOS)
@@ -2106,6 +2386,8 @@ Files: heartbeat/*, telegram/commands.rs
 - Per-skill model overrides
 - MCP server/client support
 - Web UI (optional, alongside Telegram)
+- Read-only source mount (agent can read its own Rust source)
+- CLI-first tools (any executable, not just Python)
 
 ---
 

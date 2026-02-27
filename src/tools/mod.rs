@@ -9,6 +9,7 @@ pub mod browser_bridge;
 pub mod core;
 pub mod create_tool;
 pub mod docker;
+pub mod escalate;
 pub mod flatline;
 pub mod registry;
 
@@ -17,11 +18,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::agent::budget::DailyBudget;
 use crate::agent::policy::{PolicyError, RateLimiter};
 use crate::agent::TelegramOutbound;
 use crate::executor::redactor::Redactor;
 use crate::executor::Executor;
 use crate::memory::MemoryEngine;
+use crate::providers::router::ModelRouter;
 use crate::providers::ToolDefinition;
 use crate::tools::browser::BrowserBridge;
 
@@ -130,6 +133,10 @@ pub struct ToolRouter {
     max_download_bytes: Option<u64>,
     /// Root directory of Flatline supervisor; None when not installed.
     flatline_root: Option<std::path::PathBuf>,
+    /// Model router for escalation (oracle model resolution).
+    model_router: Option<Arc<ModelRouter>>,
+    /// Shared daily budget for escalation cost tracking.
+    daily_budget: Option<Arc<DailyBudget>>,
 }
 
 impl std::fmt::Debug for ToolRouter {
@@ -156,6 +163,8 @@ impl ToolRouter {
         docker_client: Option<bollard::Docker>,
         max_download_bytes: Option<u64>,
         flatline_root: Option<std::path::PathBuf>,
+        model_router: Option<Arc<ModelRouter>>,
+        daily_budget: Option<Arc<DailyBudget>>,
     ) -> Self {
         Self {
             executor,
@@ -170,6 +179,8 @@ impl ToolRouter {
             docker_client,
             max_download_bytes,
             flatline_root,
+            model_router,
+            daily_budget,
         }
     }
 
@@ -256,6 +267,14 @@ impl ToolRouter {
                 Some(root) => into_tool_result(flatline::flatline_status(root, input).await),
                 None => ToolResult::error("flatline supervisor not installed"),
             },
+            "escalate" => match (&self.model_router, &self.daily_budget) {
+                (Some(router), Some(budget)) => {
+                    into_tool_result(escalate::escalate(router, budget, input).await)
+                }
+                _ => ToolResult::error(
+                    "escalate requires model router and daily budget configuration",
+                ),
+            },
             _ => {
                 if let Some(schema) = self.registry.get(name) {
                     self.registry.record_usage(name);
@@ -286,16 +305,31 @@ impl ToolRouter {
             working_dir: None,
         };
 
-        match self.executor.execute(&command, opts).await {
+        let start = std::time::Instant::now();
+        let exec_result = self.executor.execute(&command, opts).await;
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let result = match exec_result {
             Ok(result) => {
-                if result.success() {
+                let success = result.success();
+                let error_msg = if success { None } else { Some(result.output()) };
+                self.registry
+                    .record_execution(name, success, duration_ms, error_msg.as_deref());
+                if success {
                     ToolResult::success(result.stdout)
                 } else {
                     ToolResult::error(result.output())
                 }
             }
-            Err(e) => ToolResult::error(format!("dynamic tool execution failed: {e}")),
-        }
+            Err(e) => {
+                let msg = format!("dynamic tool execution failed: {e}");
+                self.registry
+                    .record_execution(name, false, duration_ms, Some(&msg));
+                ToolResult::error(msg)
+            }
+        };
+
+        result
     }
 }
 
@@ -324,6 +358,9 @@ impl ToolRouter {
         if self.flatline_root.is_some() {
             defs.push(flatline::flatline_status_tool_definition());
         }
+        if self.model_router.is_some() && self.daily_budget.is_some() {
+            defs.push(escalate::escalate_tool_definition());
+        }
         let max_dynamic = match usize::try_from(max_dynamic) {
             Ok(value) => value,
             Err(_) => usize::MAX,
@@ -336,5 +373,10 @@ impl ToolRouter {
     /// Number of dynamic tools currently registered.
     pub fn dynamic_tool_count(&self) -> usize {
         self.registry.count()
+    }
+
+    /// Access the dynamic tool registry.
+    pub fn registry(&self) -> &Arc<registry::DynamicToolRegistry> {
+        &self.registry
     }
 }

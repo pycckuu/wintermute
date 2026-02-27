@@ -237,6 +237,15 @@ async fn execute_builtin(name: &str, deps: &HeartbeatDeps) -> anyhow::Result<Str
                 prompt.len()
             ))
         }
+        "tool_review" => {
+            let registry = deps.tool_router.registry();
+            super::tool_review::execute_tool_review(
+                registry,
+                &deps.telegram_tx,
+                deps.notify_user_id,
+            )
+            .await
+        }
         other => Err(anyhow::anyhow!("unknown builtin task: {other}")),
     }
 }

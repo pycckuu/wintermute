@@ -23,6 +23,15 @@ pub mod input_guard;
 pub mod media;
 pub mod ui;
 
+/// Check whether a response text should be suppressed (not sent to Telegram).
+///
+/// Returns `true` for `[NO_REPLY]` responses, which the agent uses to
+/// signal silence in group chats or when no response is needed.
+pub fn is_no_reply(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == "[NO_REPLY]" || trimmed.starts_with("[NO_REPLY]")
+}
+
 // ---------------------------------------------------------------------------
 // Shared state for handler injection
 // ---------------------------------------------------------------------------
@@ -75,6 +84,16 @@ pub async fn run_telegram(
             let chat_id = ChatId(msg.user_id);
 
             if let Some(ref text) = msg.text {
+                // Suppress [NO_REPLY] responses (used by agent to signal silence).
+                if is_no_reply(text) {
+                    info!(
+                        event = "no_reply",
+                        user_id = msg.user_id,
+                        "suppressing [NO_REPLY] response"
+                    );
+                    continue;
+                }
+
                 let mut req = outbound_bot
                     .send_message(chat_id, text)
                     .parse_mode(ParseMode::Html);
@@ -266,6 +285,7 @@ async fn dispatch_command(text: &str, state: &SharedState, user_id: i64) -> Stri
             }
         }
         "sandbox" => commands::handle_sandbox(&*state.executor).await,
+        "revert" => commands::handle_revert(&*state.executor).await,
         "backup" => {
             commands::handle_backup_trigger(
                 &state.paths.scripts_dir,

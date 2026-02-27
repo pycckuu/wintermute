@@ -45,6 +45,16 @@ pub struct IdentitySnapshot {
     pub agent_name: String,
     /// Current browser mode (attached to Chrome, standalone sidecar, or unavailable).
     pub browser_mode: BrowserMode,
+    /// Oracle model name for escalation (if configured).
+    pub oracle_model: Option<String>,
+    /// Soul modification mode (notify or approve).
+    pub soul_modification_mode: crate::config::SoulModificationMode,
+    /// Number of docs/ files.
+    pub docs_count: usize,
+    /// Summaries of scheduled tasks (name: description).
+    pub scheduled_task_summaries: Vec<String>,
+    /// Dynamic tool summaries: (name, description, invocations, success_rate).
+    pub dynamic_tool_summaries: Vec<(String, String, u64, f64)>,
 }
 
 /// Render the identity document from a runtime snapshot.
@@ -99,6 +109,19 @@ HOST → browser (CDP or sidecar) + egress-proxy (Squid) → sandbox → service
         );
     }
 
+    // Escalation
+    doc.push_str("## Escalation\n");
+    if let Some(ref oracle) = snap.oracle_model {
+        let _ = writeln!(
+            doc,
+            "You have the `escalate` tool. Use it to ask a more powerful model ({oracle}) for help \
+             when stuck on complex problems. It costs more tokens."
+        );
+    } else {
+        doc.push_str("No oracle model configured. To enable escalation, add `[models.roles] oracle = \"...\"` to config.toml.\n");
+    }
+    doc.push('\n');
+
     // Tools
     doc.push_str("## Your Tools\n");
     let _ = writeln!(
@@ -111,7 +134,19 @@ HOST → browser (CDP or sidecar) + egress-proxy (Squid) → sandbox → service
         "- {} custom tools (agent-created)",
         snap.dynamic_tool_count
     );
-    doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_telegram, create_tool, docker_manage\n");
+    doc.push_str("- Core tools: execute_command, web_fetch (+ save_to for file downloads), web_request, browser, memory_search, memory_save, send_telegram, create_tool, escalate, docker_manage\n");
+
+    // Dynamic tool stats
+    if !snap.dynamic_tool_summaries.is_empty() {
+        doc.push_str("\n### Custom Tool Stats\n");
+        for (name, desc, invocations, success_rate) in &snap.dynamic_tool_summaries {
+            let _ = writeln!(
+                doc,
+                "- `{name}` — {desc} (invocations: {invocations}, success: {:.0}%)",
+                success_rate * 100.0
+            );
+        }
+    }
     doc.push('\n');
 
     // Browser
@@ -153,11 +188,35 @@ HOST → browser (CDP or sidecar) + egress-proxy (Squid) → sandbox → service
     }
     doc.push('\n');
 
+    // Documentation
+    if snap.docs_count > 0 {
+        doc.push_str("## Documentation\n");
+        let _ = writeln!(
+            doc,
+            "You have {} doc(s) in docs/. Browse them when you need context about your own architecture or tools.",
+            snap.docs_count
+        );
+        doc.push('\n');
+    }
+
+    // Scheduled tasks
+    if !snap.scheduled_task_summaries.is_empty() {
+        doc.push_str("## Scheduled Tasks\n");
+        for summary in &snap.scheduled_task_summaries {
+            let _ = writeln!(doc, "- {summary}");
+        }
+        doc.push('\n');
+    }
+
     // Budget
     doc.push_str("## Budget\n");
     let _ = writeln!(doc, "- Session limit: {} tokens", snap.session_budget_limit);
     let _ = writeln!(doc, "- Daily limit: {} tokens", snap.daily_budget_limit);
     doc.push('\n');
+
+    // Silence
+    doc.push_str("## Silence\n");
+    doc.push_str("In group chats or when no response is needed, respond with `[NO_REPLY]`.\nThis suppresses the outbound message entirely.\n\n");
 
     // Privacy boundary
     doc.push_str("## Privacy Boundary\n");
@@ -226,19 +285,29 @@ through tools and config, not by recompiling.
     );
 
     // Self-modification protocol
-    doc.push_str(
-        "\
-## Self-Modification Protocol
-When modifying your own soul or config:
-1. Tell the user what you want to change and why
-2. Show the before/after
-3. Wait for approval (this is a personality change, not a tool call)
-4. Apply via execute_command editing agent.toml
-5. Git commit: \"evolve: {what changed}\"
-6. The change takes effect on the next conversation
-
-",
-    );
+    doc.push_str("## Self-Modification Protocol\n");
+    match snap.soul_modification_mode {
+        crate::config::SoulModificationMode::Notify => {
+            doc.push_str(
+                "Mode: **notify** — you may modify your soul and send the diff to the user.\n\
+                 1. Make the change to agent.toml\n\
+                 2. Show the before/after diff to the user\n\
+                 3. Git commit: \"evolve: {what changed}\"\n\
+                 4. The change takes effect on the next conversation\n\n",
+            );
+        }
+        crate::config::SoulModificationMode::Approve => {
+            doc.push_str(
+                "Mode: **approve** — you must show the before/after and wait for user approval.\n\
+                 1. Tell the user what you want to change and why\n\
+                 2. Show the before/after\n\
+                 3. Wait for explicit approval\n\
+                 4. Apply via execute_command editing agent.toml\n\
+                 5. Git commit: \"evolve: {what changed}\"\n\
+                 6. The change takes effect on the next conversation\n\n",
+            );
+        }
+    }
 
     // What you can help set up
     doc.push_str(

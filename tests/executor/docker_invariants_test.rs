@@ -70,15 +70,27 @@ fn docker_container_sets_pids_limit() {
 }
 
 #[test]
-fn docker_container_runs_as_non_root_user() {
+fn docker_container_runs_as_root() {
     let source = docker_source();
-    assert!(source.contains("user: Some(\"wintermute\".to_owned())"));
+    assert!(
+        source.contains("user: None"),
+        "sandbox should run as root (no explicit user)"
+    );
 }
 
 #[test]
-fn docker_container_has_readonly_rootfs() {
+fn docker_container_has_writable_rootfs() {
     let source = docker_source();
-    assert!(source.contains("readonly_rootfs: Some(true)"));
+    assert!(source.contains("readonly_rootfs: Some(false)"));
+}
+
+#[test]
+fn docker_reset_runs_setup_sh() {
+    let source = docker_source();
+    assert!(
+        source.contains("setup.sh"),
+        "container reset should execute setup.sh"
+    );
 }
 
 #[test]

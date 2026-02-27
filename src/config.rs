@@ -9,6 +9,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Soul modification mode for personality changes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SoulModificationMode {
+    /// Agent modifies soul freely, sends diff notification to user.
+    #[default]
+    Notify,
+    /// Agent shows before/after, waits for user approval before applying.
+    Approve,
+}
+
 /// Top-level human-owned configuration.
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -120,6 +131,10 @@ pub struct PersonalityConfig {
     #[serde(default = "default_personality_name")]
     pub name: String,
 
+    /// Soul modification mode: notify (default) or approve.
+    #[serde(default)]
+    pub soul_modification: SoulModificationMode,
+
     /// System prompt extension controlled by the user/agent config.
     #[serde(default)]
     pub soul: String,
@@ -129,6 +144,7 @@ impl Default for PersonalityConfig {
     fn default() -> Self {
         Self {
             name: default_personality_name(),
+            soul_modification: SoulModificationMode::default(),
             soul: String::new(),
         }
     }
@@ -285,6 +301,18 @@ pub struct HeartbeatConfig {
     /// Tick interval in seconds.
     #[serde(default = "default_heartbeat_interval_secs")]
     pub interval_secs: u64,
+
+    /// Enable proactive behavior checks between user interactions.
+    #[serde(default)]
+    pub proactive: bool,
+
+    /// Minutes between proactive checks (default 30).
+    #[serde(default = "default_proactive_interval_mins")]
+    pub proactive_interval_mins: u32,
+
+    /// Token budget per proactive check (default 5000).
+    #[serde(default = "default_proactive_budget")]
+    pub proactive_budget: u64,
 }
 
 impl Default for HeartbeatConfig {
@@ -292,6 +320,9 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: default_heartbeat_enabled(),
             interval_secs: default_heartbeat_interval_secs(),
+            proactive: false,
+            proactive_interval_mins: default_proactive_interval_mins(),
+            proactive_budget: default_proactive_budget(),
         }
     }
 }
@@ -323,6 +354,10 @@ pub struct LearningConfig {
     /// Auto-promotion threshold for repeated confirmations.
     #[serde(default = "default_auto_promote_threshold")]
     pub auto_promote_threshold: u32,
+
+    /// Enable post-session reflection on tool changes.
+    #[serde(default = "default_true")]
+    pub reflection: bool,
 }
 
 impl Default for LearningConfig {
@@ -331,6 +366,7 @@ impl Default for LearningConfig {
             enabled: default_learning_enabled(),
             promotion_mode: PromotionMode::default(),
             auto_promote_threshold: default_auto_promote_threshold(),
+            reflection: true,
         }
     }
 }
@@ -396,6 +432,10 @@ pub struct RuntimePaths {
     pub user_md: PathBuf,
     /// Flatline supervisor root directory (`~/.wintermute/flatline/`).
     pub flatline_root: PathBuf,
+    /// Lessons-learned document path (`AGENTS.md`).
+    pub agents_md: PathBuf,
+    /// Documentation directory for agent-readable docs.
+    pub docs_dir: PathBuf,
 }
 
 // Default value functions for serde
@@ -450,6 +490,12 @@ fn default_auto_promote_threshold() -> u32 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_proactive_interval_mins() -> u32 {
+    30
+}
+fn default_proactive_budget() -> u64 {
+    5000
 }
 fn default_cdp_port() -> u16 {
     9222
@@ -518,6 +564,8 @@ pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
     let identity_md = root.join("IDENTITY.md");
     let user_md = root.join("USER.md");
     let flatline_root = root.join("flatline");
+    let agents_md = root.join("AGENTS.md");
+    let docs_dir = root.join("docs");
 
     Ok(RuntimePaths {
         root,
@@ -534,6 +582,8 @@ pub fn runtime_paths() -> anyhow::Result<RuntimePaths> {
         identity_md,
         user_md,
         flatline_root,
+        agents_md,
+        docs_dir,
     })
 }
 

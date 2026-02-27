@@ -12,15 +12,18 @@ what a health monitor detects.
 ## The Problem Flatline Solves
 
 Wintermute modifies itself. It writes tools, installs packages, edits
-its own config, accumulates memory. Over time, things break:
+its own config, evolves its personality, accumulates memory. Over time,
+things break:
 
 - A tool the agent wrote has a bug that only surfaces on Tuesdays
 - A pip package update broke an existing tool
+- A bad setup.sh change broke the container on reset
 - The agent got into a reasoning loop and burned through its daily budget
 - Memory got polluted with contradictory facts
-- The container won't start after a bad requirements.txt change
+- The container won't start after a bad apt-get install
 - A scheduled task is failing silently every night
 - The agent's context is bloated with 50 dynamic tools, most unused
+- The agent modified its soul in a way that degraded its helpfulness
 
 The agent can't reliably fix itself WHILE it's broken. A hallucinating
 agent can't diagnose its own hallucinations. A crashed process can't
@@ -37,8 +40,8 @@ with its own PID. If Wintermute crashes, Flatline is still running. If
 Flatline crashes, Wintermute is unaffected.
 
 **D2: Read-mostly.** Flatline reads logs, reads git history, reads memory.db,
-reads health files. It RARELY writes — only to apply fixes. Most of the
-time it's a passive observer that occasionally speaks up.
+reads health files, reads tool _meta. It RARELY writes — only to apply
+fixes. Most of the time it's a passive observer that occasionally speaks up.
 
 **D3: Escalate before acting.** Flatline tells the user what's wrong and
 what it wants to do BEFORE doing it. For critical fixes (Wintermute is
@@ -70,8 +73,12 @@ Quarantine a tool, not delete it.
 │                                         ↓ reads + writes      │
 │  ~/.wintermute/                                              │
 │  ├── logs/*.jsonl          ← Flatline reads these              │
-│  ├── scripts/.git/         ← Flatline inspects + reverts       │
+│  ├── scripts/                                                  │
+│  │   ├── .git/             ← Flatline inspects + reverts       │
+│  │   ├── setup.sh          ← Flatline reverts on bad install   │
+│  │   └── *.json (_meta)    ← Flatline reads tool health        │
 │  ├── data/memory.db        ← Flatline reads (never writes)     │
+│  ├── AGENTS.md             ← Flatline reads (context for diag) │
 │  ├── health.json           ← Wintermute writes, Flatline reads │
 │  ├── flatline/                                                  │
 │  │   ├── state.db          ← Flatline's own state              │
@@ -92,9 +99,9 @@ Quarantine a tool, not delete it.
 
 Flatline and Wintermute communicate through the filesystem, not IPC.
 No sockets, no shared memory, no message passing. Flatline reads what
-Wintermute writes (logs, health file, git, db). Flatline writes fixes
-to the filesystem (git revert, quarantine marker). Wintermute picks
-up changes on its next cycle.
+Wintermute writes (logs, health file, git, db, tool schemas). Flatline
+writes fixes to the filesystem (git revert, quarantine marker). Wintermute
+picks up changes on its next cycle.
 
 The one exception: Flatline can send Telegram messages to the user
 (using the same bot token, different message thread or prefix).
@@ -121,7 +128,10 @@ Key events Flatline cares about:
 - `tool_call` with high `duration_ms` — performance degradation
 - `budget` approaching limits — cost anomalies
 - `llm_call` with retries — model issues
+- `escalation` — agent needed help from oracle
 - `approval` events — what the user is being asked
+- `soul_modified` — agent changed its personality
+- `no_reply` — agent chose silence (group chat or proactive)
 - `error` level anything — something unexpected
 
 ### 2. Health File
@@ -138,6 +148,7 @@ Wintermute writes ~/.wintermute/health.json every heartbeat cycle:
   "active_sessions": 1,
   "memory_db_size_mb": 12,
   "scripts_count": 23,
+  "dynamic_tools_count": 18,
   "budget_today": { "used": 120000, "limit": 5000000 },
   "last_error": null
 }
@@ -154,10 +165,15 @@ Flatline reads git log to understand what changed and when:
 a1b2c3d  2026-02-19 14:00  create tool: deploy_check
 f4e5d6a  2026-02-19 13:45  update config: add scheduled task
 8c9d0e1  2026-02-18 09:00  create tool: news_digest
+b2c3d4e  2026-02-17 22:00  setup: add ffmpeg
+d5e6f7g  2026-02-17 21:30  evolve: more concise communication
 ```
 
 Correlates changes with failures: "deploy_check started failing at
 14:05, and the last change to deploy_check was at 14:00."
+
+Also tracks setup.sh and soul changes — these can cause subtle
+failures (broken container on reset, degraded agent behavior).
 
 ### 4. Memory Database
 
@@ -166,15 +182,48 @@ Flatline reads memory.db (read-only connection) to check for:
 - Contradictions (conflicting facts with similar embeddings)
 - Stale skills (tools referenced in memory that no longer exist)
 
-### 5. Tool Execution Stats
+### 5. Tool Health Metadata
 
-Derived from logs. Flatline maintains a rolling scorecard per tool:
+Dynamic tool schemas include a `_meta` field maintained by Wintermute's
+tool registry:
+
+```json
+{
+  "name": "deploy_check",
+  "_meta": {
+    "created_at": "2026-02-19T14:00:00Z",
+    "last_used": "2026-02-25T08:00:00Z",
+    "invocations": 30,
+    "success_rate": 0.17,
+    "avg_duration_ms": 28000,
+    "last_error": "timeout at 120s",
+    "version": 3
+  }
+}
+```
+
+Flatline reads `_meta` directly from `/scripts/*.json` for:
+- Pre-aggregated health stats (no log parsing needed for basic view)
+- Tool age and usage patterns
+- Success rate trends (compare current _meta with previous git versions)
+
+Flatline still uses log-based stats for real-time alerting (detecting
+failures as they happen), but `_meta` provides the persistent,
+pre-aggregated view for reports and trend analysis.
+
+### 6. Tool Execution Stats (from logs)
+
+Derived from logs for real-time awareness. Flatline maintains a rolling
+scorecard per tool:
 
 ```
 news_digest:    last 30 days: 28 success, 2 failure, avg 1.2s
 deploy_check:   last 30 days: 5 success, 25 failure, avg 28s  ← problem
 weather:        last 30 days: 30 success, 0 failure, avg 0.8s
 ```
+
+This complements `_meta` — logs give real-time events, `_meta` gives
+the aggregated picture.
 
 ---
 
@@ -196,11 +245,14 @@ reactive checks triggered by log events.
 - Timeout rate per tool
 - Tools that haven't been used in 30+ days (candidates for cleanup)
 - Tools that were recently changed and started failing
+- Success rate declining over time (compare _meta across git versions)
+- Latency increasing over time
 
 **Budget health:**
 - Burn rate: at current pace, will daily budget be exhausted early?
 - Cost per session trending up? (possible reasoning loops)
 - Unusual spike in tool calls per turn?
+- Escalation frequency (too many oracle calls = possible model mismatch)
 
 **Memory health:**
 - Database size growth rate
@@ -212,13 +264,23 @@ reactive checks triggered by log events.
 - Is a scheduled task consistently failing?
 - Is notify=true but user never receives output?
 
+**Sandbox health:**
+- Does setup.sh execute cleanly?
+- Are there orphaned packages (in container but not in setup.sh)?
+- Is the container using excessive disk?
+
+**Personality health:**
+- Was the soul recently modified? (log soul_modified events)
+- Has agent behavior degraded after soul change? (more errors, more
+  escalations, user complaints)
+
 ### Diagnosis Flow
 
 ```
 Event/Timer
     │
     ▼
-Gather evidence (logs, health.json, git log, memory stats)
+Gather evidence (logs, health.json, git log, _meta, memory stats)
     │
     ▼
 Pattern matching (rules, not LLM — fast, cheap)
@@ -267,10 +329,21 @@ report to user and stop retrying.
 **Detection:** health.json shows container_healthy: false repeatedly.
 Or Wintermute logs show Docker errors.
 
-**Fix:** Reset sandbox (wintermute reset equivalent). If that fails,
-try removing last requirements.txt change (git revert) and reset again.
+**Fix:** Reset sandbox (`wintermute reset` equivalent — recreates container,
+runs setup.sh). If setup.sh itself is broken, try reverting the last
+setup.sh change (`git revert` the relevant commit) and reset again.
 
 **Severity:** High. Auto-fix first attempt, escalate on failure.
+
+### Pattern: Bad setup.sh
+
+**Detection:** Container creation/reset fails AND git log shows recent
+change to setup.sh.
+
+**Fix:** Git revert the setup.sh change, reset sandbox again. Notify user
+with the offending change.
+
+**Severity:** High. Auto-fix (revert + reset), notify.
 
 ### Pattern: Budget exhaustion loop
 
@@ -278,7 +351,7 @@ try removing last requirements.txt change (git revert) and reset again.
 session using >3× average tokens.
 
 **Fix:** No auto-fix. Alert user immediately. Include breakdown of what
-consumed the budget (which sessions, which tools).
+consumed the budget (which sessions, which tools, escalation calls).
 
 **Severity:** Medium. Report only.
 
@@ -302,7 +375,8 @@ Review with /memory pending or switch to auto-promote."
 
 ### Pattern: Dynamic tool sprawl
 
-**Detection:** >40 dynamic tools. Or >15 tools unused in 30+ days.
+**Detection:** >40 dynamic tools. Or >15 tools unused in 30+ days
+(read directly from _meta.last_used).
 
 **Fix:** No auto-fix. Report to user with list of unused tools and
 suggestion to archive.
@@ -318,6 +392,29 @@ Or host disk <10% free.
 files. Auto-prune logs older than retention period.
 
 **Severity:** Medium. Auto-prune logs, suggest rest.
+
+### Pattern: Soul regression
+
+**Detection:** soul_modified event in logs AND subsequent increase in
+error rate, escalation frequency, or user-initiated /revert commands.
+
+**Fix:** No auto-fix. Report to user: "Agent personality was modified
+at {time}. Since then, error rate increased from X% to Y%. Consider
+reviewing the change or running /revert."
+
+**Severity:** Low. Report only.
+
+### Pattern: Excessive escalation
+
+**Detection:** >10 escalation calls per day, or >3 per session.
+
+**Fix:** No auto-fix. Report to user: "Agent is escalating to the
+oracle model frequently. This suggests the default model may be
+underpowered for the current workload, or the agent is stuck in
+a pattern. Consider upgrading the default model or reviewing
+recent tasks."
+
+**Severity:** Low. Report only.
 
 ---
 
@@ -347,6 +444,7 @@ Every fix is persisted in flatline/patches/:
   "evidence": {
     "tool": "deploy_check",
     "failure_rate": 0.83,
+    "failure_rate_source": "_meta",
     "last_change": "a1b2c3d",
     "change_time": "2026-02-19T14:00:00Z"
   },
@@ -372,6 +470,7 @@ After applying a fix, Flatline checks if it worked:
 - Git revert: does the previous version pass a test execution?
 - Process restart: is health.json fresh again?
 - Scheduled task disable: no more failure events for that task?
+- Setup.sh revert: does container reset succeed now?
 
 If verification fails, escalate to user.
 
@@ -391,8 +490,8 @@ Flatline uses its own model (configured separately from Wintermute):
 ```toml
 # flatline.toml
 [model]
-default = "ollama/qwen3:8b"       # cheap, local
-# fallback = "anthropic/claude-haiku-4-5-20251001"
+default = "anthropic/claude-opus-4-6"
+# fallback = "ollama/qwen3:8b"
 
 [budget]
 max_tokens_per_day = 100000       # Flatline's own budget, separate from Wintermute
@@ -416,13 +515,19 @@ the likely root cause.
 {health.json contents}
 
 ## Tool Stats
-{failure rates for tools involved}
+{failure rates for tools involved, from _meta + logs}
+
+## Recent Soul Changes
+{if any soul_modified events in last 48h, include the diff}
+
+## AGENTS.md
+{current content — may contain relevant known issues}
 
 Respond with:
 1. Root cause (one sentence)
 2. Confidence (high/medium/low)
 3. Recommended action (one of: revert_commit, quarantine_tool,
-   restart_process, reset_sandbox, report_only)
+   restart_process, reset_sandbox, revert_setup, report_only)
 4. Details (what specifically to revert/quarantine/report)
 ```
 
@@ -446,9 +551,12 @@ can distinguish them from Wintermute's messages.
 ✅ Container: healthy
 ✅ Budget: 12% used today
 ⚠️  deploy_check: 83% failure rate (last 24h)
+📉 news_digest: latency up 40% this week (1.2s → 1.7s)
 ✅ 22 tools active, all others healthy
+📊 3 tools unused >30 days: old_scraper, test_tool, csv_parser
 ✅ Memory: 1,247 facts, 89 procedures
 📦 Backup: last successful 03:00 today
+🧠 Soul: unchanged since Feb 15
 ```
 
 **Alert** (immediate, triggered by issue):
@@ -473,11 +581,25 @@ Last error: "ModuleNotFoundError: feedparser"
 
 I'd like to:
 1. Disable the scheduled task
-2. Add feedparser to requirements.txt
-3. Reset the sandbox to install it
+2. Add feedparser to setup.sh
+3. Reset the sandbox
 4. Re-enable the task
 
 [✅ Approve All] [🔧 Let Me Handle It]
+```
+
+**Setup.sh alert:**
+```
+🩺 Flatline — Alert
+
+Container reset failed. setup.sh exited with code 1.
+Last change to setup.sh was 2 hours ago (commit b2c3d4e):
+  + apt-get install -y libfoo-dev
+
+I've reverted setup.sh and reset the sandbox.
+The previous version is working.
+
+[🔍 View Diff] [↩️ Undo My Fix]
 ```
 
 ### Report Frequency
@@ -489,6 +611,18 @@ daily_health = "08:00"           # daily summary, or false to disable
 alert_cooldown_mins = 30         # don't spam about same issue
 ```
 
+### Daily Report Enhancements
+
+The daily health report includes tool ecosystem hints:
+- Tools with declining success rates (compare _meta over git history)
+- Tools not used in >30 days (from _meta.last_used)
+- Tools with increasing latency trends
+- Upcoming monthly tool_review task status
+- Recent soul changes and any correlated behavior shifts
+
+This keeps the user aware of gradual degradation between monthly
+tool reviews.
+
 ---
 
 ## Flatline's Own State
@@ -496,7 +630,7 @@ alert_cooldown_mins = 30         # don't spam about same issue
 Flatline maintains its own SQLite database (flatline/state.db):
 
 ```sql
--- Rolling tool health stats
+-- Rolling tool health stats (from logs, real-time)
 CREATE TABLE tool_stats (
     tool_name TEXT NOT NULL,
     window_start TEXT NOT NULL,    -- hourly buckets
@@ -537,6 +671,19 @@ CREATE TABLE updates (
     rollback_reason TEXT,         -- NULL if successful
     migration_log TEXT            -- stdout/stderr from migration script
 );
+
+-- Soul change tracking
+CREATE TABLE soul_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,
+    diff_summary TEXT,
+    error_rate_before REAL,       -- 24h window before change
+    error_rate_after REAL,        -- populated after 24h
+    escalation_rate_before REAL,
+    escalation_rate_after REAL,
+    flagged BOOLEAN DEFAULT FALSE -- true if regression detected
+);
 ```
 
 ---
@@ -550,8 +697,12 @@ through the filesystem and signals.
 |---------------|-----------|
 | Read logs | Tail ~/.wintermute/logs/*.jsonl |
 | Read health | Read ~/.wintermute/health.json |
+| Read tool health | Parse _meta from /scripts/*.json |
 | Read git history | git -C ~/.wintermute/scripts log |
+| Read lessons | Read ~/.wintermute/AGENTS.md |
 | Revert a tool | git -C ~/.wintermute/scripts revert {commit} |
+| Revert setup.sh | git -C ~/.wintermute/scripts revert {commit} |
+| Revert soul change | git -C ~/.wintermute/scripts revert {commit} |
 | Quarantine a tool | mv {tool}.json {tool}.json.quarantined |
 | Restart Wintermute | SIGTERM → wait → SIGKILL if needed → start |
 | Reset sandbox | wintermute reset (CLI command) |
@@ -564,6 +715,7 @@ through the filesystem and signals.
 Wintermute picks up changes:
 - /scripts/*.json changes → hot-reload detects missing/new tools
 - agent.toml changes → picked up on next heartbeat cycle
+- setup.sh changes → applied on next container reset
 - Container reset → Wintermute reconnects to new container
 - Process restart → Wintermute starts fresh, loads latest state
 
@@ -680,7 +832,7 @@ Check GitHub Releases API
                         │    chmod +x wintermute           │
                         │                                  │
                         │ 5. Recreate sandbox container    │
-                        │    (new image, same volumes)     │
+                        │    (new image, runs setup.sh)    │
                         │                                  │
                         │ 6. Start Wintermute              │
                         │                                  │
@@ -735,7 +887,7 @@ Restore previous binary:  mv wintermute.prev wintermute
 Restore previous image:   retag old image
     │
     ▼
-Recreate container with old image
+Recreate container with old image (runs setup.sh)
     │
     ▼
 Start Wintermute (old version)
@@ -850,7 +1002,7 @@ swap. This means:
 1. `docker pull` can happen while Wintermute is still running
 2. Old containers keep running on old images until restart
 3. After binary swap, Wintermute's startup recreates the sandbox
-   container from the new image (same volumes, new code)
+   container from the new image (runs setup.sh on the new base)
 4. Browser sidecar uses the new image on next launch (on-demand)
 
 If `docker pull` fails (network, registry down), the update is deferred.
@@ -870,8 +1022,9 @@ version tag for reproducibility.
 - **Cannot change budget limits** — that's config.toml
 - **Cannot approve things on behalf of the user** — only Wintermute's
   approval flow handles that
-- **Cannot install packages** — that's Wintermute's job
+- **Cannot install packages** — that's Wintermute's job (via sandbox)
 - **Cannot access the sandbox** — no Docker interaction (except image pulls for updates)
+- **Cannot modify AGENTS.md** — that's the agent's document
 
 Flatline is deliberately less powerful than Wintermute. It can roll back,
 restart, quarantine, disable, update binaries/images, and report. It
@@ -892,6 +1045,7 @@ wintermute/
 │   │   ├── config.rs       # flatline.toml loading
 │   │   ├── watcher.rs      # Log tailing + health file monitoring
 │   │   ├── stats.rs        # Rolling tool/budget/memory statistics
+│   │   ├── meta_reader.rs  # Read _meta from /scripts/*.json
 │   │   ├── patterns.rs     # Known failure pattern matching
 │   │   ├── diagnosis.rs    # LLM-based diagnosis (novel problems)
 │   │   ├── fixer.rs        # Fix proposal + application + verification
@@ -947,6 +1101,7 @@ BindsTo=wintermute.service
 ExecStart=/usr/local/bin/flatline start
 Restart=always
 RestartSec=5
+RestartForceExitStatus=10
 User=wintermute
 
 [Install]
@@ -965,8 +1120,8 @@ Flatline stays running and handles the restart.
 # flatline.toml
 
 [model]
-default = "ollama/qwen3:8b"
-# fallback = "anthropic/claude-haiku-4-5-20251001"
+default = "anthropic/claude-opus-4-6"
+# fallback = "ollama/qwen3:8b"
 
 [budget]
 max_tokens_per_day = 100_000
@@ -983,6 +1138,8 @@ memory_pending_alert = 100         # alert if >100 pending memories
 unused_tool_days = 30              # suggest cleanup after 30 days unused
 max_tool_count_warning = 40        # warn about tool sprawl
 disk_warning_gb = 5                # warn when ~/.wintermute > 5GB
+escalation_alert_daily = 10        # alert if >10 oracle calls per day
+soul_regression_window_hours = 24  # monitor behavior for 24h after soul change
 
 [auto_fix]
 enabled = true
@@ -990,12 +1147,14 @@ restart_on_crash = true            # auto-restart Wintermute
 quarantine_failing_tools = true    # auto-quarantine after threshold
 disable_failing_tasks = true       # auto-disable after 3 consecutive failures
 revert_recent_changes = true       # auto-revert if correlated with failure
+revert_bad_setup = true            # auto-revert setup.sh if container fails
 max_auto_restarts_per_hour = 3     # stop retrying after N restarts
 
 [reports]
 daily_health = "08:00"             # daily health summary
 alert_cooldown_mins = 30           # don't repeat same alert within window
 telegram_prefix = "🩺 Flatline"
+include_tool_trends = true         # include tool health trends in daily report
 
 [update]
 enabled = true                     # check for updates
@@ -1028,6 +1187,9 @@ Flatline dependencies:
 - [x] health.json written by heartbeat
 - [x] Git-versioned /scripts
 - [x] agent.toml separate from config.toml
+- [x] Tool _meta in dynamic tool schemas
+- [x] setup.sh for sandbox dependency persistence
+- [x] soul_modified, escalation, no_reply log events
 
 ### Flatline Build Order
 
@@ -1035,19 +1197,24 @@ Flatline dependencies:
 - Scaffold: CLI, config loading, process management
 - Log watcher: tail .jsonl files, parse events
 - Health file monitor: detect stale health.json
+- Meta reader: parse _meta from /scripts/*.json
 - Stats engine: rolling window per-tool success/failure rates
+  (from both logs and _meta)
 
 **Week 2: Patterns + Fixes**
 - Pattern matcher: all known patterns from the design
 - Fix proposer: generate fix records from pattern matches
-- Fix applier: git revert, quarantine, restart, disable task
+- Fix applier: git revert, quarantine, restart, disable task,
+  revert setup.sh + reset sandbox
 - Verification: check if fix worked after application
 
 **Week 3: Reporting + LLM**
-- Telegram reporter: alerts, proposals, daily health
+- Telegram reporter: alerts, proposals, daily health (with tool
+  trends and soul change tracking)
 - LLM diagnosis: novel problem analysis via cheap model
 - Approval flow: propose → user approves → apply
-- State database: tool stats, fix history, suppressions
+- State database: tool stats, fix history, suppressions,
+  soul change tracking
 
 **Week 4: Auto-Update**
 - GitHub Releases API client: check latest, compare semver
@@ -1073,6 +1240,7 @@ Flatline dependencies:
 
 **Predictive health:** Detect trends before they become failures.
 Tool X's latency has been increasing 10% per week — investigate.
+Compare _meta snapshots across git history for trend analysis.
 
 **Automated testing:** After reverting a tool, run the tool with
 a sample input to verify it works before declaring it fixed.
@@ -1082,7 +1250,11 @@ a sample input to verify it works before declaring it fixed.
 
 **Self-improvement suggestions:** "Tool X is called 50 times/day
 but takes 30 seconds each time. You could optimize it by caching
-the API response."
+the API response." Based on _meta analysis.
 
 **Anomaly detection:** Learn normal behavior patterns, alert on
 deviations without predefined rules. Requires more historical data.
+
+**AGENTS.md integration:** When Flatline diagnoses and fixes a novel
+issue, propose a new entry for AGENTS.md so the agent learns from
+the failure pattern.

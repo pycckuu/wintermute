@@ -23,6 +23,7 @@ pub fn handle_help() -> String {
         "/tools — list dynamic tools",
         "/tools &lt;name&gt; — show detail for a specific tool",
         "/sandbox — container/executor status",
+        "/revert — git revert HEAD in /scripts",
         "/backup — trigger a backup",
     ]
     .join("\n")
@@ -187,6 +188,31 @@ pub async fn handle_sandbox(executor: &dyn Executor) -> String {
         executor.kind(),
         escape_html(&health),
     )
+}
+
+/// Handle /revert: git revert HEAD in /scripts via the sandbox executor.
+pub async fn handle_revert(executor: &dyn Executor) -> String {
+    let opts = crate::executor::ExecOptions {
+        timeout: std::time::Duration::from_secs(30),
+        working_dir: Some(std::path::PathBuf::from("/scripts")),
+    };
+
+    match executor.execute("git revert HEAD --no-edit", opts).await {
+        Ok(result) => {
+            if result.success() {
+                format!(
+                    "<b>Revert successful</b>\n<pre>{}</pre>",
+                    escape_html(result.output().trim())
+                )
+            } else {
+                format!(
+                    "<b>Revert failed</b>\n<pre>{}</pre>",
+                    escape_html(result.output().trim())
+                )
+            }
+        }
+        Err(e) => format!("Revert error: {}", escape_html(&e.to_string())),
+    }
 }
 
 /// Trigger an immediate backup.

@@ -20,6 +20,7 @@ fn system_prompt_includes_personality() {
         "You are a helpful AI.",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &[],
@@ -35,6 +36,7 @@ fn system_prompt_includes_docker_executor() {
         "",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &[],
@@ -48,6 +50,7 @@ fn system_prompt_includes_docker_executor() {
 fn system_prompt_includes_direct_executor() {
     let prompt = assemble_system_prompt(
         "",
+        None,
         None,
         None,
         ExecutorKind::Direct,
@@ -88,6 +91,7 @@ fn system_prompt_includes_memories_when_provided() {
         "personality",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &memories,
@@ -107,6 +111,7 @@ fn system_prompt_omits_memory_section_when_empty() {
         "personality",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &[],
@@ -120,6 +125,7 @@ fn system_prompt_omits_memory_section_when_empty() {
 fn system_prompt_includes_pending_approvals() {
     let prompt = assemble_system_prompt(
         "personality",
+        None,
         None,
         None,
         ExecutorKind::Docker,
@@ -137,6 +143,7 @@ fn system_prompt_omits_approvals_when_zero() {
         "personality",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &[],
@@ -150,6 +157,7 @@ fn system_prompt_omits_approvals_when_zero() {
 fn system_prompt_includes_current_time() {
     let prompt = assemble_system_prompt(
         "",
+        None,
         None,
         None,
         ExecutorKind::Docker,
@@ -167,6 +175,7 @@ fn system_prompt_includes_identity_document_when_provided() {
         "personality",
         Some("# Wintermute\nYou are Wintermute."),
         None,
+        None,
         ExecutorKind::Docker,
         0,
         &[],
@@ -183,6 +192,7 @@ fn system_prompt_includes_dynamic_tool_count() {
         "",
         None,
         None,
+        None,
         ExecutorKind::Docker,
         5,
         &[],
@@ -196,6 +206,7 @@ fn system_prompt_includes_dynamic_tool_count() {
 fn system_prompt_includes_user_md_when_provided() {
     let prompt = assemble_system_prompt(
         "personality",
+        None,
         None,
         Some("# Preferences\n- Dark mode\n- Vim keybindings"),
         ExecutorKind::Docker,
@@ -214,6 +225,7 @@ fn system_prompt_omits_user_md_when_empty() {
     let prompt = assemble_system_prompt(
         "personality",
         None,
+        None,
         Some(""),
         ExecutorKind::Docker,
         0,
@@ -222,6 +234,39 @@ fn system_prompt_omits_user_md_when_empty() {
         "2026-02-19 12:00:00 UTC",
     );
     assert!(!prompt.contains("Long-Term Memory"));
+}
+
+#[test]
+fn system_prompt_includes_agents_md_when_provided() {
+    let prompt = assemble_system_prompt(
+        "personality",
+        None,
+        Some("- Always validate tool input before execution\n- Use JSON for structured output"),
+        None,
+        ExecutorKind::Docker,
+        0,
+        &[],
+        0,
+        "2026-02-19 12:00:00 UTC",
+    );
+    assert!(prompt.contains("Lessons Learned"));
+    assert!(prompt.contains("Always validate tool input"));
+}
+
+#[test]
+fn system_prompt_omits_agents_md_when_empty() {
+    let prompt = assemble_system_prompt(
+        "personality",
+        None,
+        Some(""),
+        None,
+        ExecutorKind::Docker,
+        0,
+        &[],
+        0,
+        "2026-02-19 12:00:00 UTC",
+    );
+    assert!(!prompt.contains("Lessons Learned"));
 }
 
 // ---------------------------------------------------------------------------

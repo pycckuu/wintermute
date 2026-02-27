@@ -8,6 +8,7 @@
 //! a cheap/local model (resolved via the "observer" role) to minimize cost.
 
 pub mod extractor;
+pub mod reflection;
 pub mod staging;
 
 use std::sync::Arc;
@@ -32,6 +33,8 @@ pub struct ObserverEvent {
     pub user_id: i64,
     /// Snapshot of recent conversation messages.
     pub messages: Vec<Message>,
+    /// Names of tools created or modified during this session.
+    pub tools_modified: Vec<String>,
 }
 
 /// Shared dependencies for the observer pipeline.
@@ -123,6 +126,21 @@ pub async fn run_observer(deps: ObserverDeps, mut event_rx: mpsc::Receiver<Obser
             Err(e) => {
                 error!(error = %e, "observer staging failed");
                 continue;
+            }
+        }
+
+        // Run post-session reflection on modified tools.
+        if deps.learning_config.reflection && !event.tools_modified.is_empty() {
+            if let Err(e) = reflection::reflect_on_tools(
+                &event.tools_modified,
+                &deps.router,
+                &deps.daily_budget,
+                &deps.memory,
+                &deps.redactor,
+            )
+            .await
+            {
+                warn!(error = %e, "post-session reflection failed");
             }
         }
 
