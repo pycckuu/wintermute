@@ -86,12 +86,28 @@ launchctl load ~/Library/LaunchAgents/com.wintermute.agent.plist
 launchctl load ~/Library/LaunchAgents/com.wintermute.flatline.plist
 ```
 
+To restart:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.wintermute.agent
+launchctl kickstart -k gui/$(id -u)/com.wintermute.flatline
+```
+
 To stop:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.wintermute.agent.plist
 launchctl unload ~/Library/LaunchAgents/com.wintermute.flatline.plist
 ```
+
+Check status:
+
+```bash
+launchctl list | grep wintermute
+launchctl list | grep flatline
+```
+
+Logs are at `/tmp/wintermute.{out,err}.log` and `/tmp/flatline.{out,err}.log`.
 
 ## License
 
